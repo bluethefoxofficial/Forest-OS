@@ -1,0 +1,404 @@
+#include "include/task.h"
+#include "include/memory.h"
+#include "include/screen.h"
+#include "include/panic.h"
+#include "include/util.h"
+#include "include/elf.h"
+#include "include/interrupt.h" // For context switching using new system
+#include "include/gdt.h"
+
+// Explicit forward declaration to help compiler resolve implicit declaration
+extern page_directory_t* vmm_get_current_page_directory(void);
+extern string long_to_string(long n);
+
+#define KERNEL_STACK_SIZE 8192 // 8KB for kernel stack per task
+#define USER_STACK_SIZE 4    // 4 pages, 16KB for user stack
+// USER_STACK_TOP is defined in memory.h
+
+task_t* current_task = 0;
+task_t* ready_queue_head = 0;
+static uint32 next_task_id = 1;
+
+// Temporary stack for initial task setup
+// This will be replaced by a proper kernel stack for each task
+static uint8 initial_kernel_stack[KERNEL_STACK_SIZE] __attribute__((aligned(4096))); 
+
+// Helper function to set up initial CPU state for a new task
+// This function prepares the kernel stack for the new task such that
+// when context_switch_asm loads this task, it finds a valid stack frame
+// for popa/popf/iret to jump to user mode.
+static void setup_initial_cpu_state(task_t* task, uint32 entry_point, uint32 user_stack_top, uint32 kernel_stack_top) {
+    // The kernel stack for the new task will look like this (from high address to low):
+    // ...
+    // [iret frame] -- pushed by hardware if interrupt, or simulated here
+    // [general purpose registers] -- pushed by pusha, or simulated here
+    // The task->kernel_stack will point to the saved ESP of general purpose regs.
+
+    // Start with the highest address of the allocated kernel stack
+    uint32* stack_ptr = (uint32*)kernel_stack_top;
+
+    // Simulate the IRET frame (pushed last, popped first by IRET)
+    *(--stack_ptr) = 0x23;          // SS (user data segment, ring 3)
+    *(--stack_ptr) = user_stack_top; // ESP (user stack pointer)
+    *(--stack_ptr) = 0x202;         // EFLAGS (enable interrupts, bit 2 is always 1)
+    *(--stack_ptr) = 0x1B;          // CS (user code segment, ring 3)
+    *(--stack_ptr) = entry_point;   // EIP (entry point of the ELF)
+
+    // Simulate the PUSHA-saved general purpose registers
+    // (order: EDI, ESI, EBP, ESP (old), EBX, EDX, ECX, EAX)
+    // The ESP pushed by PUSHA is the stack pointer *before* PUSHA.
+    // We can put an arbitrary value here, it won't be used for iret.
+    // But it makes the stack frame consistent.
+    *(--stack_ptr) = 0; // EDI
+    *(--stack_ptr) = 0; // ESI
+    *(--stack_ptr) = 0; // EBP
+    *(--stack_ptr) = 0; // ESP (value before PUSHA; dummy value)
+    *(--stack_ptr) = 0; // EBX
+    *(--stack_ptr) = 0; // EDX
+    *(--stack_ptr) = 0; // ECX
+    *(--stack_ptr) = 0; // EAX
+
+    // The task->kernel_stack should now point to this location
+    // which is the top of the simulated stack frame for context switching.
+    task->kernel_stack = (uint32)stack_ptr;
+}
+
+
+void tasks_init(void) {
+    // Initialize the scheduler and create the initial task (kernel task)
+
+    // Create the first task for the currently running kernel.
+    // This task will be "current_task" from now on.
+    task_t* kernel_task = (task_t*)kmalloc(sizeof(task_t));
+    if (!kernel_task) {
+        kernel_panic("Failed to allocate memory for kernel task");
+    }
+
+    kernel_task->id = next_task_id++;
+    kernel_task->state = TASK_STATE_RUNNING;
+    kernel_task->page_directory = vmm_get_current_page_directory(); // Use current kernel PD
+    
+    // The initial kernel stack is statically allocated. Its top address is passed here.
+    // For the initial kernel task, we don't save/restore a full CPU state in the same way
+    // as user tasks. Its context is the kernel itself.
+    // This field will be updated by the first context switch *away* from the kernel_task.
+    kernel_task->kernel_stack_base = (uint32)initial_kernel_stack;
+    kernel_task->kernel_stack = (uint32)&initial_kernel_stack[KERNEL_STACK_SIZE];
+    gdt_set_kernel_stack(kernel_task->kernel_stack);
+    
+    // No explicit CPU state save for the initial kernel task's creation.
+    // It will be saved upon its first preemption.
+
+    // No ELF info for the kernel task itself
+    memory_set((uint8*)&kernel_task->elf_info, 0, sizeof(elf_load_info_t));
+
+    kernel_task->priority = 1; // Default priority
+    kernel_task->ticks_left = 0; // Will be set by scheduler
+    kernel_task->next = 0;
+
+    current_task = kernel_task;
+    ready_queue_head = kernel_task; // Add kernel task to ready queue
+    
+    print("[TASK] Initialized tasking system. Kernel task ID: ");
+    print(int_to_string(current_task->id));
+    print("\n");
+}
+
+
+task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name) {
+    task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
+    if (!new_task) {
+        print_colored("[TASK] Failed to allocate memory for new task: ", 0x0C, 0x00);
+        print(name);
+        print("\n");
+        return 0;
+    }
+
+    new_task->id = next_task_id++;
+    new_task->state = TASK_STATE_READY;
+    new_task->priority = 1; // Default priority
+    new_task->ticks_left = 0; // Will be set by scheduler
+    new_task->next = 0; // Will be added to ready queue later
+
+    // 1. Load ELF into a new page directory
+    elf_load_info_t elf_info;
+    int status = elf_load_executable(elf_data, elf_size, &elf_info);
+    if (status != 0 || !elf_info.valid || elf_info.entry_point == 0) {
+        print_colored("[TASK] Failed to load ELF for task: ", 0x0C, 0x00);
+        print(name);
+        print(" (status: ");
+        print(int_to_string(status));
+        print(")\n");
+        kfree(new_task);
+        return 0;
+    }
+    new_task->elf_info = elf_info;
+    new_task->page_directory = (page_directory_t*)elf_info.page_directory;
+
+    // 2. Allocate and map user stack for the new task
+    // It is important to switch to the new page directory to map pages into it
+    // because vmm_map_page maps into the *current* page directory.
+    // However, elf_load_executable already switched to the new page directory when loading the ELF.
+    // So, we just need to ensure the correct page directory is active.
+    page_directory_t* current_pd_ptr = vmm_get_current_page_directory();
+    vmm_switch_page_directory((page_directory_t*)elf_info.page_directory);
+    for (int i = 0; i < USER_STACK_SIZE; i++) {
+        uint32 p_addr = pmm_alloc_frame();
+        if (!p_addr) {
+            print_colored("[TASK] Failed to allocate user stack frame for task: ", 0x0C, 0x00);
+            print(name);
+            print("\n");
+            // Need to clean up previously allocated frames and page directory
+            vmm_switch_page_directory(current_pd_ptr);
+            vmm_destroy_page_directory((page_directory_t*)elf_info.page_directory);
+            kfree(new_task);
+            return 0;
+        }
+        vmm_map_page((page_directory_t*)elf_info.page_directory,
+                     USER_STACK_TOP - (i + 1) * MEMORY_PAGE_SIZE,
+                     p_addr,
+                     PAGE_USER | PAGE_WRITABLE);
+    }
+    vmm_switch_page_directory(current_pd_ptr);
+
+    // 3. Allocate a kernel stack for the new task
+    // We need 2 pages for the kernel stack (8KB)
+    uint32 kernel_stack_vaddr = (uint32)kmalloc_aligned(KERNEL_STACK_SIZE, MEMORY_PAGE_SIZE); // Allocate 8KB aligned
+    if (!kernel_stack_vaddr) {
+        print_colored("[TASK] Failed to allocate kernel stack for task: ", 0x0C, 0x00);
+        print(name);
+        print("\n");
+        // Need to clean up previously allocated frames (user stack) and page directory
+        vmm_destroy_page_directory((page_directory_t*)elf_info.page_directory); // This should also free pmm frames for the user stack
+        kfree(new_task);
+        return 0;
+    }
+    new_task->kernel_stack_base = kernel_stack_vaddr; // Store the base address
+    
+    // The stack grows downwards, so the "top" is the highest address
+    uint32 kernel_stack_top = kernel_stack_vaddr + KERNEL_STACK_SIZE;
+
+    // 3. Set up initial CPU state on the task's kernel stack
+    // Simulate an interrupt frame on the kernel stack that iret will use to jump to user mode
+    // The kernel_stack field stores the actual ESP value to restore during context switch.
+    // This ESP will point to the CPU state structure we are creating.
+    // The user stack is set up by elf_load_executable, USER_STACK_TOP from shell_loader.c is 0xE0000000 - 4KB
+    // For now, let's use a fixed user stack top, but this should ideally come from elf_info or a global constant.
+// #define USER_STACK_TOP 0xE0000000 // Temporary, should match shell_loader.c logic - REMOVED
+
+    setup_initial_cpu_state(new_task, elf_info.entry_point, USER_STACK_TOP, kernel_stack_top);
+
+
+    // 4. Add the new task to the ready queue
+    if (ready_queue_head == 0) {
+        ready_queue_head = new_task;
+        new_task->next = new_task; // Point to itself for a single-element circular list
+    } else {
+        // Find the tail of the circular list
+        task_t* head = ready_queue_head;
+        while (head->next != ready_queue_head) {
+            head = head->next;
+        }
+        head->next = new_task;
+        new_task->next = ready_queue_head;
+    }
+    
+    print("[TASK] Created task ID: ");
+    print(int_to_string(new_task->id));
+    print(" (");
+    print(name);
+    print(") ELF entry: 0x");
+    print(long_to_string(new_task->elf_info.entry_point));
+    print("\n");
+
+    return new_task;
+}
+
+// Defined in assembly (src/context_switch.asm)
+extern void task_switch_asm(uint32* old_esp_ptr, uint32 new_esp_val, uint32 new_page_directory_phys);
+
+void task_switch(task_t* next_task) {
+    if (!next_task) {
+        print("[TASK] ERROR: Attempted to switch to null task\n");
+        return;
+    }
+
+    if (!current_task || current_task == next_task) {
+        return; // No switch needed or current_task is null (first switch)
+    }
+
+    if (!next_task->page_directory) {
+        print("[TASK] ERROR: Next task has null page directory\n");
+        return;
+    }
+
+    if (next_task->kernel_stack == 0) {
+        print("[TASK] ERROR: Next task has invalid kernel stack\n");
+        return;
+    }
+
+    task_t* prev_task = current_task;
+    current_task = next_task;
+
+    gdt_set_kernel_stack(next_task->kernel_stack_base + KERNEL_STACK_SIZE);
+
+    // Call assembly to perform context switch
+    // - Save prev_task's kernel ESP into &prev_task->kernel_stack
+    // - Load current_task's kernel ESP from current_task->kernel_stack
+    // - Load current_task's page directory (already physical address from vmm_create_page_directory)
+    task_switch_asm(&prev_task->kernel_stack, current_task->kernel_stack, (uint32)current_task->page_directory);
+}
+
+void task_schedule(void) {
+    // If the current task is marked for termination, destroy it.
+    if (current_task && (current_task->pending_signals & SIGKILL)) {
+        print("[TASK] Terminating current task ID: ");
+        print(int_to_string(current_task->id));
+        print("\n");
+        // Save pointer to the next task in the queue before destroying current_task
+        task_t* next_in_queue = current_task->next;
+        // Important: task_destroy modifies ready_queue_head and links.
+        task_destroy(current_task); 
+        current_task = 0; // Clear current_task as it's destroyed
+
+        // If ready_queue_head became null, there are no more tasks.
+        if (ready_queue_head == 0) {
+            kernel_panic("No more tasks to schedule after terminating a task!");
+        }
+        // Start searching for the next task from where the destroyed task was
+        current_task = next_in_queue; // Temporarily set current_task for traversal
+                                      // This assumes next_in_queue is still valid and in the list.
+                                      // task_destroy correctly relinks, so next_in_queue will point to the new head or a valid element.
+    }
+
+    if (!ready_queue_head) {
+        return; // No tasks to schedule
+    }
+
+    // Find the next available task in the circular ready queue
+    task_t* next_task = current_task; 
+    if (!next_task) { // Case where current_task was just destroyed
+        next_task = ready_queue_head;
+    }
+
+    task_t* initial_scan_start = next_task; // To detect if we've cycled through all tasks
+
+    do {
+        next_task = next_task->next;
+        if (!next_task) {
+            print("[TASK] ERROR: Null task found in ready queue\n");
+            next_task = ready_queue_head;
+            break;
+        }
+        // Skip terminated tasks or tasks that are not ready
+        // (For now, only checking TERMINATED, WAITING will be handled later if implemented)
+    } while ((next_task->state == TASK_STATE_TERMINATED || next_task->state == TASK_STATE_WAITING) && next_task != initial_scan_start);
+
+    // If we looped through all tasks and only found terminated/waiting ones
+    if ((next_task->state == TASK_STATE_TERMINATED || next_task->state == TASK_STATE_WAITING) && next_task == initial_scan_start) {
+        // This means all tasks in the queue are terminated or waiting.
+        // If the kernel_task (ready_queue_head) is also terminated/waiting, then it's a kernel panic.
+        if (ready_queue_head->state == TASK_STATE_TERMINATED || ready_queue_head->state == TASK_STATE_WAITING) {
+             kernel_panic("All user tasks terminated/waiting and kernel task is not runnable!");
+        } else {
+            // Fallback to kernel task if all others are terminated/waiting
+            next_task = ready_queue_head;
+        }
+    }
+
+    // Update state of selected task
+    if (next_task->state != TASK_STATE_RUNNING) {
+        next_task->state = TASK_STATE_RUNNING;
+    }
+    
+    // Switch to the next task
+    task_switch(next_task);
+}
+
+
+// Deallocates resources associated with a task and removes it from the ready queue
+void task_destroy(task_t* task) {
+    if (!task) {
+        return;
+    }
+
+    print("[TASK] Destroying task ID: ");
+    print(int_to_string(task->id));
+    print("\n");
+
+    // Remove from ready queue
+    if (ready_queue_head == task) {
+        if (task->next == task) { // Only one task in the queue
+            ready_queue_head = 0;
+        } else {
+            task_t* current = ready_queue_head;
+            while (current->next != ready_queue_head) {
+                current = current->next;
+            }
+            ready_queue_head = task->next;
+            current->next = ready_queue_head;
+        }
+    } else {
+        task_t* current = ready_queue_head;
+        // Loop until current->next is task or we've looped through the whole list
+        while (current && current->next != task && current->next != ready_queue_head) {
+            current = current->next;
+        }
+        if (current && current->next == task) {
+            current->next = task->next;
+        }
+    }
+
+    // Deallocate page directory and its mapped frames (user code, data, stack)
+    vmm_destroy_page_directory(task->page_directory);
+
+    // Deallocate kernel stack (kmalloc_a was used, so kfree it)
+    kfree((void*)task->kernel_stack_base);
+
+    // Free the task_t struct itself
+    kfree(task);
+
+    // If the destroyed task was the current task, a reschedule will be necessary.
+    // This scenario should primarily be handled by the scheduler itself,
+    // which would call task_destroy for a terminated task and then reschedule.
+}
+
+void task_kill(uint32 pid) {
+    if (pid == 0) { // PID 0 is usually reserved for the idle task or invalid
+        return;
+    }
+
+    if (current_task && current_task->id == pid) {
+        // Cannot kill current task directly here. Mark it for termination.
+        // The scheduler will pick this up.
+        current_task->pending_signals |= SIGKILL;
+        print("[TASK] Marked current task (ID: ");
+        print(int_to_string(pid));
+        print(") for SIGKILL.\n");
+        return;
+    }
+
+    task_t* task_to_kill = 0;
+    task_t* current = ready_queue_head;
+
+    if (current) {
+        do {
+            if (current->id == pid) {
+                task_to_kill = current;
+                break;
+            }
+            current = current->next;
+        } while (current != ready_queue_head);
+    }
+
+    if (task_to_kill) {
+        task_to_kill->pending_signals |= SIGKILL;
+        print("[TASK] Sent SIGKILL to task ID: ");
+        print(int_to_string(pid));
+        print("\n");
+    } else {
+        print("[TASK] No task found with ID: ");
+        print(int_to_string(pid));
+        print(" to kill.\n");
+    }
+}

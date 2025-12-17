@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make:*)",
+      "Bash(grub-file:*)",
+      "Bash(nasm:*)",
+      "Bash(ld:*)",
+      "Bash(nm:*)",
+      "Bash(gcc:*)",
+      "Bash(objdump:*)",
+      "Bash(python3:*)",
+      "Bash(timeout 15 qemu-system-i386 -cdrom forest_nightly_20251217_001911.iso -m 512M -enable-kvm -netdev user,id=net0 -device rtl8139,netdev=net0 -serial stdio -nographic)",
+      "Bash(timeout:*)",
+      "Bash(qemu-system-i386:*)",
+      "Bash(git checkout:*)",
+      "Bash(grep:*)",
+      "Bash(grep:*)",
+      "Bash(sed:*)",
+      "Bash(tar:*)"
+    ],
+    "deny": [],
+    "ask": [],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

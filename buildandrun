@@ -1,0 +1,1 @@
+make clean && make && make build && make run

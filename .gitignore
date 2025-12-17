@@ -1,0 +1,8 @@
+
+obs/*.*
+logs/*.*
+Forest/boot/*
+Forest.iso
+/.vscode
+.vscode/settings.json
+iso.iso
