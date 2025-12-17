@@ -29,15 +29,7 @@ static void handle_help(void) {
 }
 
 static void handle_uname(void) {
-    extern int uname(void *);
-    typedef struct {
-        char sysname[32];
-        char nodename[32];
-        char release[32];
-        char version[32];
-        char machine[32];
-    } utsname_t;
-    utsname_t info;
+    struct utsname info;
     if (uname(&info) == 0) {
         printf("%s %s (%s) %s\n", info.sysname, info.release, info.version, info.machine);
     } else {

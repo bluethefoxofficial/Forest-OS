@@ -224,18 +224,17 @@ int time(int *tloc) {
 #endif
 }
 
-int nanosleep(const void *req, void *rem) {
+int nanosleep(const struct timespec *req, struct timespec *rem) {
 #ifdef __linux__
-    return handle_linux_result(::nanosleep((const struct timespec *)req,
-                                           (struct timespec *)rem));
+    return handle_linux_result(::nanosleep(req, rem));
 #else
     return handle_forest_result(syscall2(SYS_NANOSLEEP, (int32)req, (int32)rem));
 #endif
 }
 
-int uname(void *uts_buffer) {
+int uname(struct utsname *uts_buffer) {
 #ifdef __linux__
-    return handle_linux_result(::uname((struct utsname *)uts_buffer));
+    return handle_linux_result(::uname(uts_buffer));
 #else
     return handle_forest_result(syscall1(SYS_UNAME, (int32)uts_buffer));
 #endif

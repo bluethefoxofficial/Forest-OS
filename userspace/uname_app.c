@@ -3,16 +3,8 @@
 #include "../src/include/libc/stdlib.h"
 #include "../src/include/libc/string.h"
 
-typedef struct {
-    char sysname[32];
-    char nodename[32];
-    char release[32];
-    char version[32];
-    char machine[32];
-} utsname_t;
-
 void _start(void) {
-    utsname_t info;
+    struct utsname info;
     if (uname(&info) == 0) {
         printf("sysname : %s\n", info.sysname);
         printf("nodename: %s\n", info.nodename);
