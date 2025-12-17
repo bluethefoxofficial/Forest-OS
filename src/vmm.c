@@ -5,7 +5,7 @@
 #include "include/string.h" // For memset
 #include "include/debuglog.h"
 
-#define VMM_IDENTITY_LIMIT_BYTES (64 * 1024 * 1024)  // Map first 64MB identity for firmware tables
+#define VMM_DEFAULT_IDENTITY_LIMIT_BYTES (64 * 1024 * 1024)  // Map first 64MB identity for firmware tables
 #define KERNEL_HIGHER_HALF_BASE   0xC0000000
 
 #define VMM_DEBUG_LOG 0
@@ -15,6 +15,17 @@ extern char kernel_end;
 
 static inline uint32 align_up(uint32 value, uint32 align) {
     return (value + align - 1) & ~(align - 1);
+}
+
+static inline bool vmm_is_addr_valid(uint32 addr) {
+    return addr <= MEMORY_MAX_ADDR;
+}
+
+static inline void vmm_pretouch_identity_page(uint32 addr) {
+    if (addr < MEMORY_PRETOUCH_LIMIT_BYTES) {
+        volatile uint8_t* ptr = (volatile uint8_t*)addr;
+        (void)*ptr;
+    }
 }
 
 #if VMM_DEBUG_LOG
@@ -57,9 +68,17 @@ static struct {
 static page_entry_t* get_page_entry(uint32 vaddr, bool make, page_directory_t* dir) {
     print("[VMM_DBG] get_page_entry: vaddr=0x"); print_hex(vaddr); print(", make="); print_dec(make); print("\n");
 
+    if (!dir) {
+        return NULL;
+    }
+
     uint32 page_num = vaddr / MEMORY_PAGE_SIZE; // Convert to page number
     uint32 pd_index = page_num / 1024; // Page Directory Index
     uint32 pt_index = page_num % 1024; // Page Table Index
+
+    if (pd_index >= 1024 || pt_index >= 1024) {
+        return NULL;
+    }
 
     print("[VMM_DBG] pd_index="); print_dec(pd_index); print(", pt_index="); print_dec(pt_index); print("\n");
 
@@ -114,6 +133,14 @@ static page_entry_t* get_page_entry(uint32 vaddr, bool make, page_directory_t* d
 memory_result_t vmm_map_page(page_directory_t* dir, uint32 vaddr, uint32 paddr, uint32 flags) {
     print("[VMM_DBG] vmm_map_page: vaddr=0x"); print_hex(vaddr); print(", paddr=0x"); print_hex(paddr); print(", flags=0x"); print_hex(flags); print("\n");
 
+    if (!dir) {
+        return MEMORY_ERROR_NULL_PTR;
+    }
+
+    if (!vmm_is_addr_valid(vaddr) || !vmm_is_addr_valid(paddr)) {
+        return MEMORY_ERROR_INVALID_ADDR;
+    }
+
     // Ensure addresses are page-aligned
     if ((vaddr & MEMORY_PAGE_MASK) != 0 || (paddr & MEMORY_PAGE_MASK) != 0) {
         print("[VMM_DBG] vmm_map_page: Address not page-aligned. Returning INVALID_ADDR.\n");
@@ -149,6 +176,14 @@ memory_result_t vmm_map_page(page_directory_t* dir, uint32 vaddr, uint32 paddr, 
 
 // Unmap a virtual address
 memory_result_t vmm_unmap_page(page_directory_t* dir, uint32 vaddr) {
+    if (!dir) {
+        return MEMORY_ERROR_NULL_PTR;
+    }
+
+    if (!vmm_is_addr_valid(vaddr)) {
+        return MEMORY_ERROR_INVALID_ADDR;
+    }
+
     if ((vaddr & MEMORY_PAGE_MASK) != 0) {
         return MEMORY_ERROR_INVALID_ADDR;
     }
@@ -171,6 +206,14 @@ memory_result_t vmm_unmap_page(page_directory_t* dir, uint32 vaddr) {
 
 // Get physical address for a virtual address
 uint32 vmm_get_physical_addr(page_directory_t* dir, uint32 vaddr) {
+    if (!dir) {
+        return 0;
+    }
+
+    if (!vmm_is_addr_valid(vaddr)) {
+        return 0;
+    }
+
     if ((vaddr & MEMORY_PAGE_MASK) != 0) {
         return 0; // Not page-aligned
     }
@@ -206,14 +249,22 @@ memory_result_t vmm_init(void) {
     // This is crucial for the CPU to continue execution after paging is enabled.
     uint32 identity_limit_kb = memory_get_usable_kb();
     if (identity_limit_kb == 0) {
-        identity_limit_kb = VMM_IDENTITY_LIMIT_BYTES / 1024;
+        identity_limit_kb = VMM_DEFAULT_IDENTITY_LIMIT_BYTES / 1024;
     }
-    if (identity_limit_kb < (VMM_IDENTITY_LIMIT_BYTES / 1024)) {
-        identity_limit_kb = VMM_IDENTITY_LIMIT_BYTES / 1024;
+
+    if (identity_limit_kb < MEMORY_BOOTSTRAP_MIN_IDENTITY_KB) {
+        identity_limit_kb = MEMORY_BOOTSTRAP_MIN_IDENTITY_KB;
     }
+    if (identity_limit_kb > MEMORY_BOOTSTRAP_MAX_IDENTITY_KB) {
+        identity_limit_kb = MEMORY_BOOTSTRAP_MAX_IDENTITY_KB;
+    }
+
     uint32 identity_limit = identity_limit_kb * 1024;
     if (identity_limit < 0x01000000) {
         identity_limit = 0x01000000; // always map at least first 16MB
+    }
+    if (identity_limit > MEMORY_MAX_ADDR) {
+        identity_limit = MEMORY_MAX_ADDR;
     }
     identity_limit = (identity_limit + MEMORY_PAGE_SIZE - 1) & ~(MEMORY_PAGE_SIZE - 1);
 
@@ -229,6 +280,8 @@ memory_result_t vmm_init(void) {
             kernel_panic("VMM: Failed to identity map 0-16MB!");
             return res;
         }
+
+        vmm_pretouch_identity_page(addr);
     }
     
     // Explicitly identity map VGA text buffer for direct access
@@ -353,6 +406,10 @@ bool vmm_is_mapped(page_directory_t* dir, uint32 vaddr) {
 
 memory_result_t vmm_identity_map_range(page_directory_t* dir, uint32 start, uint32 end, uint32 flags) {
     if (!dir || start > end) {
+        return MEMORY_ERROR_INVALID_ADDR;
+    }
+
+    if (!vmm_is_addr_valid(start) || !vmm_is_addr_valid(end)) {
         return MEMORY_ERROR_INVALID_ADDR;
     }
     uint32 aligned_start = start & ~MEMORY_PAGE_MASK;

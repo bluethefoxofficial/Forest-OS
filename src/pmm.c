@@ -101,8 +101,8 @@ static uint32 find_contiguous_frames(uint32 count) {
     if (count == 0) return 0xFFFFFFFF;
     if (count == 1) return find_free_frame_from(pmm_state.last_frame);
     
-    for (uint32 start = pmm_state.kernel_start_frame; 
-         start + count <= pmm_state.total_frames; 
+    for (uint32 start = pmm_state.kernel_start_frame;
+         start + count <= pmm_state.total_frames && start + count > start;
          start++) {
         
         bool found = true;
@@ -144,6 +144,10 @@ memory_result_t pmm_init(memory_region_t* regions, uint32 region_count) {
     
     for (uint32 i = 0; i < region_count; i++) {
         if (regions[i].type == 1) { // Available memory
+            if (regions[i].base_address > UINT64_MAX - regions[i].length) {
+                continue; // Skip overflowed entries
+            }
+
             total_memory += regions[i].length;
             uint64 end_addr = regions[i].base_address + regions[i].length;
             if (end_addr > highest_addr) {
@@ -151,14 +155,14 @@ memory_result_t pmm_init(memory_region_t* regions, uint32 region_count) {
             }
         }
     }
-    
+
     // Calculate frame count based on highest address, not total memory
     // This ensures we can address all possible frames
     pmm_state.total_frames = (uint32)(highest_addr >> MEMORY_PAGE_SHIFT);
-    
+
     // Limit to reasonable maximum to prevent excessive bitmap size
-    if (pmm_state.total_frames > (1024 * 1024)) { // 4GB worth of frames
-        pmm_state.total_frames = 1024 * 1024;
+    if (pmm_state.total_frames > MEMORY_PMM_MAX_FRAMES) { // 4GB worth of frames
+        pmm_state.total_frames = MEMORY_PMM_MAX_FRAMES;
     }
     
     print("[PMM] Total memory: ");
@@ -167,8 +171,15 @@ memory_result_t pmm_init(memory_region_t* regions, uint32 region_count) {
     print_dec(pmm_state.total_frames);
     print("\n");
     
+    if (pmm_state.total_frames == 0) {
+        return MEMORY_ERROR_OUT_OF_MEMORY;
+    }
+
     // Calculate bitmap size in uint32s
     pmm_state.bitmap_size = (pmm_state.total_frames + 31) / 32;
+    if (pmm_state.bitmap_size == 0 || pmm_state.bitmap_size > (UINT32_MAX / sizeof(uint32))) {
+        return MEMORY_ERROR_INVALID_SIZE;
+    }
     
     // Place bitmap in its dedicated memory region
     uint32 bitmap_addr = memory_align_up(MEMORY_PMM_START, MEMORY_PAGE_SIZE);
@@ -315,8 +326,52 @@ uint32 pmm_alloc_frames(uint32 count) {
     }
     
     pmm_state.last_frame = start_frame + count;
-    
+
     return frame_to_addr(start_frame);
+}
+
+memory_result_t pmm_alloc_scattered(uint32 count, uint32* frames_out,
+                                    uint32 max_frames, uint32* allocated) {
+    if (!pmm_state.initialized) {
+        return MEMORY_ERROR_NOT_INITIALIZED;
+    }
+
+    if (!frames_out || !allocated) {
+        return MEMORY_ERROR_NULL_PTR;
+    }
+
+    if (count == 0 || max_frames == 0) {
+        *allocated = 0;
+        return MEMORY_ERROR_INVALID_SIZE;
+    }
+
+    // Try contiguous allocation first
+    uint32 contiguous_addr = pmm_alloc_frames(count);
+    if (contiguous_addr != 0) {
+        uint32 frames_to_record = (count < max_frames) ? count : max_frames;
+        for (uint32 i = 0; i < frames_to_record; i++) {
+            frames_out[i] = contiguous_addr + (i * MEMORY_PAGE_SIZE);
+        }
+        *allocated = frames_to_record;
+        return MEMORY_OK;
+    }
+
+    // Fall back to scattered frames when fragmentation prevents contiguous blocks
+    *allocated = 0;
+    for (uint32 i = 0; i < count && *allocated < max_frames; i++) {
+        uint32 frame_addr = pmm_alloc_frame();
+        if (frame_addr == 0) {
+            break;
+        }
+        frames_out[*allocated] = frame_addr;
+        (*allocated)++;
+    }
+
+    if (*allocated == 0) {
+        return MEMORY_ERROR_OUT_OF_MEMORY;
+    }
+
+    return MEMORY_OK;
 }
 
 memory_result_t pmm_free_frame(uint32 frame_addr) {
