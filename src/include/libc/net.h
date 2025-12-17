@@ -3,6 +3,11 @@
 
 #include "../types.h"
 
+#if defined(__linux__)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#else
 #define AF_INET    2
 #define SOCK_DGRAM 2
 
@@ -41,5 +46,6 @@ static inline uint32 htonl(uint32 value) {
 static inline uint32 ntohl(uint32 value) {
     return htonl(value);
 }
+#endif
 
 #endif

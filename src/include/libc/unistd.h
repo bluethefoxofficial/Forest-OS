@@ -8,6 +8,8 @@ extern "C" {
 #include <stddef.h>
 #include "../types.h"
 #include "net.h"
+#include "time.h"
+#include "sys/utsname.h"
 
 typedef int32 ssize_t;
 
@@ -17,8 +19,8 @@ int open(const char *pathname, int flags);
 int close(int fd);
 int lseek(int fd, int offset, int whence);
 int getpid(void);
-int nanosleep(const void *req, void *rem);
-int uname(void *uts_buffer);
+int nanosleep(const struct timespec *req, struct timespec *rem);
+int uname(struct utsname *uts_buffer);
 int brk(void *addr);
 int time(int *tloc);
 int _exit(int status);
