@@ -32,6 +32,14 @@
 #define MEMORY_PAGE_SHIFT       12
 #define MEMORY_PAGE_MASK        0xFFF
 
+// Bootstrap tuning to adapt to different RAM sizes
+#define MEMORY_BOOTSTRAP_MIN_IDENTITY_KB (16 * 1024)   // 16MB minimum identity map
+#define MEMORY_BOOTSTRAP_MAX_IDENTITY_KB (128 * 1024)  // 128MB maximum bootstrap identity map
+#define MEMORY_PRETOUCH_LIMIT_BYTES      (8 * 1024 * 1024) // Pre-touch only within first 8MB
+
+// PMM guardrails
+#define MEMORY_PMM_MAX_FRAMES (1024 * 1024) // Cap to 4GB worth of frames by default
+
 // Memory layout constants
 #define MEMORY_KERNEL_START     0x00100000  // 1MB - where kernel starts
 #define MEMORY_PMM_START        0x00400000  // 4MB - where PMM bitmap starts
@@ -122,6 +130,10 @@ uint32_t pmm_alloc_frame(void);
 
 // Allocate multiple contiguous page frames
 uint32_t pmm_alloc_frames(uint32_t count);
+
+// Best-effort allocation that can fall back to scattered frames when fragmented
+memory_result_t pmm_alloc_scattered(uint32_t count, uint32_t* frames_out,
+                                    uint32_t max_frames, uint32_t* allocated);
 
 // Free a page frame
 memory_result_t pmm_free_frame(uint32_t frame_addr);
