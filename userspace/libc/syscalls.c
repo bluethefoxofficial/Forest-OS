@@ -2,16 +2,12 @@
 
 #ifdef __linux__
 #include <errno.h>
-#include <fcntl.h>
-#include <sys/socket.h>
-#include <sys/types.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
-static inline int get_host_errno(void) {
-    return errno;
-}
 #undef errno
 #endif
 
@@ -56,6 +52,7 @@ static int normalize_errno_value(int raw_errno) {
         case EPIPE: return EPIPE;
         case EDOM: return EDOM;
         case ERANGE: return ERANGE;
+        case ENOSYS: return ENOSYS;
         default: return EINVAL;
     }
 }
@@ -71,7 +68,30 @@ static inline int handle_linux_result(long result) {
         errno = 0;
         return (int)result;
     }
-    return assign_errno_and_fail(get_host_errno());
+    return assign_errno_and_fail(errno);
+}
+
+static inline int handle_linux_stub(void) {
+    return assign_errno_and_fail(ENOSYS);
+}
+
+static inline int linux_fake_time(void) {
+    static int fake_now = 0;
+    fake_now++;
+    return fake_now;
+}
+
+static void populate_forest_uname(struct utsname *uts_buffer) {
+    if (!uts_buffer) {
+        return;
+    }
+
+    memset(uts_buffer, 0, sizeof(struct utsname));
+    (void)snprintf(uts_buffer->sysname, sizeof(uts_buffer->sysname), "ForestOS");
+    (void)snprintf(uts_buffer->nodename, sizeof(uts_buffer->nodename), "forest-node");
+    (void)snprintf(uts_buffer->release, sizeof(uts_buffer->release), "0.2");
+    (void)snprintf(uts_buffer->version, sizeof(uts_buffer->version), "nightly");
+    (void)snprintf(uts_buffer->machine, sizeof(uts_buffer->machine), "i386");
 }
 #else
 static inline int32 syscall0(int32 num) {
@@ -170,7 +190,9 @@ ssize_t read(int fd, void *buf, size_t count) {
 
 int open(const char *pathname, int flags) {
 #ifdef __linux__
-    return handle_linux_result(::open(pathname, flags, 0));
+    (void)pathname;
+    (void)flags;
+    return handle_linux_stub();
 #else
     return handle_forest_result(syscall3(SYS_OPEN, (int32)pathname, flags, 0));
 #endif
@@ -178,7 +200,9 @@ int open(const char *pathname, int flags) {
 
 int close(int fd) {
 #ifdef __linux__
-    return handle_linux_result(::close(fd));
+    (void)fd;
+    errno = 0;
+    return 0;
 #else
     return handle_forest_result(syscall1(SYS_CLOSE, fd));
 #endif
@@ -186,7 +210,10 @@ int close(int fd) {
 
 int lseek(int fd, int offset, int whence) {
 #ifdef __linux__
-    return handle_linux_result((int)::lseek(fd, offset, whence));
+    (void)fd;
+    (void)offset;
+    (void)whence;
+    return handle_linux_stub();
 #else
     return handle_forest_result(syscall3(SYS_LSEEK, fd, offset, whence));
 #endif
@@ -194,7 +221,8 @@ int lseek(int fd, int offset, int whence) {
 
 int getpid(void) {
 #ifdef __linux__
-    return handle_linux_result(::getpid());
+    errno = 0;
+    return 1;
 #else
     return handle_forest_result(syscall0(SYS_GETPID));
 #endif
@@ -202,15 +230,12 @@ int getpid(void) {
 
 int time(int *tloc) {
 #ifdef __linux__
-    time_t value = ::time(NULL);
-    if (value == (time_t)-1) {
-        return assign_errno_and_fail(get_host_errno());
-    }
+    int value = linux_fake_time();
     if (tloc) {
-        *tloc = (int)value;
+        *tloc = value;
     }
     errno = 0;
-    return (int)value;
+    return value;
 #else
     int value = syscall1(SYS_TIME, (int32)tloc);
     if (value < 0) {
@@ -234,7 +259,12 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
 
 int uname(struct utsname *uts_buffer) {
 #ifdef __linux__
-    return handle_linux_result(::uname(uts_buffer));
+    if (!uts_buffer) {
+        return assign_errno_and_fail(EINVAL);
+    }
+    populate_forest_uname(uts_buffer);
+    errno = 0;
+    return 0;
 #else
     return handle_forest_result(syscall1(SYS_UNAME, (int32)uts_buffer));
 #endif
@@ -259,7 +289,10 @@ int _exit(int status) {
 
 int socket(int domain, int type, int protocol) {
 #ifdef __linux__
-    return handle_linux_result(::socket(domain, type, protocol));
+    (void)domain;
+    (void)type;
+    (void)protocol;
+    return handle_linux_stub();
 #else
     return handle_forest_result(syscall3(SYS_SOCKET, domain, type, protocol));
 #endif
@@ -267,8 +300,10 @@ int socket(int domain, int type, int protocol) {
 
 int bind(int fd, const void *addr, int addrlen) {
 #ifdef __linux__
-    return handle_linux_result(::bind(fd, (const struct sockaddr *)addr,
-                                      (socklen_t)addrlen));
+    (void)fd;
+    (void)addr;
+    (void)addrlen;
+    return handle_linux_stub();
 #else
     return handle_forest_result(syscall3(SYS_BIND, fd, (int32)addr, addrlen));
 #endif
@@ -277,9 +312,13 @@ int bind(int fd, const void *addr, int addrlen) {
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,
                const void *addr, int addrlen) {
 #ifdef __linux__
-    return handle_linux_result(::sendto(fd, buf, len, flags,
-                                        (const struct sockaddr *)addr,
-                                        (socklen_t)addrlen));
+    (void)fd;
+    (void)buf;
+    (void)len;
+    (void)flags;
+    (void)addr;
+    (void)addrlen;
+    return handle_linux_stub();
 #else
     return handle_forest_result(syscall6(SYS_SENDTO, fd, (int32)buf, (int32)len, flags,
                     (int32)addr, addrlen));
@@ -289,18 +328,13 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
 ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
                  void *addr, int *addrlen) {
 #ifdef __linux__
-    socklen_t sock_len = (addrlen) ? (socklen_t)(*addrlen) : 0;
-    ssize_t result = ::recvfrom(fd, buf, len, flags,
-                                (struct sockaddr *)addr,
-                                addrlen ? &sock_len : NULL);
-    if (result < 0) {
-        return assign_errno_and_fail(get_host_errno());
-    }
-    if (addrlen) {
-        *addrlen = (int)sock_len;
-    }
-    errno = 0;
-    return result;
+    (void)fd;
+    (void)buf;
+    (void)len;
+    (void)flags;
+    (void)addr;
+    (void)addrlen;
+    return handle_linux_stub();
 #else
     return handle_forest_result(syscall6(SYS_RECVFROM, fd, (int32)buf, (int32)len, flags,
                     (int32)addr, (int32)addrlen));
