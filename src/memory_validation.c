@@ -69,6 +69,10 @@ static inline bool validate_virtual_address(uint32 virtual_addr) {
     return true;
 }
 
+static inline bool is_user_address(uint32 addr) {
+    return addr >= validation_state.min_user_address && addr <= validation_state.max_user_address;
+}
+
 // === PUBLIC VALIDATION FUNCTIONS ===
 
 memory_validation_result_t memory_validation_init(void) {
@@ -296,6 +300,79 @@ bool memory_is_range_valid(uint32 start, uint32 length) {
 
 bool memory_is_page_aligned(uint32 addr) {
     return validate_alignment(addr, MEMORY_PAGE_SIZE);
+}
+
+size_t memory_probe_buffer(const void* ptr, size_t length) {
+    if (!memory_validation_initialized || ptr == NULL || length == 0) {
+        return 0;
+    }
+
+    uint32 start = (uint32)ptr;
+    if (!validate_address_range_no_overflow(start, length)) {
+        return 0;
+    }
+
+    uint32 end = start + (uint32)length - 1;
+    if (start < validation_state.min_valid_address || start > validation_state.max_valid_address) {
+        return 0;
+    }
+
+    if (end > validation_state.max_valid_address) {
+        end = validation_state.max_valid_address;
+    }
+
+    if (start < MEMORY_VGA_END && end >= MEMORY_VGA_START) {
+        if (MEMORY_VGA_START == 0) {
+            return 0;
+        }
+        end = MEMORY_VGA_START - 1;
+    }
+
+    if (start < MEMORY_BIOS_END && end >= MEMORY_BIOS_START) {
+        if (MEMORY_BIOS_START == 0) {
+            return 0;
+        }
+        uint32 candidate = MEMORY_BIOS_START - 1;
+        if (candidate < end) {
+            end = candidate;
+        }
+    }
+
+    if (end < start) {
+        return 0;
+    }
+
+    return (size_t)(end - start + 1);
+}
+
+size_t memory_probe_user_buffer(const void* ptr, size_t length) {
+    size_t span = memory_probe_buffer(ptr, length);
+    if (span == 0) {
+        return 0;
+    }
+
+    uint32 start = (uint32)ptr;
+    if (!is_user_address(start)) {
+        return 0;
+    }
+
+    uint32 end = start + (uint32)span - 1;
+    if (end > validation_state.max_user_address) {
+        end = validation_state.max_user_address;
+    }
+
+    if (end < start) {
+        return 0;
+    }
+
+    return (size_t)(end - start + 1);
+}
+
+bool memory_is_user_pointer(const void* ptr) {
+    if (!memory_validation_initialized || ptr == NULL) {
+        return false;
+    }
+    return is_user_address((uint32)ptr);
 }
 
 uint32 memory_align_up(uint32 addr, uint32 alignment) {

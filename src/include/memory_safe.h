@@ -264,6 +264,9 @@ memory_validation_result_t memory_validate_pointer(const void* ptr);
 memory_validation_result_t memory_validate_region(uint32 start, uint32 length);
 memory_validation_result_t memory_validate_region_descriptor(const memory_region_t* region);
 memory_validation_result_t memory_validate_frame_address(uint32 frame_addr);
+size_t memory_probe_buffer(const void* ptr, size_t length);
+size_t memory_probe_user_buffer(const void* ptr, size_t length);
+bool memory_is_user_pointer(const void* ptr);
 
 // Memory map processing
 memory_validation_result_t memory_process_multiboot_map(uint32 multiboot_magic, 
