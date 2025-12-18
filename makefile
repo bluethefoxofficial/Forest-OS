@@ -124,9 +124,9 @@ refresh-libc:
 	@rm -f $(LIBC_INCLUDE_DIR)/*.h
 	@rm -rf $(LIBC_INCLUDE_DIR)/libc
 	@mkdir -p $(LIBC_INCLUDE_DIR)/libc
-	@cp $(SRCDIR)/string.c $(SRCDIR)/util.c $(SRCDIR)/system.c $(LIBC_DIR)/
-	@cp $(SRCDIR)/include/types.h $(SRCDIR)/include/util.h $(SRCDIR)/include/string.h $(SRCDIR)/include/system.h $(LIBC_INCLUDE_DIR)/
-	@cp $(SRCDIR)/include/libc/*.h $(LIBC_INCLUDE_DIR)/libc/
+	@cp $(SRCDIR)/string.c $(SRCDIR)/util.c $(SRCDIR)/system.c $(SRCDIR)/audio.c $(LIBC_DIR)/
+	@cp $(SRCDIR)/include/types.h $(SRCDIR)/include/util.h $(SRCDIR)/include/string.h $(SRCDIR)/include/system.h $(SRCDIR)/include/net.h $(SRCDIR)/include/driver.h $(LIBC_INCLUDE_DIR)/
+	@cp -r $(SRCDIR)/include/libc/* $(LIBC_INCLUDE_DIR)/libc/
 
 $(INITRD): refresh-libc $(OUTPUT) $(INITRD_FILES) $(USER_APP_BINARIES)
 	@mkdir -p $(OUTDIR)/boot

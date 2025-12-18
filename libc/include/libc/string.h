@@ -1,6 +1,8 @@
 #ifndef LIBC_STRING_H
 #define LIBC_STRING_H
 
+#define __STDC_VERSION_STRING_H__ 202311L
+
 #ifdef __cplusplus
 extern "C" {
 #endif

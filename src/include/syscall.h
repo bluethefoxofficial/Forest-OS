@@ -372,7 +372,8 @@ enum syscall_number {
     SYS_OPEN_TREE_ATTR          = 467,
     
     // Maximum syscall number
-    SYS_MAX                     = 468
+    SYS_NETINFO                 = 469,
+    SYS_MAX                     = 470
 };
 
 #ifndef USERSPACE_BUILD

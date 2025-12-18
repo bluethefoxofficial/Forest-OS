@@ -385,6 +385,13 @@ static int32 sys_recvfrom(uint32 fd, uint32 buf_ptr, uint32 len, uint32 flags,
     return received;
 }
 
+static int32 sys_netinfo(uint32 buffer_ptr, uint32 max_entries) {
+    if (!buffer_ptr || max_entries == 0) {
+        return SYSCALL_EINVAL;
+    }
+    return (int32)net_snapshot((net_socket_info_t*)buffer_ptr, max_entries);
+}
+
 void syscall_init(void) {
     set_idt_gate_flags(SYSCALL_VECTOR, (uint32)isr128, 0xEE);
     print("[SYSCALL] Installed software interrupt handler at 0x80\n");
@@ -420,6 +427,7 @@ void syscall_handle(syscall_frame_t* frame) {
         case SYS_BIND:       result = sys_bind(arg1, arg2, arg3); break;
         case SYS_SENDTO:     result = sys_sendto(arg1, arg2, arg3, arg4, arg5, arg6); break;
         case SYS_RECVFROM:   result = sys_recvfrom(arg1, arg2, arg3, arg4, arg5, arg6); break;
+        case SYS_NETINFO:    result = sys_netinfo(arg1, arg2); break;
         default:             result = SYSCALL_ENOSYS; break;
     }
 
