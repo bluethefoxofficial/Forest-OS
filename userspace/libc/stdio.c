@@ -133,6 +133,14 @@ int sprintf(char *buffer, const char *format, ...) {
     return written;
 }
 
+int snprintf(char *buffer, size_t size, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf_simple(buffer, size, format, args);
+    va_end(args);
+    return written;
+}
+
 int printf(const char *format, ...) {
     char temp[512];
     va_list args;

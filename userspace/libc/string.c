@@ -73,6 +73,27 @@ int strncmp(const char *s1, const char *s2, size_t n) {
     return 0;
 }
 
+int memcmp(const void *s1, const void *s2, size_t n) {
+    const unsigned char *a = s1;
+    const unsigned char *b = s2;
+    for (size_t i = 0; i < n; i++) {
+        if (a[i] != b[i]) {
+            return a[i] - b[i];
+        }
+    }
+    return 0;
+}
+
+void *memchr(const void *s, int c, size_t n) {
+    const unsigned char *p = s;
+    for (size_t i = 0; i < n; i++) {
+        if (p[i] == (unsigned char)c) {
+            return (void *)(p + i);
+        }
+    }
+    return NULL;
+}
+
 void *memset(void *s, int c, size_t n) {
     unsigned char* p = s;
     while (n--) {
@@ -120,4 +141,108 @@ char *strchr(const char *s, int c) {
         return (char *)s;
     }
     return NULL;
+}
+
+char *strrchr(const char *s, int c) {
+    const char *last = NULL;
+    while (*s) {
+        if (*s == (char)c) {
+            last = s;
+        }
+        s++;
+    }
+    if (c == '\0') {
+        return (char *)s;
+    }
+    return (char *)last;
+}
+
+char *strcat(char *dest, const char *src) {
+    char *d = dest + strlen(dest);
+    while ((*d++ = *src++)) {}
+    return dest;
+}
+
+char *strncat(char *dest, const char *src, size_t n) {
+    char *d = dest + strlen(dest);
+    size_t i = 0;
+    for (; i < n && src[i]; i++) {
+        d[i] = src[i];
+    }
+    d[i] = '\0';
+    return dest;
+}
+
+char *strstr(const char *haystack, const char *needle) {
+    if (!*needle) {
+        return (char *)haystack;
+    }
+    for (; *haystack; haystack++) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n && *h == *n) {
+            h++; n++;
+        }
+        if (*n == '\0') {
+            return (char *)haystack;
+        }
+    }
+    return NULL;
+}
+
+size_t strspn(const char *s, const char *accept) {
+    size_t count = 0;
+    for (; *s; s++) {
+        if (!strchr(accept, *s)) {
+            break;
+        }
+        count++;
+    }
+    return count;
+}
+
+size_t strcspn(const char *s, const char *reject) {
+    size_t count = 0;
+    for (; *s; s++) {
+        if (strchr(reject, *s)) {
+            break;
+        }
+        count++;
+    }
+    return count;
+}
+
+char *strpbrk(const char *s, const char *accept) {
+    for (; *s; s++) {
+        if (strchr(accept, *s)) {
+            return (char *)s;
+        }
+    }
+    return NULL;
+}
+
+char *strtok(char *str, const char *delim) {
+    static char *saveptr = NULL;
+    if (str) {
+        saveptr = str;
+    } else if (!saveptr) {
+        return NULL;
+    }
+
+    // Skip leading delimiters
+    saveptr += strspn(saveptr, delim);
+    if (*saveptr == '\0') {
+        saveptr = NULL;
+        return NULL;
+    }
+
+    char *token = saveptr;
+    saveptr = token + strcspn(token, delim);
+    if (*saveptr) {
+        *saveptr = '\0';
+        saveptr++;
+    } else {
+        saveptr = NULL;
+    }
+    return token;
 }

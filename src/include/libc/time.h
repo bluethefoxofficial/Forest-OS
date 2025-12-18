@@ -9,7 +9,7 @@ extern "C" {
 
 #include "../types.h"
 
-#if defined(__linux__)
+#ifdef FOREST_USE_HOST_LIBC
 #include <time.h>
 #else
 struct timespec {

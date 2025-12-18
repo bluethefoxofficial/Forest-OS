@@ -7,7 +7,7 @@
 #include "include/memory.h"
 #endif
 
-void memory_copy(char *source, char *dest, int nbytes) {
+void memory_copy(const char *source, char *dest, int nbytes) {
     int i;
     for (i = 0; i < nbytes; i++) {
         *(dest + i) = *(source + i);             //    dest[i] = source[i]

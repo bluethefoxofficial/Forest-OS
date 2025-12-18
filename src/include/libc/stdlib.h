@@ -25,6 +25,7 @@ void *realloc(void *ptr, size_t size);
 int atoi(const char *str);
 long atol(const char *str);
 double atof(const char *str);
+long strtol(const char *nptr, char **endptr, int base);
 char *itoa(int value, char *str, int base);
 
 // Process control

@@ -1,6 +1,6 @@
 #include <stddef.h>
 
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,7 +15,6 @@
 #include "../../src/include/libc/unistd.h"
 #include "../../src/include/types.h"
 #include "../../src/include/syscall.h"
-#include "../../src/include/net.h"
 
 typedef int32 ssize_t;
 
@@ -63,7 +62,7 @@ static inline int assign_errno_and_fail(int raw_errno) {
     return -1;
 }
 
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
 static inline int handle_linux_result(long result) {
     if (result >= 0) {
         errno = 0;
@@ -174,7 +173,7 @@ static inline int32 handle_forest_result(int32 result) {
 #endif
 
 ssize_t write(int fd, const void *buf, size_t count) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     return handle_linux_result(::write(fd, buf, count));
 #else
     return handle_forest_result(syscall3(SYS_WRITE, fd, (int32)buf, (int32)count));
@@ -182,7 +181,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
 }
 
 ssize_t read(int fd, void *buf, size_t count) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     return handle_linux_result(::read(fd, buf, count));
 #else
     return handle_forest_result(syscall3(SYS_READ, fd, (int32)buf, (int32)count));
@@ -190,7 +189,7 @@ ssize_t read(int fd, void *buf, size_t count) {
 }
 
 int open(const char *pathname, int flags) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     (void)pathname;
     (void)flags;
     return handle_linux_stub();
@@ -200,7 +199,7 @@ int open(const char *pathname, int flags) {
 }
 
 int close(int fd) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     (void)fd;
     errno = 0;
     return 0;
@@ -210,7 +209,7 @@ int close(int fd) {
 }
 
 int lseek(int fd, int offset, int whence) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     (void)fd;
     (void)offset;
     (void)whence;
@@ -221,7 +220,7 @@ int lseek(int fd, int offset, int whence) {
 }
 
 int getpid(void) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     errno = 0;
     return 1;
 #else
@@ -229,8 +228,17 @@ int getpid(void) {
 #endif
 }
 
+int unlink(const char *pathname) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)pathname;
+    return handle_linux_stub();
+#else
+    return handle_forest_result(syscall1(SYS_UNLINK, (int32)pathname));
+#endif
+}
+
 int time(int *tloc) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     int value = linux_fake_time();
     if (tloc) {
         *tloc = value;
@@ -251,7 +259,7 @@ int time(int *tloc) {
 }
 
 int nanosleep(const struct timespec *req, struct timespec *rem) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     return handle_linux_result(::nanosleep(req, rem));
 #else
     return handle_forest_result(syscall2(SYS_NANOSLEEP, (int32)req, (int32)rem));
@@ -259,7 +267,7 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
 }
 
 int uname(struct utsname *uts_buffer) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     if (!uts_buffer) {
         return assign_errno_and_fail(EINVAL);
     }
@@ -272,7 +280,7 @@ int uname(struct utsname *uts_buffer) {
 }
 
 int brk(void *addr) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     return handle_linux_result(::brk(addr));
 #else
     return handle_forest_result(syscall1(SYS_BRK, (int32)addr));
@@ -280,7 +288,7 @@ int brk(void *addr) {
 }
 
 int _exit(int status) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     ::_exit(status);
     return 0;
 #else
@@ -289,7 +297,7 @@ int _exit(int status) {
 }
 
 int socket(int domain, int type, int protocol) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     (void)domain;
     (void)type;
     (void)protocol;
@@ -300,7 +308,7 @@ int socket(int domain, int type, int protocol) {
 }
 
 int bind(int fd, const void *addr, int addrlen) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     (void)fd;
     (void)addr;
     (void)addrlen;
@@ -312,7 +320,7 @@ int bind(int fd, const void *addr, int addrlen) {
 
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,
                const void *addr, int addrlen) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     (void)fd;
     (void)buf;
     (void)len;
@@ -328,7 +336,7 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
 
 ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
                  void *addr, int *addrlen) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     (void)fd;
     (void)buf;
     (void)len;
@@ -343,7 +351,7 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
 }
 
 int netinfo(net_socket_info_t* buffer, int max_entries) {
-#ifdef __linux__
+#ifdef FOREST_USE_HOST_LIBC
     (void)buffer;
     (void)max_entries;
     return handle_linux_stub();
