@@ -76,7 +76,6 @@ string long_to_string(long n) {
     ch[i] = '\0';
 
     // Reverse the string
-    int len = i;
     int j = 0;
     i--; // Point to last character before null
     while(j < i) {

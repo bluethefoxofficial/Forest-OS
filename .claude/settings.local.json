@@ -16,7 +16,15 @@
       "Bash(grep:*)",
       "Bash(grep:*)",
       "Bash(sed:*)",
-      "Bash(tar:*)"
+      "Bash(tar:*)",
+      "Bash(for file in userspace/*.c)",
+      "Bash(do)",
+      "Bash(if grep -q \"exit(\" \"$file\")",
+      "Bash(! grep -q \"stdlib.h\" \"$file\")",
+      "Bash(then)",
+      "Bash(echo:*)",
+      "Bash(fi)",
+      "Bash(done)"
     ],
     "deny": [],
     "ask": [],

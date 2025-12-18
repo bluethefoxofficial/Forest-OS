@@ -1,6 +1,7 @@
 #include "../src/include/libc/stdio.h"
 #include "../src/include/libc/netlib.h"
 #include "../src/include/libc/unistd.h"
+#include "../src/include/libc/stdlib.h"
 
 void _start(void) {
     char buffer[256];

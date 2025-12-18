@@ -16,8 +16,11 @@ task_switch_asm:
     pusha
 
     mov eax, [ebp + 8]      ; old_esp_ptr
+    cmp eax, 0              ; Check if old_esp_ptr is NULL (first task switch)
+    je skip_save
     mov [eax], esp          ; save pointer to current stack frame
 
+skip_save:
     mov eax, [ebp + 12]     ; new_esp_val
     mov esp, eax
 
@@ -29,3 +32,28 @@ task_switch_asm:
 
     pop ebp
     ret
+
+; void enter_usermode_asm(uint32 entry_point, uint32 user_stack, uint32 user_cs, uint32 user_ds)
+; Direct entry into user mode for initial task start
+global enter_usermode_asm
+enter_usermode_asm:
+    push ebp
+    mov ebp, esp
+    
+    mov eax, [ebp + 16]     ; user_ds
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    
+    ; Build the iret frame on the stack
+    push eax                ; SS (user data segment)
+    push dword [ebp + 8]    ; ESP (user stack)
+    pushf                   ; EFLAGS
+    pop eax
+    or eax, 0x200           ; Set IF (interrupt enable flag)
+    push eax
+    push dword [ebp + 12]   ; CS (user code segment)
+    push dword [ebp + 4]    ; EIP (entry point)
+    
+    iret

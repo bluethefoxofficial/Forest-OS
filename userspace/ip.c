@@ -2,6 +2,7 @@
 #include "../src/include/libc/netlib.h"
 #include "../src/include/libc/unistd.h"
 #include "../src/include/libc/string.h"
+#include "../src/include/libc/stdlib.h"
 
 static void print_interface(void) {
     char addr[32];

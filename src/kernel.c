@@ -26,6 +26,8 @@
 #include "include/net.h"
 #include "include/debuglog.h"
 #include "include/gdt.h"
+#include "include/sync_test.h"
+#include "include/lock_debug.h"
 
 void kmain(uint32 magic, uint32 mbi_addr);
 void keyboard_event_handler(keyboard_event_t* event);
@@ -197,6 +199,12 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     } else {
         boot_status("Sound subsystem", true);
     }
+
+    // Initialize lock debugging
+    lock_debug_init();
+    
+    // TODO: Run synchronization tests after task system is fully initialized
+    // sync_test_run_all();
 
     // Enable interrupts
     irq_enable_safe();

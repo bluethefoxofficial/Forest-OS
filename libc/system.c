@@ -15,14 +15,14 @@ static inline bool io_port_in_range(uint16 port) {
     return port < 0x10000;
 }
 
-static inline size_t guarded_mmio_span(const void* address, size_t length) {
+static inline size_t guarded_mmio_span(const volatile void* address, size_t length) {
     if (!address || length == 0) {
         return 0;
     }
 
-    return memory_is_user_pointer(address)
-        ? memory_probe_user_buffer(address, length)
-        : memory_probe_buffer(address, length);
+    return memory_is_user_pointer((const void*)address)
+        ? memory_probe_user_buffer((const void*)address, length)
+        : memory_probe_buffer((const void*)address, length);
 }
 
 uint8 inportb (uint16 _port)
@@ -234,7 +234,6 @@ void timer_sleep_ms(uint32 milliseconds) {
     }
 
     // Assume a conservative 1GHz clock if no calibration is available.
-    const uint64 assumed_hz = 1000000000ULL;
     const uint64 ticks_per_ms = 1000000ULL; // 1e9 Hz / 1e3 ms
     uint64 target_ticks = ticks_per_ms * milliseconds;
     while (cpu_read_tsc() - start < target_ticks) {

@@ -279,11 +279,12 @@ static int32 sys_uname(uint32 user_ptr) {
     }
 
     utsname_t* info = (utsname_t*)user_ptr;
-    const char* sys = "ForestOS";
+    const char* sys  = "ForestOS";
     const char* node = "forest-node";
-    const char* rel = "0.2";
-    const char* ver = "nightly";
+    const char* rel  = "1.0";
+    const char* ver  = "thornedge";
     const char* mach = "i386";
+
 
     memory_set((uint8*)info, 0, sizeof(utsname_t));
 

@@ -40,6 +40,7 @@ void task_destroy(task_t* task);
 void task_switch(task_t* next_task); // Updated signature
 void task_schedule(void);
 void task_kill(uint32 pid); // Added
+void debug_print_ready_queue(void); // Debug function
 
 
 // Global variables (defined in task.c)

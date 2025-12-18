@@ -6,6 +6,8 @@
 #include "include/elf.h"
 #include "include/interrupt.h" // For context switching using new system
 #include "include/gdt.h"
+#include "include/spinlock.h"
+#include "include/string.h"
 
 // Explicit forward declaration to help compiler resolve implicit declaration
 extern page_directory_t* vmm_get_current_page_directory(void);
@@ -17,11 +19,22 @@ extern string long_to_string(long n);
 
 task_t* current_task = 0;
 task_t* ready_queue_head = 0;
+static task_t* idle_task = 0; // Idle task that runs when no other tasks are available
 static uint32 next_task_id = 1;
+
+static spinlock_t task_scheduler_lock = SPINLOCK_INIT("task_scheduler");
 
 // Temporary stack for initial task setup
 // This will be replaced by a proper kernel stack for each task
-static uint8 initial_kernel_stack[KERNEL_STACK_SIZE] __attribute__((aligned(4096))); 
+static uint8 initial_kernel_stack[KERNEL_STACK_SIZE] __attribute__((aligned(4096)));
+
+// Idle task function - runs when no other tasks are available
+static void idle_task_function(void) {
+    for (;;) {
+        // Halt and wait for interrupts to wake us up
+        __asm__ __volatile__("hlt");
+    }
+} 
 
 // Helper function to set up initial CPU state for a new task
 // This function prepares the kernel stack for the new task such that
@@ -38,11 +51,11 @@ static void setup_initial_cpu_state(task_t* task, uint32 entry_point, uint32 use
     uint32* stack_ptr = (uint32*)kernel_stack_top;
 
     // Simulate the IRET frame (pushed last, popped first by IRET)
-    *(--stack_ptr) = 0x23;          // SS (user data segment, ring 3)
-    *(--stack_ptr) = user_stack_top; // ESP (user stack pointer)
-    *(--stack_ptr) = 0x202;         // EFLAGS (enable interrupts, bit 2 is always 1)
-    *(--stack_ptr) = 0x1B;          // CS (user code segment, ring 3)
-    *(--stack_ptr) = entry_point;   // EIP (entry point of the ELF)
+    *(--stack_ptr) = GDT_USER_DATA_SELECTOR;  // SS (user data segment, ring 3)
+    *(--stack_ptr) = user_stack_top;          // ESP (user stack pointer)
+    *(--stack_ptr) = 0x202;                   // EFLAGS (enable interrupts, bit 2 is always 1)
+    *(--stack_ptr) = GDT_USER_CODE_SELECTOR;  // CS (user code segment, ring 3)
+    *(--stack_ptr) = entry_point;             // EIP (entry point of the ELF)
 
     // Simulate the PUSHA-saved general purpose registers
     // (order: EDI, ESI, EBP, ESP (old), EBX, EDX, ECX, EAX)
@@ -64,6 +77,60 @@ static void setup_initial_cpu_state(task_t* task, uint32 entry_point, uint32 use
 }
 
 
+// Helper function to create a kernel task with a function pointer
+static task_t* create_kernel_task(void (*entry_point)(void), const char* name) {
+    task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
+    if (!new_task) {
+        print_colored("[TASK] Failed to allocate memory for kernel task: ", 0x0C, 0x00);
+        print(name);
+        print("\n");
+        return 0;
+    }
+
+    new_task->id = next_task_id++;
+    new_task->state = TASK_STATE_READY;
+    new_task->page_directory = vmm_get_current_page_directory(); // Use current kernel PD
+    new_task->priority = 1; // Default priority
+    new_task->ticks_left = 0; // Will be set by scheduler
+    new_task->pending_signals = 0;
+    new_task->next = 0;
+
+    // No ELF info for kernel tasks
+    memory_set((uint8*)&new_task->elf_info, 0, sizeof(elf_load_info_t));
+
+    // Allocate kernel stack
+    uint32 kernel_stack_vaddr = (uint32)kmalloc_aligned(KERNEL_STACK_SIZE, MEMORY_PAGE_SIZE);
+    if (!kernel_stack_vaddr) {
+        print_colored("[TASK] Failed to allocate kernel stack for task: ", 0x0C, 0x00);
+        print(name);
+        print("\n");
+        kfree(new_task);
+        return 0;
+    }
+    new_task->kernel_stack_base = kernel_stack_vaddr;
+    
+    // Set up kernel stack for entry point
+    uint32* stack_ptr = (uint32*)(kernel_stack_vaddr + KERNEL_STACK_SIZE);
+    
+    // Push return address (should never return, but just in case)  
+    *(--stack_ptr) = 0; // Return address (never used)
+    *(--stack_ptr) = (uint32)entry_point;  // Entry point
+    *(--stack_ptr) = 0; // EBP
+    *(--stack_ptr) = 0; // EBX
+    *(--stack_ptr) = 0; // ESI
+    *(--stack_ptr) = 0; // EDI
+    
+    new_task->kernel_stack = (uint32)stack_ptr;
+
+    print("[TASK] Created kernel task '");
+    print(name);
+    print("' with ID: ");
+    print(int_to_string(new_task->id));
+    print("\n");
+
+    return new_task;
+}
+
 void tasks_init(void) {
     // Initialize the scheduler and create the initial task (kernel task)
 
@@ -84,33 +151,48 @@ void tasks_init(void) {
     // This field will be updated by the first context switch *away* from the kernel_task.
     kernel_task->kernel_stack_base = (uint32)initial_kernel_stack;
     kernel_task->kernel_stack = (uint32)&initial_kernel_stack[KERNEL_STACK_SIZE];
+    kernel_task->priority = 1;
+    kernel_task->ticks_left = 0;
+    kernel_task->pending_signals = 0;
+    kernel_task->next = 0;
     gdt_set_kernel_stack(kernel_task->kernel_stack);
-    
-    // No explicit CPU state save for the initial kernel task's creation.
-    // It will be saved upon its first preemption.
 
     // No ELF info for the kernel task itself
     memory_set((uint8*)&kernel_task->elf_info, 0, sizeof(elf_load_info_t));
 
-    kernel_task->priority = 1; // Default priority
-    kernel_task->ticks_left = 0; // Will be set by scheduler
-    kernel_task->next = 0;
-
     current_task = kernel_task;
     ready_queue_head = kernel_task; // Add kernel task to ready queue
     
+    // Create the idle task
+    idle_task = create_kernel_task(idle_task_function, "idle");
+    if (!idle_task) {
+        kernel_panic("Failed to create idle task");
+    }
+    
+    // Add idle task to ready queue (circular list)
+    kernel_task->next = idle_task;
+    idle_task->next = kernel_task;
+    
     print("[TASK] Initialized tasking system. Kernel task ID: ");
     print(int_to_string(current_task->id));
+    print(", Idle task ID: ");
+    print(int_to_string(idle_task->id));
     print("\n");
+    
+    // Debug: Print initial queue state
+    debug_print_ready_queue();
 }
 
 
 task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name) {
+    spinlock_acquire(&task_scheduler_lock);
+    
     task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
     if (!new_task) {
         print_colored("[TASK] Failed to allocate memory for new task: ", 0x0C, 0x00);
         print(name);
         print("\n");
+        spinlock_release(&task_scheduler_lock);
         return 0;
     }
 
@@ -130,6 +212,7 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
         print(int_to_string(status));
         print(")\n");
         kfree(new_task);
+        spinlock_release(&task_scheduler_lock);
         return 0;
     }
     new_task->elf_info = elf_info;
@@ -152,6 +235,7 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
             vmm_switch_page_directory(current_pd_ptr);
             vmm_destroy_page_directory((page_directory_t*)elf_info.page_directory);
             kfree(new_task);
+            spinlock_release(&task_scheduler_lock);
             return 0;
         }
         vmm_map_page((page_directory_t*)elf_info.page_directory,
@@ -171,6 +255,7 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
         // Need to clean up previously allocated frames (user stack) and page directory
         vmm_destroy_page_directory((page_directory_t*)elf_info.page_directory); // This should also free pmm frames for the user stack
         kfree(new_task);
+        spinlock_release(&task_scheduler_lock);
         return 0;
     }
     new_task->kernel_stack_base = kernel_stack_vaddr; // Store the base address
@@ -207,10 +292,18 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
     print(int_to_string(new_task->id));
     print(" (");
     print(name);
-    print(") ELF entry: 0x");
-    print(long_to_string(new_task->elf_info.entry_point));
+    print(") ELF entry: ");
+    print(int_to_string(new_task->elf_info.entry_point));
+    print(", kernel_stack: ");
+    print(int_to_string(new_task->kernel_stack));
+    print(", page_dir: ");
+    print(int_to_string((uint32)new_task->page_directory));
     print("\n");
+    
+    // Skip debug information about entry point bytes for now as it may cause page faults
+    // TODO: Add safe memory reading function for debug output
 
+    spinlock_release(&task_scheduler_lock);
     return new_task;
 }
 
@@ -249,60 +342,196 @@ void task_switch(task_t* next_task) {
     task_switch_asm(&prev_task->kernel_stack, current_task->kernel_stack, (uint32)current_task->page_directory);
 }
 
+// Helper function to validate the ready queue integrity
+static bool validate_ready_queue(void) {
+    if (!ready_queue_head) {
+        return true; // Empty queue is valid
+    }
+
+    task_t* current = ready_queue_head;
+    int count = 0;
+    do {
+        if (!current) {
+            print("[TASK] ERROR: NULL pointer in ready queue\n");
+            return false;
+        }
+        count++;
+        if (count > 1000) { // Prevent infinite loops
+            print("[TASK] ERROR: Ready queue appears to have infinite loop\n");
+            return false;
+        }
+        current = current->next;
+    } while (current != ready_queue_head);
+    
+    return true;
+}
+
+// Helper function to count valid runnable tasks
+static int count_runnable_tasks(void) {
+    if (!ready_queue_head) return 0;
+    
+    int count = 0;
+    task_t* current = ready_queue_head;
+    do {
+        if (current && current->state == TASK_STATE_READY) {
+            count++;
+        }
+        current = current->next;
+    } while (current && current != ready_queue_head);
+    
+    return count;
+}
+
+// Debug function to print the current state of the ready queue
+void debug_print_ready_queue(void) {
+    print("[TASK] Ready queue state:\n");
+    if (!ready_queue_head) {
+        print("  Queue is empty\n");
+        return;
+    }
+    
+    task_t* current = ready_queue_head;
+    int count = 0;
+    do {
+        if (!current) {
+            print("  ERROR: NULL pointer in queue!\n");
+            break;
+        }
+        
+        print("  Task ");
+        print(int_to_string(current->id));
+        print(": state=");
+        switch (current->state) {
+            case TASK_STATE_RUNNING: print("RUNNING"); break;
+            case TASK_STATE_READY: print("READY"); break;
+            case TASK_STATE_WAITING: print("WAITING"); break;
+            case TASK_STATE_TERMINATED: print("TERMINATED"); break;
+            default: print("UNKNOWN"); break;
+        }
+        print(", next=");
+        if (current->next) {
+            print(int_to_string(current->next->id));
+        } else {
+            print("NULL");
+        }
+        print("\n");
+        
+        current = current->next;
+        count++;
+        if (count > 20) { // Prevent spam
+            print("  ... (truncated after 20 tasks)\n");
+            break;
+        }
+    } while (current && current != ready_queue_head);
+    
+    print("  Current task: ");
+    if (current_task) {
+        print(int_to_string(current_task->id));
+    } else {
+        print("NULL");
+    }
+    print("\n");
+}
+
 void task_schedule(void) {
+    spinlock_acquire(&task_scheduler_lock);
+    
+    // Validate queue integrity first
+    if (!validate_ready_queue()) {
+        spinlock_release(&task_scheduler_lock);
+        kernel_panic("Ready queue corruption detected!");
+    }
+
     // If the current task is marked for termination, destroy it.
     if (current_task && (current_task->pending_signals & SIGKILL)) {
         print("[TASK] Terminating current task ID: ");
         print(int_to_string(current_task->id));
         print("\n");
-        // Save pointer to the next task in the queue before destroying current_task
+        
+        // Save the next task before destroying current
         task_t* next_in_queue = current_task->next;
-        // Important: task_destroy modifies ready_queue_head and links.
+        
+        // Special case: if this is the only task
+        if (current_task->next == current_task) {
+            ready_queue_head = NULL;
+            current_task = NULL;
+            kernel_panic("Last task terminated - no tasks remaining!");
+        }
+        
         task_destroy(current_task); 
-        current_task = 0; // Clear current_task as it's destroyed
+        current_task = NULL;
 
         // If ready_queue_head became null, there are no more tasks.
-        if (ready_queue_head == 0) {
+        if (ready_queue_head == NULL) {
             kernel_panic("No more tasks to schedule after terminating a task!");
         }
-        // Start searching for the next task from where the destroyed task was
-        current_task = next_in_queue; // Temporarily set current_task for traversal
-                                      // This assumes next_in_queue is still valid and in the list.
-                                      // task_destroy correctly relinks, so next_in_queue will point to the new head or a valid element.
+        
+        // Start from the next task
+        current_task = next_in_queue;
     }
 
     if (!ready_queue_head) {
-        return; // No tasks to schedule
+        print("[TASK] WARNING: No tasks in ready queue, creating idle task\n");
+        // We need at least one task to run
+        kernel_panic("No tasks available to schedule!");
     }
 
     // Find the next available task in the circular ready queue
     task_t* next_task = current_task; 
-    if (!next_task) { // Case where current_task was just destroyed
+    if (!next_task) { 
         next_task = ready_queue_head;
     }
 
-    task_t* initial_scan_start = next_task; // To detect if we've cycled through all tasks
+    task_t* initial_scan_start = next_task;
+    int scan_count = 0; // Prevent infinite loops
+    bool found_runnable = false;
 
     do {
         next_task = next_task->next;
+        scan_count++;
+        
         if (!next_task) {
-            print("[TASK] ERROR: Null task found in ready queue\n");
+            print("[TASK] ERROR: Null task found in ready queue at scan ");
+            print(int_to_string(scan_count));
+            print("\n");
+            // Try to recover by starting from head
             next_task = ready_queue_head;
+            if (!next_task) {
+                kernel_panic("Ready queue head is NULL!");
+            }
             break;
         }
-        // Skip terminated tasks or tasks that are not ready
-        // (For now, only checking TERMINATED, WAITING will be handled later if implemented)
-    } while ((next_task->state == TASK_STATE_TERMINATED || next_task->state == TASK_STATE_WAITING) && next_task != initial_scan_start);
+        
+        // Prevent infinite scanning
+        if (scan_count > 1000) {
+            print("[TASK] ERROR: Infinite loop detected in task scanning\n");
+            kernel_panic("Task queue corruption - infinite loop");
+        }
+        
+        // Check if this task is runnable
+        if (next_task->state == TASK_STATE_READY || next_task->state == TASK_STATE_RUNNING) {
+            found_runnable = true;
+            break;
+        }
+        
+    } while (next_task != initial_scan_start);
 
-    // If we looped through all tasks and only found terminated/waiting ones
-    if ((next_task->state == TASK_STATE_TERMINATED || next_task->state == TASK_STATE_WAITING) && next_task == initial_scan_start) {
-        // This means all tasks in the queue are terminated or waiting.
-        // If the kernel_task (ready_queue_head) is also terminated/waiting, then it's a kernel panic.
-        if (ready_queue_head->state == TASK_STATE_TERMINATED || ready_queue_head->state == TASK_STATE_WAITING) {
-             kernel_panic("All user tasks terminated/waiting and kernel task is not runnable!");
-        } else {
-            // Fallback to kernel task if all others are terminated/waiting
+    // If no runnable task was found, fall back to idle task
+    if (!found_runnable) {
+        print("[TASK] WARNING: No runnable tasks found (");
+        print(int_to_string(count_runnable_tasks()));
+        print(" runnable), switching to idle task\n");
+        
+        // Use idle task as fallback
+        if (idle_task && (idle_task->state == TASK_STATE_READY || idle_task->state == TASK_STATE_RUNNING)) {
+            next_task = idle_task;
+            next_task->state = TASK_STATE_RUNNING;
+        } else if (ready_queue_head && (ready_queue_head->state == TASK_STATE_READY || ready_queue_head->state == TASK_STATE_RUNNING)) {
+            // Final fallback to kernel task
             next_task = ready_queue_head;
+            print("[TASK] Falling back to kernel task\n");
+        } else {
+            kernel_panic("No runnable tasks available including idle task!");
         }
     }
 
@@ -310,6 +539,9 @@ void task_schedule(void) {
     if (next_task->state != TASK_STATE_RUNNING) {
         next_task->state = TASK_STATE_RUNNING;
     }
+    
+    // Release lock before context switch to avoid deadlock
+    spinlock_release(&task_scheduler_lock);
     
     // Switch to the next task
     task_switch(next_task);

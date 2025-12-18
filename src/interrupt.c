@@ -214,8 +214,52 @@ interrupt_handler_t interrupt_get_handler(uint8 int_num) {
 // =============================================================================
 
 static void default_exception_handler(int int_no, struct interrupt_frame* frame, unsigned int error_code) {
-    (void)frame;
-    (void)error_code;
+    // Check if this is a user-mode exception (based on CS register)
+    bool is_user_mode = (frame->cs & 0x3) == 0x3;  // Ring 3 (user mode)
+    
+    print_colored("[EXCEPTION] ", 0x0C, 0x00);
+    print(exception_names[int_no]);
+    print(" at EIP: ");
+    print(int_to_string((uint32)frame->eip));
+    
+    if (error_code != 0) {
+        print(" (Error Code: ");
+        print(int_to_string(error_code));
+        print(")");
+    }
+    
+    print(" - ");
+    print(is_user_mode ? "User Mode" : "Kernel Mode");
+    print("\n");
+    
+    // For critical kernel-level exceptions, panic immediately
+    if (!is_user_mode && (int_no == 8 || int_no == 10 || int_no == 11 || int_no == 12)) {
+        // Double Fault, Invalid TSS, Segment Not Present, Stack Fault
+        kernel_panic_annotated(
+            exception_names[int_no],
+            __FILE__,
+            __LINE__,
+            __FUNCTION__
+        );
+    }
+    
+    // For user-mode exceptions or recoverable kernel exceptions
+    if (is_user_mode) {
+        print_colored("[EXCEPTION] Terminating user process due to exception\n", 0x0E, 0x00);
+        // TODO: Implement proper process termination
+        // For now, we'll panic but with a different message
+        print_colored("[KERNEL] Process termination not yet implemented, halting system\n", 0x0C, 0x00);
+    } else {
+        print_colored("[EXCEPTION] Recoverable kernel exception, attempting to continue\n", 0x0E, 0x00);
+        // For certain recoverable exceptions, try to continue
+        if (int_no == 6) { // Invalid Opcode
+            print_colored("[EXCEPTION] Invalid Opcode - skipping instruction\n", 0x0E, 0x00);
+            frame->eip += 1; // Skip the bad instruction (naive approach)
+            return;
+        }
+    }
+    
+    // If we reach here, it's a serious issue
     kernel_panic_annotated(
         exception_names[int_no],
         __FILE__,
