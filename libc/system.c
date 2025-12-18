@@ -235,7 +235,8 @@ void timer_sleep_ms(uint32 milliseconds) {
 
     // Assume a conservative 1GHz clock if no calibration is available.
     const uint64 assumed_hz = 1000000000ULL;
-    uint64 target_ticks = (assumed_hz / 1000ULL) * milliseconds;
+    const uint64 ticks_per_ms = 1000000ULL; // 1e9 Hz / 1e3 ms
+    uint64 target_ticks = ticks_per_ms * milliseconds;
     while (cpu_read_tsc() - start < target_ticks) {
         __asm__ __volatile__("pause");
     }

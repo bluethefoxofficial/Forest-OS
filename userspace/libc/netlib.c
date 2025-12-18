@@ -66,16 +66,16 @@ void forest_format_ipv4(uint32 addr, char* buffer, size_t buffer_len) {
     parts[1] = (addr >> 16) & 0xFF;
     parts[2] = (addr >> 8) & 0xFF;
     parts[3] = addr & 0xFF;
-    itoa(parts[0], buffer);
+    itoa(parts[0], buffer, 10);
     size_t len = strlen(buffer);
     buffer[len++] = '.';
-    itoa(parts[1], buffer + len);
+    itoa(parts[1], buffer + len, 10);
     len = strlen(buffer);
     buffer[len++] = '.';
-    itoa(parts[2], buffer + len);
+    itoa(parts[2], buffer + len, 10);
     len = strlen(buffer);
     buffer[len++] = '.';
-    itoa(parts[3], buffer + len);
+    itoa(parts[3], buffer + len, 10);
 }
 
 int forest_dns_resolve(const char* hostname, uint32* out_addr) {

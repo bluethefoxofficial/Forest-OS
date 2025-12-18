@@ -1,6 +1,7 @@
 #include "include/net.h"
 #include "include/util.h"
 #include "include/string.h"
+#include "include/libc/stdlib.h"
 #include "include/screen.h"
 
 #define NET_MAX_SOCKETS 16
@@ -221,11 +222,12 @@ static bool net_try_virtual_service(const net_datagram_t* msg) {
             char buffer[NET_MAX_PAYLOAD];
             memory_set((uint8*)buffer, 0, sizeof(buffer));
             const char header[] = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
-            uint32 header_len = memory_length(header);
+            uint32 header_len = (uint32)strlen(header);
             memory_copy((char*)header, buffer, header_len);
             char length_field[16];
-            uint32 body_len = memory_length(body);
-            uint32 len_len = itoa(body_len, length_field);
+            uint32 body_len = (uint32)strlen(body);
+            itoa((int)body_len, length_field, 10);
+            uint32 len_len = (uint32)strlen(length_field);
             memory_copy(length_field, buffer + header_len, len_len);
             const char end_headers[] = "\r\n\r\n";
             memory_copy(end_headers, buffer + header_len + len_len, 4);
@@ -236,22 +238,22 @@ static bool net_try_virtual_service(const net_datagram_t* msg) {
         case NET_PORT_FTP: {
             const char banner[] = "220 Forest loopback FTP ready. Try wget/curl for HTTP.\n";
             return net_send_virtual_response(msg, (const uint8*)banner,
-                                             memory_length(banner), NET_PORT_FTP);
+                                             (uint32)strlen(banner), NET_PORT_FTP);
         }
         case NET_PORT_SSH: {
             const char banner[] = "SSH-0.1-ForestOS loopback\n";
             return net_send_virtual_response(msg, (const uint8*)banner,
-                                             memory_length(banner), NET_PORT_SSH);
+                                             (uint32)strlen(banner), NET_PORT_SSH);
         }
         case NET_PORT_RSYNCD: {
             const char banner[] = "@RSYNCD: 0.1 Forest loopback ready\n";
             return net_send_virtual_response(msg, (const uint8*)banner,
-                                             memory_length(banner), NET_PORT_RSYNCD);
+                                             (uint32)strlen(banner), NET_PORT_RSYNCD);
         }
         case NET_PORT_SFTP: {
             const char banner[] = "115 Forest SFTP loopback greeting\n";
             return net_send_virtual_response(msg, (const uint8*)banner,
-                                             memory_length(banner), NET_PORT_SFTP);
+                                             (uint32)strlen(banner), NET_PORT_SFTP);
         }
         default:
             return false;

@@ -19,6 +19,7 @@ int open(const char *pathname, int flags);
 int close(int fd);
 int lseek(int fd, int offset, int whence);
 int getpid(void);
+int unlink(const char *pathname);
 int nanosleep(const struct timespec *req, struct timespec *rem);
 int uname(struct utsname *uts_buffer);
 int brk(void *addr);

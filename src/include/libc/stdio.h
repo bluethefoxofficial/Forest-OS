@@ -8,9 +8,14 @@ extern "C" {
 #endif
 
 #include "../types.h"
+#include <stddef.h>
+#include <stdarg.h>
 
 // Standard I/O functions
 int printf(const char *format, ...);
+int snprintf(char *buffer, size_t size, const char *format, ...);
+int vsnprintf(char *buffer, size_t size, const char *format, va_list args);
+int vsprintf(char *buffer, const char *format, va_list args);
 int sprintf(char *buffer, const char *format, ...);
 int puts(const char *str);
 int putchar(int c);

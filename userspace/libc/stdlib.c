@@ -152,6 +152,55 @@ double atof(const char *str) {
     return (double)atoi(str);
 }
 
+long strtol(const char *nptr, char **endptr, int base) {
+    const char *s = nptr;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r' || *s == '\f' || *s == '\v') {
+        s++;
+    }
+
+    int sign = 1;
+    if (*s == '+' || *s == '-') {
+        if (*s == '-') sign = -1;
+        s++;
+    }
+
+    if (base == 0) {
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+            base = 16;
+            s += 2;
+        } else if (s[0] == '0') {
+            base = 8;
+            s += 1;
+        } else {
+            base = 10;
+        }
+    }
+
+    long result = 0;
+    while (*s) {
+        int digit;
+        if (*s >= '0' && *s <= '9') {
+            digit = *s - '0';
+        } else if (*s >= 'a' && *s <= 'z') {
+            digit = *s - 'a' + 10;
+        } else if (*s >= 'A' && *s <= 'Z') {
+            digit = *s - 'A' + 10;
+        } else {
+            break;
+        }
+        if (digit >= base) {
+            break;
+        }
+        result = result * base + digit;
+        s++;
+    }
+
+    if (endptr) {
+        *endptr = (char *)s;
+    }
+    return result * sign;
+}
+
 char *itoa(int value, char *str, int base) {
     if (base < 2 || base > 16) {
         str[0] = '\0';

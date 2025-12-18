@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-#if defined(__linux__)
+#ifdef FOREST_USE_HOST_LIBC
 #include <sys/utsname.h>
 typedef struct utsname utsname_t;
 #else
