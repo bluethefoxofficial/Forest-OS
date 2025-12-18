@@ -15,6 +15,7 @@
 #include "../../src/include/libc/unistd.h"
 #include "../../src/include/types.h"
 #include "../../src/include/syscall.h"
+#include "../../src/include/net.h"
 
 typedef int32 ssize_t;
 
@@ -338,5 +339,15 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
 #else
     return handle_forest_result(syscall6(SYS_RECVFROM, fd, (int32)buf, (int32)len, flags,
                     (int32)addr, (int32)addrlen));
+#endif
+}
+
+int netinfo(net_socket_info_t* buffer, int max_entries) {
+#ifdef __linux__
+    (void)buffer;
+    (void)max_entries;
+    return handle_linux_stub();
+#else
+    return handle_forest_result(syscall2(SYS_NETINFO, (int32)buffer, max_entries));
 #endif
 }

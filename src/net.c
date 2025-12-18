@@ -26,6 +26,11 @@ typedef struct {
     uint8 head;
     uint8 tail;
     uint8 count;
+    uint32 bytes_sent;
+    uint32 bytes_received;
+    uint32 last_peer_addr;
+    uint16 last_peer_port;
+    bool   reuseaddr;
 } net_socket_t;
 
 static net_socket_t g_sockets[NET_MAX_SOCKETS];
@@ -175,14 +180,95 @@ static void net_emit_rx_event(uint16 port, uint32 length) {
                       DRIVER_EVENT_NETWORK_RX_READY, &payload, sizeof(payload));
 }
 
+static bool net_send_virtual_response(const net_datagram_t* request,
+                                      const uint8* payload, uint32 length,
+                                      uint16 response_port) {
+    net_socket_t* reply = net_socket_by_port(request->src_port);
+    if (!reply || !payload || length == 0 || length > NET_MAX_PAYLOAD) {
+        return false;
+    }
+
+    net_datagram_t response;
+    memory_set((uint8*)&response, 0, sizeof(response));
+    response.src_addr = request->dest_addr;
+    response.src_port = response_port;
+    response.dest_addr = request->src_addr;
+    response.dest_port = request->src_port;
+    response.length = length;
+    memory_copy((char*)payload, (char*)response.data, length);
+
+    if (!net_socket_queue_push(reply, &response)) {
+        return false;
+    }
+    reply->last_peer_addr = request->dest_addr;
+    reply->last_peer_port = response_port;
+    reply->bytes_received += length;
+    net_emit_rx_event(reply->port, response.length);
+    return true;
+}
+
+static bool net_try_virtual_service(const net_datagram_t* msg) {
+    if (!msg) {
+        return false;
+    }
+
+    switch (msg->dest_port) {
+        case NET_PORT_ECHO:
+            return net_send_virtual_response(msg, msg->data, msg->length, NET_PORT_ECHO);
+        case NET_PORT_HTTP: {
+            const char body[] = "Forest loopback HTTP endpoint.\n"
+                                "Available services: echo, ssh, ftp, rsync.\n";
+            char buffer[NET_MAX_PAYLOAD];
+            memory_set((uint8*)buffer, 0, sizeof(buffer));
+            const char header[] = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: ";
+            uint32 header_len = memory_length(header);
+            memory_copy((char*)header, buffer, header_len);
+            char length_field[16];
+            uint32 body_len = memory_length(body);
+            uint32 len_len = itoa(body_len, length_field);
+            memory_copy(length_field, buffer + header_len, len_len);
+            const char end_headers[] = "\r\n\r\n";
+            memory_copy(end_headers, buffer + header_len + len_len, 4);
+            memory_copy((char*)body, buffer + header_len + len_len + 4, body_len);
+            uint32 total_len = header_len + len_len + 4 + body_len;
+            return net_send_virtual_response(msg, (uint8*)buffer, total_len, NET_PORT_HTTP);
+        }
+        case NET_PORT_FTP: {
+            const char banner[] = "220 Forest loopback FTP ready. Try wget/curl for HTTP.\n";
+            return net_send_virtual_response(msg, (const uint8*)banner,
+                                             memory_length(banner), NET_PORT_FTP);
+        }
+        case NET_PORT_SSH: {
+            const char banner[] = "SSH-0.1-ForestOS loopback\n";
+            return net_send_virtual_response(msg, (const uint8*)banner,
+                                             memory_length(banner), NET_PORT_SSH);
+        }
+        case NET_PORT_RSYNCD: {
+            const char banner[] = "@RSYNCD: 0.1 Forest loopback ready\n";
+            return net_send_virtual_response(msg, (const uint8*)banner,
+                                             memory_length(banner), NET_PORT_RSYNCD);
+        }
+        case NET_PORT_SFTP: {
+            const char banner[] = "115 Forest SFTP loopback greeting\n";
+            return net_send_virtual_response(msg, (const uint8*)banner,
+                                             memory_length(banner), NET_PORT_SFTP);
+        }
+        default:
+            return false;
+    }
+}
+
 static int32 net_deliver_local(const net_datagram_t* msg) {
     net_socket_t* dest = net_socket_by_port(msg->dest_port);
     if (!dest) {
-        return (int32)msg->length;
+        return net_try_virtual_service(msg) ? (int32)msg->length : (int32)msg->length;
     }
     if (!net_socket_queue_push(dest, msg)) {
         return -1;
     }
+    dest->last_peer_addr = msg->src_addr;
+    dest->last_peer_port = msg->src_port;
+    dest->bytes_received += msg->length;
     net_emit_rx_event(dest->port, msg->length);
     return (int32)msg->length;
 }
@@ -209,6 +295,10 @@ int32 net_send_datagram(uint32 fd, const uint8* buffer, uint32 length,
     msg.length = length;
     memory_copy((char*)buffer, (char*)msg.data, length);
 
+    sock->bytes_sent += length;
+    sock->last_peer_addr = dest_addr;
+    sock->last_peer_port = dest_port;
+
     return net_deliver_local(&msg);
 }
 
@@ -231,5 +321,30 @@ int32 net_recv_datagram(uint32 fd, uint8* buffer, uint32 length,
     if (out_port) {
         *out_port = msg.src_port;
     }
+    sock->bytes_received += to_copy;
     return (int32)to_copy;
+}
+
+uint32 net_snapshot(net_socket_info_t* out, uint32 max_entries) {
+    if (!out || max_entries == 0) {
+        return 0;
+    }
+
+    uint32 count = 0;
+    for (uint32 i = 0; i < NET_MAX_SOCKETS && count < max_entries; i++) {
+        if (!g_sockets[i].used) {
+            continue;
+        }
+        net_socket_info_t* dst = &out[count++];
+        dst->used = g_sockets[i].used;
+        dst->bound = g_sockets[i].bound;
+        dst->port = g_sockets[i].port;
+        dst->queue_depth = g_sockets[i].count;
+        dst->queue_capacity = NET_SOCKET_QUEUE;
+        dst->bytes_sent = g_sockets[i].bytes_sent;
+        dst->bytes_received = g_sockets[i].bytes_received;
+        dst->last_peer_addr = g_sockets[i].last_peer_addr;
+        dst->last_peer_port = g_sockets[i].last_peer_port;
+    }
+    return count;
 }

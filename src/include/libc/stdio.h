@@ -1,6 +1,8 @@
 #ifndef LIBC_STDIO_H
 #define LIBC_STDIO_H
 
+#define __STDC_VERSION_STDIO_H__ 202311L
+
 #ifdef __cplusplus
 extern "C" {
 #endif
