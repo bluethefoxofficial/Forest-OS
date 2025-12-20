@@ -3,7 +3,8 @@
 #include "../src/include/libc/unistd.h"
 #include "../src/include/libc/stdlib.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     char buffer[256];
     const char probe[] = "SFTP connect";
     int received = forest_port_query(NET_PORT_SFTP, probe, sizeof(probe) - 1, buffer, sizeof(buffer) - 1);
@@ -13,5 +14,5 @@ void _start(void) {
     } else {
         printf("sftp: loopback endpoint not responding\n");
     }
-    exit(0);
+    return 0;
 }

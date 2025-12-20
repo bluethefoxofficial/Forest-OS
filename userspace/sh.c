@@ -1,12 +1,13 @@
 #include "tool_runtime.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     char line[256];
     printf("forest sh: type a command (echo only)\n> ");
     if (tr_read_line(NULL, line, sizeof(line)) < 0) {
         printf("sh: no input\n");
-        exit(1);
+        return 1;
     }
     printf("you entered: %s\n", line);
-    exit(0);
+    return 0;
 }

@@ -39,9 +39,14 @@ int ps2_controller_init(void) {
         return -1;
     }
     
-    // Flush output buffer
-    while (inportb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT_BUFFER_FULL) {
+    // Flush output buffer multiple times to ensure clean state
+    for (int flush_count = 0; flush_count < 10; flush_count++) {
+        if (!(inportb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT_BUFFER_FULL)) {
+            break;
+        }
         inportb(PS2_DATA_PORT);
+        // Small delay to let controller settle
+        for (volatile int delay = 0; delay < 1000; delay++);
     }
     
     // Read configuration byte
@@ -62,7 +67,7 @@ int ps2_controller_init(void) {
     print("\n");
     
     // Modify configuration byte: disable translation, interrupts during init
-    config_byte &= ~(PS2_CONFIG_KEYBOARD_INTERRUPT | PS2_CONFIG_MOUSE_INTERRUPT);
+    config_byte &= ~(PS2_CONFIG_KEYBOARD_INTERRUPT | PS2_CONFIG_MOUSE_INTERRUPT | PS2_CONFIG_KEYBOARD_TRANSLATE);
     config_byte |= (PS2_CONFIG_KEYBOARD_DISABLE | PS2_CONFIG_MOUSE_DISABLE);
     
     // Write configuration byte
@@ -172,8 +177,9 @@ int ps2_controller_init(void) {
     controller_status.mouse_enabled = mouse_port_available;
     controller_status.keyboard_interrupt_enabled = true;
     controller_status.mouse_interrupt_enabled = mouse_port_available;
-    controller_translation_enabled = (config_byte & PS2_CONFIG_KEYBOARD_TRANSLATE) != 0;
-    controller_status.translation_enabled = controller_translation_enabled;
+    // Translation is now disabled as part of our initialization
+    controller_translation_enabled = false;
+    controller_status.translation_enabled = false;
     controller_initialized = true;
     
     print("[PS/2] Controller initialization complete\n");

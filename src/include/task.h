@@ -26,6 +26,7 @@ typedef struct task {
     uint32 priority;            // Task priority
     uint32 ticks_left;          // Time slices left for execution
     uint32 pending_signals;     // Bitmap of pending signals
+    uint32 sleep_until_tick;    // Tick count to wake up at
 
     struct task* next;          // Pointer to the next task in the linked list
 } task_t;
@@ -41,6 +42,10 @@ void task_switch(task_t* next_task); // Updated signature
 void task_schedule(void);
 void task_kill(uint32 pid); // Added
 void debug_print_ready_queue(void); // Debug function
+
+void sleep_busy(uint32 microseconds);
+void sleep_interruptible(uint32 milliseconds);
+void task_shutdown_all(void);
 
 
 // Global variables (defined in task.c)

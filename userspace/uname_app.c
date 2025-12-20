@@ -3,7 +3,8 @@
 #include "../src/include/libc/stdlib.h"
 #include "../src/include/libc/string.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     struct utsname info;
     if (uname(&info) == 0) {
         printf("sysname : %s\n", info.sysname);
@@ -14,5 +15,5 @@ void _start(void) {
     } else {
         printf("uname syscall not available\n");
     }
-    exit(0);
+    return 0;
 }

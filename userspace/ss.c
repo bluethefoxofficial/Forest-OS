@@ -3,7 +3,8 @@
 #include "../src/include/libc/unistd.h"
 #include "../src/include/libc/stdlib.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     net_socket_info_t sockets[16];
     int count = forest_netinfo(sockets, 16);
     if (count < 0) {
@@ -15,5 +16,5 @@ void _start(void) {
                sockets[i].queue_depth, sockets[i].queue_capacity - sockets[i].queue_depth,
                sockets[i].port, sockets[i].last_peer_port);
     }
-    exit(0);
+    return 0;
 }

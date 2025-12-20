@@ -1,6 +1,7 @@
 #include "include/memory.h"
 #include "include/screen.h"
 #include "include/panic.h"
+#include "include/string.h"
 
 static void print_hex_byte(uint8 byte);
 static void print_char(char c);
@@ -28,8 +29,8 @@ extern bool vmm_is_mapped(page_directory_t* dir, uint32 vaddr);
 #define PF_RESERVED     0x08    // Reserved bit violation
 #define PF_FETCH        0x10    // Instruction fetch
 
-void page_fault_handler(uint32 fault_addr, uint32 error_code) {
-    print("\n=== PAGE FAULT ===\n");
+void memory_debug_report_fault(uint32 fault_addr, uint32 error_code) {
+    print_colored("\n=== PAGE FAULT DETECTED ===\n", 0x0C, 0x00);
     
     print("Fault Address: 0x");
     print_hex(fault_addr);
@@ -67,6 +68,19 @@ void page_fault_handler(uint32 fault_addr, uint32 error_code) {
     
     print(")\n");
     
+    // Check for corruption patterns
+    bool corruption_detected = false;
+    if (fault_addr == 0xDEADBEEF || fault_addr == 0xCAFEBABE || 
+        fault_addr == 0xFEEDFACE || fault_addr == 0xBAADC0DE) {
+        print_colored("WARNING: Fault address matches memory corruption marker!\n", 0x0E, 0x00);
+        corruption_detected = true;
+    }
+    
+    // Check for null pointer dereference patterns
+    if (fault_addr < 0x1000) {
+        print_colored("CRITICAL: NULL pointer dereference detected!\n", 0x0C, 0x00);
+    }
+    
     // Try to determine cause
     page_directory_t* current_dir = vmm_get_current_page_directory();
     
@@ -86,13 +100,60 @@ void page_fault_handler(uint32 fault_addr, uint32 error_code) {
         print("Cause: Unknown memory region\n");
     }
     
-    // Show current memory statistics
-    memory_dump_info();
+    // Additional stack validation
+    uint32 esp, ebp;
+    __asm__ __volatile__("mov %%esp, %0" : "=r"(esp));
+    __asm__ __volatile__("mov %%ebp, %0" : "=r"(ebp));
     
-    print("==================\n");
+    print("Current ESP: 0x");
+    print_hex(esp);
+    print(", EBP: 0x");
+    print_hex(ebp);
+    print("\n");
     
-    // For now, panic on any page fault
-    PANIC("Unhandled page fault");
+    // Check for stack overflow
+    if (esp < 0x00100000 || esp > 0x00800000) {
+        print_colored("WARNING: Stack pointer outside expected kernel range!\n", 0x0E, 0x00);
+        corruption_detected = true;
+    }
+    
+    if (corruption_detected) {
+        print_colored("CORRUPTION DETECTED: This appears to be a memory corruption bug\n", 0x0C, 0x00);
+    }
+    
+    // Show current memory statistics if not corrupted
+    if (!corruption_detected) {
+        memory_dump_info();
+    }
+    
+    print_colored("===============================\n", 0x0C, 0x00);
+    
+    // Panic with detailed message
+    static char panic_msg[256];
+    strcpy(panic_msg, "Page fault at 0x");
+    // Simple hex conversion for fault address
+    char hex_str[16];
+    uint32 temp = fault_addr;
+    hex_str[0] = '\0';
+    for (int i = 7; i >= 0; i--) {
+        uint32 digit = (temp >> (i * 4)) & 0xF;
+        char c = (digit < 10) ? ('0' + digit) : ('A' + digit - 10);
+        size_t len = strlen(hex_str);
+        hex_str[len] = c;
+        hex_str[len + 1] = '\0';
+    }
+    strcat(panic_msg, hex_str);
+    
+    if (corruption_detected) {
+        strcat(panic_msg, " (corruption detected)");
+    } else if (fault_addr < 0x1000) {
+        strcat(panic_msg, " (null pointer)");
+    } else {
+        strcat(panic_msg, " (access violation)");
+    }
+    
+    print_colored(panic_msg, 0x0C, 0x00);
+    print("\n");
 }
 
 // =============================================================================

@@ -1,16 +1,8 @@
-/*
- * Forest OS interrupt handling
- *
- * Provides a predictable initialization sequence and safe helper
- * routines for enabling/disabling interrupts at runtime.
- */
-
-#include "include/cpu_ops.h"
 #include "include/interrupt.h"
-#include "include/interrupt_handlers.h"
-#include "include/io_ports.h"
-#include "include/panic.h"
 #include "include/screen.h"
+#include "include/panic.h"
+#include "include/system.h"
+#include "include/timer.h"
 #include "include/util.h"
 
 // =============================================================================
@@ -18,108 +10,74 @@
 // =============================================================================
 
 typedef enum interrupt_state {
-    INTERRUPT_STATE_OFF = 0,
-    INTERRUPT_STATE_EARLY,
-    INTERRUPT_STATE_READY
+    INTERRUPT_STATE_UNINITIALIZED = 0,
+    INTERRUPT_STATE_EARLY = 1,
+    INTERRUPT_STATE_FULL = 2
 } interrupt_state_t;
 
+static volatile interrupt_state_t g_interrupt_state = INTERRUPT_STATE_UNINITIALIZED;
 volatile bool interrupts_initialized = false;
-static volatile interrupt_state_t interrupt_state = INTERRUPT_STATE_OFF;
 
+// IDT structures
 static idt_entry_t idt[IDT_ENTRIES];
 static idtr_t idtr;
+
+// Global selectors
+uint16 g_kernel_code_selector = 0x08;
+uint16 g_kernel_data_selector = 0x10;
+
+// Handler table
 static interrupt_handler_t interrupt_handlers[IDT_ENTRIES] = {0};
 
-uint16 g_kernel_code_selector = 0;
-uint16 g_kernel_data_selector = 0;
-
-const char* exception_names[32] = {
-    "Division Error",                "Debug Exception",
-    "Non-Maskable Interrupt",        "Breakpoint",
-    "Overflow",                      "Bound Range Exceeded",
-    "Invalid Opcode",                "Device Not Available",
-    "Double Fault",                  "Coprocessor Segment Overrun",
-    "Invalid TSS",                   "Segment Not Present",
-    "Stack Fault",                   "General Protection Fault",
-    "Page Fault",                    "Reserved",
-    "x87 FPU Error",                 "Alignment Check",
-    "Machine Check",                 "SIMD Floating-Point Exception",
-    "Virtualization Exception",      "Control Protection Exception",
-    "Reserved",                      "Reserved",
-    "Reserved",                      "Reserved",
-    "Reserved",                      "Reserved",
-    "Reserved",                      "Reserved",
-    "Reserved",                      "Reserved"
-};
+// External assembly interrupt stub table
+extern uint32 interrupt_stub_table[];
 
 // =============================================================================
-// LOW LEVEL HELPERS
+// LOW LEVEL HELPERS  
 // =============================================================================
 
 static inline bool cpu_interrupt_flag(void) {
-    uint32 flags = cpu_read_eflags();
-    return (flags & (1u << 9)) != 0;
+    uint32 flags;
+    __asm__ __volatile__("pushf; pop %0" : "=r"(flags));
+    return (flags & 0x200) != 0;
 }
 
-static inline bool interrupt_system_ready(void) {
-    return interrupt_state == INTERRUPT_STATE_READY;
-}
-
-static inline uint16 kernel_code_selector(void) {
-    if (g_kernel_code_selector == 0) {
-        g_kernel_code_selector = cpu_read_cs();
-    }
-    return g_kernel_code_selector;
-}
-
-void idt_set_gate(uint8 num, uint32 handler, uint8 flags) {
-    idt[num].offset_low  = handler & 0xFFFF;
-    idt[num].offset_high = (handler >> 16) & 0xFFFF;
-    idt[num].selector    = kernel_code_selector();
-    idt[num].reserved    = 0;
-    idt[num].flags       = flags;
-}
-
-static void idt_clear(void) {
-    for (int i = 0; i < IDT_ENTRIES; ++i) {
-        idt_set_gate(i, 0, 0);
-        interrupt_handlers[i] = NULL;
-    }
-}
-
-static void idt_load(void) {
-    idtr.limit = (sizeof(idt_entry_t) * IDT_ENTRIES) - 1;
-    idtr.base  = (uint32)&idt;
-    cpu_load_idt(&idtr);
-}
+// io_wait is already declared in system.h
 
 // =============================================================================
 // SAFE INTERRUPT CONTROL FUNCTIONS
 // =============================================================================
 
 bool irq_save_and_disable_safe(void) {
-    bool were_enabled = cpu_interrupt_flag();
-    cpu_disable_interrupts();
-    return were_enabled;
+    if (g_interrupt_state == INTERRUPT_STATE_UNINITIALIZED) {
+        return false;
+    }
+    
+    bool was_enabled = cpu_interrupt_flag();
+    __asm__ __volatile__("cli");
+    return was_enabled;
 }
 
 void irq_restore_safe(bool interrupts_enabled) {
+    if (g_interrupt_state == INTERRUPT_STATE_UNINITIALIZED) {
+        return;
+    }
+    
     if (interrupts_enabled) {
-        irq_enable_safe();
-    } else {
-        irq_disable_safe();
+        __asm__ __volatile__("sti");
     }
 }
 
 void irq_enable_safe(void) {
-    if (!interrupt_system_ready()) {
-        kernel_panic("Interrupt system not ready when enabling IRQs");
+    if (g_interrupt_state >= INTERRUPT_STATE_EARLY) {
+        __asm__ __volatile__("sti");
     }
-    cpu_enable_interrupts();
 }
 
 void irq_disable_safe(void) {
-    cpu_disable_interrupts();
+    if (g_interrupt_state >= INTERRUPT_STATE_EARLY) {
+        __asm__ __volatile__("cli");
+    }
 }
 
 bool irq_are_enabled(void) {
@@ -131,11 +89,13 @@ bool irq_are_enabled(void) {
 // =============================================================================
 
 void pic_init(void) {
+    // ICW1: Start initialization sequence
     outportb(PIC1_COMMAND, 0x11);
     io_wait();
     outportb(PIC2_COMMAND, 0x11);
     io_wait();
 
+    // ICW2: Set vector offsets
     outportb(PIC1_DATA, 0x20); // Master PIC vector offset
     io_wait();
     outportb(PIC2_DATA, 0x28); // Slave PIC vector offset
@@ -210,62 +170,68 @@ interrupt_handler_t interrupt_get_handler(uint8 int_num) {
 }
 
 // =============================================================================
-// DEFAULT HANDLERS
+// DEFAULT HANDLERS  
 // =============================================================================
 
-static void default_exception_handler(int int_no, struct interrupt_frame* frame, unsigned int error_code) {
-    // Check if this is a user-mode exception (based on CS register)
-    bool is_user_mode = (frame->cs & 0x3) == 0x3;  // Ring 3 (user mode)
+// Forward declaration
+static bool handle_invalid_opcode(struct interrupt_frame* frame);
+
+// Linux-style Invalid Opcode Handler
+// Like Linux, we only handle actual exceptions - let CPU execute valid opcodes naturally
+static bool handle_invalid_opcode(struct interrupt_frame* frame) {
+    uint8* instruction = (uint8*)frame->eip;
+    uint8 opcode = *instruction;
     
-    print_colored("[EXCEPTION] ", 0x0C, 0x00);
-    print(exception_names[int_no]);
-    print(" at EIP: ");
-    print(int_to_string((uint32)frame->eip));
-    
-    if (error_code != 0) {
-        print(" (Error Code: ");
-        print(int_to_string(error_code));
-        print(")");
-    }
-    
-    print(" - ");
-    print(is_user_mode ? "User Mode" : "Kernel Mode");
+    print_colored("[EXCEPTION] Invalid/Undefined Instruction (#UD) at EIP: 0x", 0x0C, 0x00);
+    print_hex(frame->eip);
+    print(", opcode: 0x");
+    print_hex(opcode);
     print("\n");
     
-    // For critical kernel-level exceptions, panic immediately
-    if (!is_user_mode && (int_no == 8 || int_no == 10 || int_no == 11 || int_no == 12)) {
-        // Double Fault, Invalid TSS, Segment Not Present, Stack Fault
-        kernel_panic_annotated(
-            exception_names[int_no],
-            __FILE__,
-            __LINE__,
-            __FUNCTION__
-        );
+    // In Linux, this would:
+    // 1. Send SIGILL to userspace processes  
+    // 2. Emulate only specific legacy instructions if needed
+    // 3. Panic if in kernel mode with unhandled instruction
+    
+    // For now, just try to skip the instruction and continue
+    // In a proper OS, we'd send SIGILL to the process
+    uint32 skip_length = 1; // Default: skip 1 byte
+    
+    // Handle known multi-byte patterns
+    if (opcode == 0x0F) {
+        skip_length = 2; // Two-byte opcode
+        print_colored("[KERNEL] Two-byte opcode detected\n", 0x0E, 0x00);
     }
     
-    // For user-mode exceptions or recoverable kernel exceptions
-    if (is_user_mode) {
-        print_colored("[EXCEPTION] Terminating user process due to exception\n", 0x0E, 0x00);
-        // TODO: Implement proper process termination
-        // For now, we'll panic but with a different message
-        print_colored("[KERNEL] Process termination not yet implemented, halting system\n", 0x0C, 0x00);
-    } else {
-        print_colored("[EXCEPTION] Recoverable kernel exception, attempting to continue\n", 0x0E, 0x00);
-        // For certain recoverable exceptions, try to continue
-        if (int_no == 6) { // Invalid Opcode
-            print_colored("[EXCEPTION] Invalid Opcode - skipping instruction\n", 0x0E, 0x00);
-            frame->eip += 1; // Skip the bad instruction (naive approach)
-            return;
-        }
+    frame->eip += skip_length;
+    print_colored("[KERNEL] Skipped invalid instruction, continuing at EIP: 0x", 0x0A, 0x00);
+    print_hex(frame->eip);
+    print("\n");
+    
+    return true; // Always attempt recovery for now
+}
+
+// Default exception handler - Linux-style approach
+static void default_exception_handler(int int_no, struct interrupt_frame* frame, unsigned int error_code) {
+    switch (int_no) {
+        case EXCEPTION_INVALID_OPCODE:
+            if (handle_invalid_opcode(frame)) {
+                return; // Successfully handled
+            }
+            break;
+        default:
+            break;
     }
     
-    // If we reach here, it's a serious issue
-    kernel_panic_annotated(
-        exception_names[int_no],
-        __FILE__,
-        __LINE__,
-        __FUNCTION__
-    );
+    // Unhandled exception - panic with details  
+    print_colored("[PANIC] Unhandled exception: ", 0x0C, 0x00);
+    print_dec(int_no);
+    print(" at EIP: ");
+    print_hex(frame->eip);
+    print(", error: ");
+    print_hex(error_code);
+    print("\n");
+    kernel_panic("Unhandled CPU exception");
 }
 
 static void default_irq_handler(int int_no, struct interrupt_frame* frame, unsigned int error_code) {
@@ -282,7 +248,6 @@ static void default_irq_handler(int int_no, struct interrupt_frame* frame, unsig
 
 void interrupt_common_handler(int int_no, struct interrupt_frame* frame, unsigned int error_code) {
     interrupt_handler_t handler = interrupt_handlers[int_no];
-
     if (handler) {
         handler(frame, error_code);
         return;
@@ -292,7 +257,23 @@ void interrupt_common_handler(int int_no, struct interrupt_frame* frame, unsigne
         default_exception_handler(int_no, frame, error_code);
     } else if (int_no >= IRQ_TIMER && int_no <= IRQ_SECONDARY_HD) {
         default_irq_handler(int_no, frame, error_code);
+    } else {
+        print_colored("[WARNING] Unhandled interrupt: ", 0x0E, 0x00);
+        print_dec(int_no);
+        print("\n");
     }
+}
+
+// =============================================================================
+// IDT MANAGEMENT
+// =============================================================================
+
+void idt_set_gate(uint8 num, uint32 handler, uint8 flags) {
+    idt[num].offset_low = handler & 0xFFFF;
+    idt[num].selector = g_kernel_code_selector;
+    idt[num].reserved = 0;
+    idt[num].flags = flags;
+    idt[num].offset_high = (handler >> 16) & 0xFFFF;
 }
 
 // =============================================================================
@@ -300,25 +281,55 @@ void interrupt_common_handler(int int_no, struct interrupt_frame* frame, unsigne
 // =============================================================================
 
 void interrupt_early_init(void) {
-    irq_disable_safe();
-    idt_clear();
-    g_kernel_code_selector = cpu_read_cs();
-    g_kernel_data_selector = cpu_read_ds();
-    if (g_kernel_code_selector == 0 || g_kernel_data_selector == 0) {
-        kernel_panic("Interrupt selectors not initialized");
+    if (g_interrupt_state != INTERRUPT_STATE_UNINITIALIZED) {
+        return; // Already initialized
     }
-    interrupt_state = INTERRUPT_STATE_EARLY;
+    
+    print_colored("[INIT] Setting up interrupt descriptor table...\n", 0x0A, 0x00);
+    
+    // Initialize IDT descriptor
+    idtr.limit = sizeof(idt) - 1;
+    idtr.base = (uint32)&idt;
+    
+    // Clear IDT
+    for (int i = 0; i < IDT_ENTRIES; i++) {
+        idt_set_gate(i, 0, 0);
+    }
+    
+    // Use the interrupt stub table from interrupt_stubs.asm
+    
+    // Set up exception handlers (0-31) 
+    for (int i = 0; i < 32; i++) {
+        idt_set_gate(i, interrupt_stub_table[i], IDT_GATE_INTERRUPT32);
+    }
+
+    // Load IDT
+    __asm__ __volatile__("lidt %0" :: "m"(idtr));
+    
+    g_interrupt_state = INTERRUPT_STATE_EARLY;
+    print_colored("[INIT] Basic interrupt handling enabled\n", 0x0A, 0x00);
 }
 
 void interrupt_full_init(void) {
-    if (interrupt_state == INTERRUPT_STATE_OFF) {
+    if (g_interrupt_state != INTERRUPT_STATE_EARLY) {
         interrupt_early_init();
     }
-
-    interrupt_install_all_stubs();
-    idt_load();
+    
+    print_colored("[INIT] Setting up PIC and IRQ handlers...\n", 0x0A, 0x00);
+    
+    // Initialize PIC
     pic_init();
+    
+    // Set up IRQ handlers (32-47) using the same stub table
+    for (int i = 0; i < 16; i++) {
+        idt_set_gate(IRQ_TIMER + i, interrupt_stub_table[IRQ_TIMER + i], IDT_GATE_INTERRUPT32);
+    }
 
-    interrupt_state = INTERRUPT_STATE_READY;
+    // Set up system call handler (0x80)
+    idt_set_gate(0x80, interrupt_stub_table[0x80], IDT_GATE_USER_INT);
+
+    g_interrupt_state = INTERRUPT_STATE_FULL;
     interrupts_initialized = true;
+    
+    print_colored("[INIT] Full interrupt system initialized\n", 0x0A, 0x00);
 }

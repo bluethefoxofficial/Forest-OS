@@ -1,5 +1,12 @@
 #include "include/acpi.h"
 #include "include/string.h"
+#include "include/interrupt.h"
+#include "include/debuglog.h"
+#include <uacpi/uacpi.h>
+#include <uacpi/sleep.h>
+#include <uacpi/event.h>
+#include "include/panic.h"
+
 
 #define EBDA_SEG_PTR 0x040E
 #define BIOS_AREA_START 0xE0000
@@ -10,6 +17,7 @@ static const acpi_sdt_header_t* g_rsdt = 0;
 static const acpi_sdt_header_t* g_xsdt = 0;
 static const acpi_mcfg_table_t* g_mcfg = 0;
 static bool g_acpi_initialized = false;
+static bool g_uacpi_ready = false;
 
 static uint8 acpi_checksum(const void* ptr, uint32 length) {
     const uint8* bytes = (const uint8*)ptr;
@@ -39,7 +47,7 @@ static const acpi_rsdp_t* acpi_scan_region(uint32 base, uint32 length) {
     return 0;
 }
 
-static const acpi_rsdp_t* acpi_find_rsdp(void) {
+const acpi_rsdp_t* acpi_find_rsdp(void) {
     uint16* ebda_ptr = (uint16*)EBDA_SEG_PTR;
     uint32 ebda_address = (uint32)(*ebda_ptr) << 4;
     if (ebda_address) {
@@ -140,4 +148,78 @@ const acpi_rsdp_t* acpi_get_rsdp(void) {
 
 const acpi_mcfg_table_t* acpi_get_mcfg(void) {
     return g_mcfg;
+}
+
+#define ACPI_LOG(msg) debuglog_write(msg)
+
+bool uacpi_init(void) {
+    if (g_uacpi_ready) {
+        return true;
+    }
+
+    uacpi_status st = uacpi_initialize(UACPI_FLAG_NO_ACPI_MODE);
+    if (uacpi_unlikely_error(st)) {
+        ACPI_LOG("[ACPI] uacpi_initialize failed\n");
+        return false;
+    }
+
+    st = uacpi_namespace_load();
+    if (uacpi_unlikely_error(st)) {
+        ACPI_LOG("[ACPI] uacpi_namespace_load failed\n");
+        return false;
+    }
+
+    st = uacpi_namespace_initialize();
+    if (uacpi_unlikely_error(st)) {
+        ACPI_LOG("[ACPI] uacpi_namespace_initialize failed\n");
+        return false;
+    }
+
+    st = uacpi_enter_acpi_mode();
+    if (uacpi_unlikely_error(st)) {
+        ACPI_LOG("[ACPI] uacpi_enter_acpi_mode failed\n");
+        return false;
+    }
+
+    st = uacpi_finalize_gpe_initialization();
+    if (uacpi_unlikely_error(st)) {
+        ACPI_LOG("[ACPI] uacpi_finalize_gpe_initialization failed\n");
+        return false;
+    }
+
+    g_uacpi_ready = true;
+    return true;
+}
+
+bool acpi_shutdown(void) {
+    if (!g_uacpi_ready && !uacpi_init()) {
+        return false;
+    }
+
+    uacpi_status st = uacpi_prepare_for_sleep_state(UACPI_SLEEP_STATE_S5);
+    if (uacpi_unlikely_error(st)) {
+        ACPI_LOG("[ACPI] Failed to prepare for S5\n");
+        return false;
+    }
+
+    irq_disable_safe();
+    st = uacpi_enter_sleep_state(UACPI_SLEEP_STATE_S5);
+    if (uacpi_unlikely_error(st)) {
+        ACPI_LOG("[ACPI] Failed to enter S5\n");
+        return false;
+    }
+    return true;
+}
+
+bool acpi_reboot(void) {
+    if (!g_uacpi_ready && !uacpi_init()) {
+        return false;
+    }
+
+    uacpi_status st = uacpi_reboot();
+    if (uacpi_unlikely_error(st)) {
+        ACPI_LOG("[ACPI] ACPI reset register unavailable\n");
+        return false;
+    }
+    return true;
 }

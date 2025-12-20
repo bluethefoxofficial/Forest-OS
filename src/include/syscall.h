@@ -370,22 +370,24 @@ enum syscall_number {
     SYS_LISTXATTRAT             = 465,
     SYS_REMOVEXATTRAT           = 466,
     SYS_OPEN_TREE_ATTR          = 467,
-    
-    // Maximum syscall number
     SYS_NETINFO                 = 469,
-    SYS_MAX                     = 470
+    SYS_POWER                   = 470,
+
+    // Maximum syscall number
+    SYS_MAX                     = 471
 };
 
 #ifndef USERSPACE_BUILD
 typedef struct {
-    uint32 eax;
-    uint32 ecx;
-    uint32 edx;
-    uint32 ebx;
-    uint32 esp;
-    uint32 ebp;
-    uint32 esi;
-    uint32 edi;
+    // pusha pushes in this order: EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
+    uint32 eax;  // System call number and return value
+    uint32 ecx;  // Argument 2
+    uint32 edx;  // Argument 3  
+    uint32 ebx;  // Argument 1
+    uint32 esp;  // Original ESP (saved by pusha)
+    uint32 ebp;  // Argument 6
+    uint32 esi;  // Argument 4
+    uint32 edi;  // Argument 5
 } syscall_frame_t;
 
 void syscall_init(void);

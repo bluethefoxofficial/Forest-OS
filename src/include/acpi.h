@@ -4,8 +4,11 @@
 #include "types.h"
 #include <stdbool.h>
 
+#include <uacpi/uacpi.h>
+
 #define ACPI_RSDP_SIGNATURE "RSD PTR "
 #define ACPI_MCFG_SIGNATURE "MCFG"
+
 
 typedef struct {
     char  signature[8];
@@ -50,6 +53,12 @@ typedef struct {
 
 bool acpi_init(void);
 const acpi_rsdp_t* acpi_get_rsdp(void);
+const acpi_rsdp_t* acpi_find_rsdp(void);
 const acpi_mcfg_table_t* acpi_get_mcfg(void);
+
+bool uacpi_init(void);
+bool acpi_shutdown(void);
+bool acpi_reboot(void);
+
 
 #endif

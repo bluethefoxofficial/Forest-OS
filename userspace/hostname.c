@@ -2,12 +2,13 @@
 #include "../src/include/libc/stdlib.h"
 #include "../src/include/libc/unistd.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     struct utsname info;
     if (uname(&info) == 0) {
         printf("%s\n", info.nodename);
     } else {
         printf("hostname: uname syscall not available\n");
     }
-    exit(0);
+    return 0;
 }

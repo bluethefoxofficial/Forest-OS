@@ -5,8 +5,13 @@
 #include "include/string.h" // For memset
 #include "include/debuglog.h"
 
-#define VMM_DEFAULT_IDENTITY_LIMIT_BYTES (64 * 1024 * 1024)  // Map first 64MB identity for firmware tables
+#define VMM_DEFAULT_IDENTITY_LIMIT_BYTES (64 * 1024 * 1024)   // Map first 64MB identity for firmware tables
 #define KERNEL_HIGHER_HALF_BASE   0xC0000000
+
+// Temporary mapping area for page table access
+#define VMM_TEMP_MAP_BASE         0x10000000  // 256MB, temporary mapping area
+#define VMM_TEMP_MAP_SIZE         0x400000    // 4MB for temporary mappings  
+#define VMM_TEMP_MAP_PAGES        (VMM_TEMP_MAP_SIZE / MEMORY_PAGE_SIZE)  // 1024 pages
 
 #define VMM_DEBUG_LOG 0
 
@@ -61,7 +66,88 @@ static struct {
     bool initialized;
     page_directory_t* kernel_directory; // Physical address of the kernel page directory
     page_directory_t* current_directory; // Physical address of the current active page directory
+    uint32 temp_map_next; // Next available temporary mapping slot
+    bool paging_enabled;  // Track if paging is enabled
 } vmm_state = {0};
+
+// =============================================================================
+// TEMPORARY MAPPING FOR PAGE TABLE ACCESS
+// =============================================================================
+
+// Temporarily map a physical page to a virtual address for access
+static void* vmm_temp_map_page(uint32 phys_addr) {
+    if (!vmm_state.paging_enabled) {
+        // If paging not enabled yet, access directly
+        return (void*)phys_addr;
+    }
+    
+    // Use a simple round-robin allocation for temporary mapping slots
+    uint32 slot = vmm_state.temp_map_next % VMM_TEMP_MAP_PAGES;
+    vmm_state.temp_map_next++;
+    
+    uint32 temp_vaddr = VMM_TEMP_MAP_BASE + (slot * MEMORY_PAGE_SIZE);
+    
+    // Map the physical page to the temporary virtual address
+    // We need to access the page directory directly since this is used by get_page_entry
+    uint32 page_num = temp_vaddr / MEMORY_PAGE_SIZE;
+    uint32 pd_index = page_num / 1024;
+    uint32 pt_index = page_num % 1024;
+    
+    page_entry_t* pde = &(*vmm_state.current_directory)[pd_index];
+    
+    // Ensure the page table exists for the temporary mapping area
+    if (!pde->present) {
+        // This should not happen if we properly set up the temp mapping area
+        return (void*)phys_addr; // Fall back to direct access
+    }
+    
+    // Access the page table and set up the mapping
+    page_table_t* pt = (page_table_t*)(pde->frame << MEMORY_PAGE_SHIFT);
+    page_entry_t* pte = &(*pt)[pt_index];
+    
+    pte->frame = phys_addr >> MEMORY_PAGE_SHIFT;
+    pte->present = 1;
+    pte->writable = 1;
+    pte->user = 0;
+    
+    // Invalidate TLB for this address
+    __asm__ __volatile__("invlpg (%0)" :: "r"(temp_vaddr) : "memory");
+    
+    return (void*)temp_vaddr;
+}
+
+// Unmap a temporarily mapped page
+static void vmm_temp_unmap_page(void* vaddr) {
+    if (!vmm_state.paging_enabled) {
+        return; // Nothing to do if paging not enabled
+    }
+    
+    uint32 temp_vaddr = (uint32)vaddr;
+    
+    // Verify this is in the temp mapping range
+    if (temp_vaddr < VMM_TEMP_MAP_BASE || 
+        temp_vaddr >= VMM_TEMP_MAP_BASE + VMM_TEMP_MAP_SIZE) {
+        return; // Not a temp mapping
+    }
+    
+    // Clear the page table entry
+    uint32 page_num = temp_vaddr / MEMORY_PAGE_SIZE;
+    uint32 pd_index = page_num / 1024;
+    uint32 pt_index = page_num % 1024;
+    
+    page_entry_t* pde = &(*vmm_state.current_directory)[pd_index];
+    if (!pde->present) {
+        return;
+    }
+    
+    page_table_t* pt = (page_table_t*)(pde->frame << MEMORY_PAGE_SHIFT);
+    page_entry_t* pte = &(*pt)[pt_index];
+    
+    pte->present = 0;
+    
+    // Invalidate TLB
+    __asm__ __volatile__("invlpg (%0)" :: "r"(temp_vaddr) : "memory");
+}
 
 // Helper function to get a page table entry for a given virtual address
 // If make is true, and the page table doesn't exist, it allocates one.
@@ -102,12 +188,10 @@ static page_entry_t* get_page_entry(uint32 vaddr, bool make, page_directory_t* d
         }
         print("[VMM_DBG] New page table physical address: 0x"); print_hex(pt_phys_addr); print("\n");
         
-        // Clear the new page table
-        // NOTE: This assumes identity mapping or temporary mapping to clear the table.
-        // For now, we'll assume the physical memory can be accessed directly for clearing
-        // because paging is not yet enabled during vmm_init calls, or the physical frame
-        // is identity mapped if called after paging is enabled.
-        memset((void*)pt_phys_addr, 0, MEMORY_PAGE_SIZE);
+        // Clear the new page table using temporary mapping
+        void* temp_pt = vmm_temp_map_page(pt_phys_addr);
+        memset(temp_pt, 0, MEMORY_PAGE_SIZE);
+        vmm_temp_unmap_page(temp_pt);
         print("[VMM_DBG] New page table cleared at physical 0x"); print_hex(pt_phys_addr); print("\n");
         
         // Set up the page directory entry
@@ -121,11 +205,14 @@ static page_entry_t* get_page_entry(uint32 vaddr, bool make, page_directory_t* d
     }
 
     // Now, the page table should exist (either pre-existing or newly created)
-    // Here, pt is a pointer to the *physical* address of the page table frame.
-    // This access *must* be identity mapped or mapped to higher half for it to work
-    // if paging is enabled.
-    page_table_t* pt = (page_table_t*)(pde->frame << MEMORY_PAGE_SHIFT);
-    print("[VMM_DBG] Page table pointer (virtual assumed): 0x"); print_hex((uint32)pt); print("\n");
+    // Access the page table using temporary mapping to avoid physical address access
+    uint32 pt_phys_addr = pde->frame << MEMORY_PAGE_SHIFT;
+    void* temp_pt = vmm_temp_map_page(pt_phys_addr);
+    page_table_t* pt = (page_table_t*)temp_pt;
+    print("[VMM_DBG] Page table mapped to temporary address: 0x"); print_hex((uint32)temp_pt); print("\n");
+    
+    // Note: We don't unmap here because the caller needs to access the returned pointer
+    // The temporary mapping will be reused in a round-robin fashion
     return &(*pt)[pt_index];
 }
 
@@ -244,9 +331,9 @@ memory_result_t vmm_init(void) {
 
     vmm_state.current_directory = vmm_state.kernel_directory;
 
-    // Identity map the first 16MB (0x0 to 0x1000000)
-    // This covers the kernel itself (usually < 1MB), the PMM bitmap, and potentially other early structures.
-    // This is crucial for the CPU to continue execution after paging is enabled.
+    // Identity map a reasonable range of low memory (default 64MB)
+    // This covers the kernel, PMM bitmap, and early data structures.
+    // Large page tables will be accessed via temporary mapping.
     uint32 identity_limit_kb = memory_get_usable_kb();
     if (identity_limit_kb == 0) {
         identity_limit_kb = VMM_DEFAULT_IDENTITY_LIMIT_BYTES / 1024;
@@ -260,8 +347,10 @@ memory_result_t vmm_init(void) {
     }
 
     uint32 identity_limit = identity_limit_kb * 1024;
-    if (identity_limit < 0x01000000) {
-        identity_limit = 0x01000000; // always map at least first 16MB
+    // Ensure identity limit covers all possible physical frame allocations
+    // For now, identity map enough memory to handle a 512MB system
+    if (identity_limit < 0x04000000) {
+        identity_limit = 0x04000000; // always map at least first 64MB
     }
     if (identity_limit > MEMORY_MAX_ADDR) {
         identity_limit = MEMORY_MAX_ADDR;
@@ -277,7 +366,7 @@ memory_result_t vmm_init(void) {
             continue;
         }
         if (res != MEMORY_OK) {
-            kernel_panic("VMM: Failed to identity map 0-16MB!");
+            kernel_panic("VMM: Failed to identity map low memory!");
             return res;
         }
 
@@ -324,7 +413,45 @@ memory_result_t vmm_init(void) {
     }
 
 
+    // Set up temporary mapping area for page table access
+    // We need to do this manually to avoid circular dependency with get_page_entry
+    print("[VMM] Setting up temporary mapping area...\n");
+    
+    // Calculate page directory and page table indices for temp mapping area
+    uint32 temp_start_page = VMM_TEMP_MAP_BASE / MEMORY_PAGE_SIZE;
+    uint32 temp_pd_index = temp_start_page / 1024;
+    uint32 temp_pages = VMM_TEMP_MAP_SIZE / MEMORY_PAGE_SIZE;
+    
+    // Allocate page tables for the temporary mapping area
+    for (uint32 i = 0; i < (temp_pages + 1023) / 1024; i++) {
+        uint32 pd_index = temp_pd_index + i;
+        
+        if (pd_index >= 1024) {
+            kernel_panic("VMM: Temporary mapping area too large!");
+            return MEMORY_ERROR_INVALID_ADDR;
+        }
+        
+        page_entry_t* pde = &(*vmm_state.kernel_directory)[pd_index];
+        
+        if (!pde->present) {
+            uint32 pt_phys_addr = pmm_alloc_frame();
+            if (pt_phys_addr == 0) {
+                kernel_panic("VMM: Failed to allocate page table for temporary mapping area!");
+                return MEMORY_ERROR_OUT_OF_MEMORY;
+            }
+            
+            // Clear the page table directly (before paging is enabled)
+            memset((void*)pt_phys_addr, 0, MEMORY_PAGE_SIZE);
+            
+            pde->frame = pt_phys_addr >> MEMORY_PAGE_SHIFT;
+            pde->present = 1;
+            pde->writable = 1;
+            pde->user = 0;
+        }
+    }
+
     vmm_state.initialized = true;
+    vmm_state.temp_map_next = 0;
     print("[VMM] VMM Initialized. Kernel directory at 0x");
     print_hex((uint32)vmm_state.kernel_directory);
     print("\n");
@@ -354,6 +481,9 @@ void vmm_enable_paging(void) {
     cr0 |= (1 << 31); // Set PG bit (Paging Enable)
     cr0 |= (1 << 0);  // Set PE bit (Protected Mode Enable) - ensure it's set
     cpu_set_cr0(cr0);
+    
+    // Mark paging as enabled for the VMM state
+    vmm_state.paging_enabled = true;
     
     print("[VMM] Paging enabled!\n");
 }

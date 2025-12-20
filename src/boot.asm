@@ -4,15 +4,28 @@ bits 32
 section .multiboot_header
 align 4
 
-; Multiboot1 header (legacy)
+; Multiboot1 header (legacy) with graphics mode support
 multiboot1_header:
     MULTIBOOT1_MAGIC equ 0x2BADB002
-    MULTIBOOT1_FLAGS equ 0x00000003
+    MULTIBOOT1_FLAGS equ 0x00000007  ; Video mode + memory info + page alignment
     MULTIBOOT1_CHECKSUM equ -(MULTIBOOT1_MAGIC + MULTIBOOT1_FLAGS)
     
     dd MULTIBOOT1_MAGIC
     dd MULTIBOOT1_FLAGS  
     dd MULTIBOOT1_CHECKSUM
+    
+    ; Video mode fields (required when flags bit 2 is set)
+    dd 0        ; header_addr (not used)
+    dd 0        ; load_addr (not used)
+    dd 0        ; load_end_addr (not used)
+    dd 0        ; bss_end_addr (not used)
+    dd 0        ; entry_addr (not used)
+    
+    ; Video mode preference - force VGA text mode for reliability
+    dd 0        ; mode_type (0 = text mode, 1 = linear graphics mode)
+    dd 80       ; width (80 columns)
+    dd 25       ; height (25 rows) 
+    dd 0        ; depth (not applicable for text mode)
 
 ; Align to 8-byte boundary for multiboot2
 align 8
@@ -29,7 +42,10 @@ multiboot2_header_start:
     dd MULTIBOOT2_LENGTH
     dd MULTIBOOT2_CHECKSUM
     
+    ; No framebuffer tag - use default VGA text mode
+    
     ; End tag
+    align 8
     dw 0    ; type
     dw 0    ; flags  
     dd 8    ; size

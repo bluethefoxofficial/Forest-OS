@@ -8,6 +8,7 @@
 #include "include/util.h"
 #include "include/task.h"
 #include "include/net.h"
+#include "include/power.h"
 
 extern void isr128(void);  // Assembly stub in syscall_stubs.asm
 
@@ -35,6 +36,7 @@ static uint32 fake_unix_epoch = 1730000000; // Fake epoch for time()
 #define SYSCALL_EFAULT  (-14)
 #define SYSCALL_EPERM   (-1)
 #define SYSCALL_ERANGE  (-34)
+#define SYSCALL_EMFILE  (-24)
 
 // System call function pointer type
 typedef int32 (*syscall_func_t)(uint32 arg1, uint32 arg2, uint32 arg3, uint32 arg4, uint32 arg5, uint32 arg6);
@@ -46,6 +48,10 @@ typedef struct {
 
 static syscall_entry_t syscall_table[SYS_MAX];
 static bool syscall_warned[SYS_MAX];
+
+// Forward declarations
+static int32 sys_dup(uint32 fd);
+static int32 sys_dup2(uint32 oldfd, uint32 newfd);
 
 static int32 sys_unimplemented(uint32 arg1, uint32 arg2, uint32 arg3, uint32 arg4, uint32 arg5, uint32 arg6) {
     (void)arg1;
@@ -393,6 +399,208 @@ static int32 sys_netinfo(uint32 buffer_ptr, uint32 max_entries) {
     return (int32)net_snapshot((net_socket_info_t*)buffer_ptr, max_entries);
 }
 
+// File system operations
+static int32 sys_stat(uint32 path_ptr, uint32 stat_ptr) {
+    // Basic stat implementation - all files report as regular files
+    if (!path_ptr || !stat_ptr) {
+        return SYSCALL_EFAULT;
+    }
+    
+    const char* path = (const char*)path_ptr;
+    (void)path; // Use path for file lookup if VFS supports it
+    
+    // Simple stat structure (compatible with POSIX)
+    struct {
+        uint32 st_dev;     // Device ID
+        uint32 st_ino;     // Inode number  
+        uint32 st_mode;    // File mode
+        uint32 st_nlink;   // Number of hard links
+        uint32 st_uid;     // User ID
+        uint32 st_gid;     // Group ID
+        uint32 st_rdev;    // Device ID (if special file)
+        uint32 st_size;    // File size
+        uint32 st_blksize; // Block size
+        uint32 st_blocks;  // Number of blocks
+        uint32 st_atime;   // Access time
+        uint32 st_mtime;   // Modify time
+        uint32 st_ctime;   // Change time
+    }* stat_buf = (void*)stat_ptr;
+    
+    // Fill with dummy values
+    stat_buf->st_dev = 1;
+    stat_buf->st_ino = 12345;
+    stat_buf->st_mode = 0100644; // Regular file, rw-r--r--
+    stat_buf->st_nlink = 1;
+    stat_buf->st_uid = 0;
+    stat_buf->st_gid = 0;
+    stat_buf->st_rdev = 0;
+    stat_buf->st_size = 1024;
+    stat_buf->st_blksize = 4096;
+    stat_buf->st_blocks = 1;
+    stat_buf->st_atime = fake_unix_epoch;
+    stat_buf->st_mtime = fake_unix_epoch;
+    stat_buf->st_ctime = fake_unix_epoch;
+    
+    return 0;
+}
+
+static int32 sys_fstat(uint32 fd, uint32 stat_ptr) {
+    if (fd > 2 || !stat_ptr) { // Only stdin, stdout, stderr
+        return SYSCALL_EBADF;
+    }
+    
+    // Same structure as sys_stat
+    struct {
+        uint32 st_dev, st_ino, st_mode, st_nlink;
+        uint32 st_uid, st_gid, st_rdev, st_size;
+        uint32 st_blksize, st_blocks;
+        uint32 st_atime, st_mtime, st_ctime;
+    }* stat_buf = (void*)stat_ptr;
+    
+    // TTY device for standard streams
+    stat_buf->st_dev = 1;
+    stat_buf->st_ino = fd + 1;
+    stat_buf->st_mode = 0020666; // Character device, rw-rw-rw-
+    stat_buf->st_nlink = 1;
+    stat_buf->st_uid = 0;
+    stat_buf->st_gid = 0;
+    stat_buf->st_rdev = 1;
+    stat_buf->st_size = 0;
+    stat_buf->st_blksize = 1;
+    stat_buf->st_blocks = 0;
+    stat_buf->st_atime = fake_unix_epoch;
+    stat_buf->st_mtime = fake_unix_epoch;
+    stat_buf->st_ctime = fake_unix_epoch;
+    
+    return 0;
+}
+
+static int32 sys_access(uint32 path_ptr, uint32 mode) {
+    if (!path_ptr) {
+        return SYSCALL_EFAULT;
+    }
+    
+    // For now, assume all files exist and are accessible
+    (void)mode;
+    return 0;
+}
+
+// Process operations
+static int32 sys_getuid(void) {
+    return 0; // Root user
+}
+
+static int32 sys_getgid(void) {
+    return 0; // Root group
+}
+
+static int32 sys_geteuid(void) {
+    return 0; // Root user (effective)
+}
+
+static int32 sys_getegid(void) {
+    return 0; // Root group (effective)
+}
+
+static int32 sys_getppid(void) {
+    return 0; // Parent PID (init)
+}
+
+// I/O control and misc
+static int32 sys_ioctl(uint32 fd, uint32 request, uint32 arg) {
+    if (fd > 2) {
+        return SYSCALL_EBADF;
+    }
+    
+    // Basic terminal ioctl support
+    switch (request) {
+        case 0x5401: // TCGETS - get terminal attributes
+            if (!arg) return SYSCALL_EFAULT;
+            // Fill with dummy terminal attributes
+            memory_set((uint8*)arg, 0, 60); // sizeof(struct termios)
+            return 0;
+            
+        case 0x5402: // TCSETS - set terminal attributes  
+            return 0; // Pretend success
+            
+        default:
+            return SYSCALL_ENOSYS;
+    }
+}
+
+static int32 sys_fcntl(uint32 fd, uint32 cmd, uint32 arg) {
+    if (fd > MAX_VFS_HANDLES) {
+        return SYSCALL_EBADF;
+    }
+    
+    switch (cmd) {
+        case 0: // F_DUPFD
+            return sys_dup(fd);
+            
+        case 1: // F_GETFD  
+            return 0; // No flags set
+            
+        case 2: // F_SETFD
+            return 0; // Pretend success
+            
+        case 3: // F_GETFL
+            return 0; // No flags
+            
+        case 4: // F_SETFL
+            (void)arg;
+            return 0; // Pretend success
+            
+        default:
+            return SYSCALL_ENOSYS;
+    }
+}
+
+static int32 sys_dup(uint32 fd) {
+    if (fd > MAX_VFS_HANDLES) {
+        return SYSCALL_EBADF;
+    }
+    
+    // Find next available descriptor
+    for (int i = 0; i < MAX_VFS_HANDLES; i++) {
+        if (!vfs_handles[i].used) {
+            vfs_handles[i] = vfs_handles[fd]; // Copy the handle
+            return i;
+        }
+    }
+    
+    return SYSCALL_EMFILE; // Too many open files
+}
+
+static int32 sys_dup2(uint32 oldfd, uint32 newfd) {
+    if (oldfd > MAX_VFS_HANDLES || newfd > MAX_VFS_HANDLES) {
+        return SYSCALL_EBADF;
+    }
+    
+    if (oldfd == newfd) {
+        return newfd;
+    }
+    
+    // Close newfd if it's open
+    if (vfs_handles[newfd].used) {
+        vfs_handles[newfd].used = false;
+    }
+    
+    // Copy oldfd to newfd
+    vfs_handles[newfd] = vfs_handles[oldfd];
+    return newfd;
+}
+
+static int32 sys_power(uint32 request) {
+    if (request == POWER_ACTION_REBOOT) {
+        power_reboot();
+    } else {
+        power_shutdown();
+    }
+
+    // Should never return
+    return SYSCALL_EPERM;
+}
+
 void syscall_init(void) {
     set_idt_gate_flags(SYSCALL_VECTOR, (uint32)isr128, 0xEE);
     print("[SYSCALL] Installed software interrupt handler at 0x80\n");
@@ -404,12 +612,12 @@ void syscall_handle(syscall_frame_t* frame) {
     }
 
     uint32 num = frame->eax;
-    uint32 arg1 = frame->ebx;
-    uint32 arg2 = frame->ecx;
-    uint32 arg3 = frame->edx;
-    uint32 arg4 = frame->esi;
-    uint32 arg5 = frame->edi;
-    uint32 arg6 = frame->ebp;
+    uint32 arg1 = frame->ebx;  // First argument
+    uint32 arg2 = frame->ecx;  // Second argument  
+    uint32 arg3 = frame->edx;  // Third argument
+    uint32 arg4 = frame->esi;  // Fourth argument
+    uint32 arg5 = frame->edi;  // Fifth argument
+    uint32 arg6 = frame->ebp;  // Sixth argument
     int32 result = SYSCALL_ENOSYS;
 
     switch (num) {
@@ -424,11 +632,33 @@ void syscall_handle(syscall_frame_t* frame) {
         case SYS_NANOSLEEP:  result = sys_nanosleep(arg1, arg2); break;
         case SYS_UNAME:      result = sys_uname(arg1); break;
         case SYS_EXIT:       result = sys_exit(arg1); break;
+        case SYS_EXIT_GROUP: result = sys_exit(arg1); break;  // Same as exit for now
         case SYS_SOCKET:     result = sys_socket(arg1, arg2, arg3); break;
         case SYS_BIND:       result = sys_bind(arg1, arg2, arg3); break;
         case SYS_SENDTO:     result = sys_sendto(arg1, arg2, arg3, arg4, arg5, arg6); break;
         case SYS_RECVFROM:   result = sys_recvfrom(arg1, arg2, arg3, arg4, arg5, arg6); break;
         case SYS_NETINFO:    result = sys_netinfo(arg1, arg2); break;
+        case SYS_REBOOT:     result = sys_power(POWER_ACTION_REBOOT); break;
+        case SYS_POWER:      result = sys_power(arg1); break;
+        
+        // File system operations
+        case SYS_STAT:       result = sys_stat(arg1, arg2); break;
+        case SYS_FSTAT:      result = sys_fstat(arg1, arg2); break;
+        case SYS_ACCESS:     result = sys_access(arg1, arg2); break;
+        
+        // Process operations  
+        case SYS_GETUID:     result = sys_getuid(); break;
+        case SYS_GETGID:     result = sys_getgid(); break;
+        case SYS_GETEUID:    result = sys_geteuid(); break;
+        case SYS_GETEGID:    result = sys_getegid(); break;
+        case SYS_GETPPID:    result = sys_getppid(); break;
+        
+        // I/O control and misc
+        case SYS_IOCTL:      result = sys_ioctl(arg1, arg2, arg3); break;
+        case SYS_FCNTL:      result = sys_fcntl(arg1, arg2, arg3); break;
+        case SYS_DUP:        result = sys_dup(arg1); break;
+        case SYS_DUP2:       result = sys_dup2(arg1, arg2); break;
+        
         default:             result = SYSCALL_ENOSYS; break;
     }
 

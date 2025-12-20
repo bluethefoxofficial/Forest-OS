@@ -25,6 +25,8 @@ static void handle_help(void) {
     printf("  time        - show fake system time\n");
     printf("  catreadme   - dump /README.txt\n");
     printf("  echo <text> - display text\n");
+    printf("  shutdown    - request ACPI poweroff\n");
+    printf("  reboot      - request ACPI reboot\n");
     printf("  exit        - return to kernel\n");
 }
 
@@ -79,7 +81,9 @@ static int read_line(char* buffer, size_t max_len) {
     return 1;
 }
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;
+    (void)argv;
     printf("Forest Shell (userspace)\nType 'help' for a list of commands.\n");
     char line[MAX_INPUT];
 
@@ -97,9 +101,19 @@ void _start(void) {
             handle_time();
         } else if (strcmp(line, "catreadme") == 0) {
             handle_catreadme();
+        } else if (strcmp(line, "shutdown") == 0) {
+            printf("Requesting shutdown...\n");
+            if (poweroff() != 0) {
+                printf("Shutdown syscall failed.\n");
+            }
+        } else if (strcmp(line, "reboot") == 0) {
+            printf("Requesting reboot...\n");
+            if (reboot(0) != 0) {
+                printf("Reboot syscall failed.\n");
+            }
         } else if (strcmp(line, "exit") == 0) {
             printf("logout\n");
-            exit(0);
+            return 0;
         } else if (starts_with(line, "echo ")) {
             handle_echo(line + 5);
         } else if (line[0] == '\0') {

@@ -3,7 +3,8 @@
 #include "../src/include/libc/unistd.h"
 #include "../src/include/libc/stdlib.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     char addr[32];
     forest_format_ipv4(INADDR_LOOPBACK, addr, sizeof(addr));
     printf("lo: flags=up loopback\n    inet %s\n", addr);
@@ -19,5 +20,5 @@ void _start(void) {
                sockets[i].port, sockets[i].bytes_received, sockets[i].bytes_sent,
                sockets[i].queue_depth, sockets[i].queue_capacity);
     }
-    exit(0);
+    return 0;
 }

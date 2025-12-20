@@ -10,7 +10,8 @@ static void print_interface(void) {
     printf("loopback: inet %s scope host up\n", addr);
 }
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     printf("Forest ip (loopback view)\n");
     print_interface();
 
@@ -25,5 +26,5 @@ void _start(void) {
                64 + i, sockets[i].port, sockets[i].bytes_received, sockets[i].bytes_sent,
                sockets[i].queue_depth, sockets[i].queue_capacity, sockets[i].last_peer_port);
     }
-    exit(0);
+    return 0;
 }

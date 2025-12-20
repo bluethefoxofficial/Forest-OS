@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <stdarg.h>
 
 #ifdef FOREST_USE_HOST_LIBC
 #include <errno.h>
@@ -15,6 +16,7 @@
 #include "../../src/include/libc/unistd.h"
 #include "../../src/include/types.h"
 #include "../../src/include/syscall.h"
+#include "../../src/include/power.h"
 
 typedef int32 ssize_t;
 
@@ -357,5 +359,143 @@ int netinfo(net_socket_info_t* buffer, int max_entries) {
     return handle_linux_stub();
 #else
     return handle_forest_result(syscall2(SYS_NETINFO, (int32)buffer, max_entries));
+#endif
+}
+
+int poweroff(void) {
+#ifdef FOREST_USE_HOST_LIBC
+    return handle_linux_stub();
+#else
+    return handle_forest_result(syscall1(SYS_POWER, POWER_ACTION_SHUTDOWN));
+#endif
+}
+
+int reboot(int howto) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)howto;
+    return handle_linux_stub();
+#else
+    (void)howto;
+    return handle_forest_result(syscall1(SYS_POWER, POWER_ACTION_REBOOT));
+#endif
+}
+
+// Additional POSIX function implementations for Forest OS userspace
+int stat(const char *path, void *buf) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)path;
+    (void)buf;
+    return handle_linux_stub();
+#else
+    return handle_forest_result(syscall2(SYS_STAT, (int32)path, (int32)buf));
+#endif
+}
+
+int fstat(int fd, void *buf) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)fd;
+    (void)buf;
+    return handle_linux_stub();
+#else
+    return handle_forest_result(syscall2(SYS_FSTAT, fd, (int32)buf));
+#endif
+}
+
+int access(const char *path, int mode) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)path;
+    (void)mode;
+    return handle_linux_stub();
+#else
+    return handle_forest_result(syscall2(SYS_ACCESS, (int32)path, mode));
+#endif
+}
+
+int getuid(void) {
+#ifdef FOREST_USE_HOST_LIBC
+    return 0;
+#else
+    return handle_forest_result(syscall0(SYS_GETUID));
+#endif
+}
+
+int getgid(void) {
+#ifdef FOREST_USE_HOST_LIBC
+    return 0;
+#else
+    return handle_forest_result(syscall0(SYS_GETGID));
+#endif
+}
+
+int geteuid(void) {
+#ifdef FOREST_USE_HOST_LIBC
+    return 0;
+#else
+    return handle_forest_result(syscall0(SYS_GETEUID));
+#endif
+}
+
+int getegid(void) {
+#ifdef FOREST_USE_HOST_LIBC
+    return 0;
+#else
+    return handle_forest_result(syscall0(SYS_GETEGID));
+#endif
+}
+
+int getppid(void) {
+#ifdef FOREST_USE_HOST_LIBC
+    return 0;
+#else
+    return handle_forest_result(syscall0(SYS_GETPPID));
+#endif
+}
+
+int ioctl(int fd, unsigned long request, ...) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)fd;
+    (void)request;
+    return handle_linux_stub();
+#else
+    // For simplicity, assume one argument
+    va_list args;
+    va_start(args, request);
+    int arg = va_arg(args, int);
+    va_end(args);
+    return handle_forest_result(syscall3(SYS_IOCTL, fd, request, arg));
+#endif
+}
+
+int fcntl(int fd, int cmd, ...) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)fd;
+    (void)cmd;
+    return handle_linux_stub();
+#else
+    // For simplicity, assume one argument
+    va_list args;
+    va_start(args, cmd);
+    int arg = va_arg(args, int);
+    va_end(args);
+    return handle_forest_result(syscall3(SYS_FCNTL, fd, cmd, arg));
+#endif
+}
+
+int dup(int fd) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)fd;
+    return handle_linux_stub();
+#else
+    return handle_forest_result(syscall1(SYS_DUP, fd));
+#endif
+}
+
+int dup2(int oldfd, int newfd) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)oldfd;
+    (void)newfd;
+    return handle_linux_stub();
+#else
+    return handle_forest_result(syscall2(SYS_DUP2, oldfd, newfd));
 #endif
 }

@@ -3,6 +3,7 @@
 #include "include/string.h"
 #include "include/panic.h"
 #include "include/multiboot.h"
+#include "include/interrupt.h"
 
 // =============================================================================
 // MEMORY DETECTION AND INITIALIZATION
@@ -41,6 +42,7 @@ extern memory_result_t heap_init(uint32 start_addr, uint32 initial_size);
 extern memory_result_t vmm_identity_map_range(page_directory_t* dir, uint32 start, uint32 end, uint32 flags);
 extern page_directory_t* vmm_get_current_page_directory(void);
 extern void vmm_enable_paging(void);
+extern void page_fault_handler(uint32 fault_addr, uint32 error_code);
 
 static memory_result_t parse_multiboot1_info(multiboot_info_t* mbi);
 static memory_result_t parse_multiboot2_info(uint32 info_addr);
@@ -48,6 +50,7 @@ static void reset_region_info(void);
 static void add_memory_region(uint64 base, uint64 length, uint32 type);
 static void print_basic_memory(uint32 lower_mem, uint32 upper_mem);
 static memory_result_t unmap_identity_range(page_directory_t* dir, uint32 start, uint32 end);
+static void memory_page_fault_wrapper(struct interrupt_frame* frame, uint32 error_code);
 
 // =============================================================================
 // UTILITY FUNCTIONS
@@ -316,6 +319,20 @@ static memory_result_t parse_multiboot2_info(uint32 info_addr) {
 
 extern char kernel_end;
 
+// =============================================================================
+// PAGE FAULT HANDLER WRAPPER
+// =============================================================================
+
+// Wrapper function to bridge interrupt handler interface to page fault handler
+static void memory_page_fault_wrapper(struct interrupt_frame* frame, uint32 error_code) {
+    // Get the fault address from CR2 register
+    uint32 fault_addr;
+    __asm__ __volatile__("mov %%cr2, %0" : "=r"(fault_addr));
+    
+    // Call the actual page fault handler
+    page_fault_handler(fault_addr, error_code);
+}
+
 memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
     print("\n=== FOREST OS MEMORY MANAGER v2.0 ===\n");
     print("[MEM] Initializing memory subsystem...\n");
@@ -383,6 +400,11 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
     print("[MEM] Enabling paging...\n");
     vmm_enable_paging();
     print("[MEM] Paging enabled successfully\n");
+    
+    // Step 5.5: Register page fault handler now that paging is enabled
+    print("[MEM] Registering page fault handler...\n");
+    interrupt_set_handler(EXCEPTION_PAGE_FAULT, memory_page_fault_wrapper);
+    print("[MEM] Page fault handler registered\n");
     
     // Step 6: Drop the identity map for the heap range so heap_init can map
     // fresh physical frames without running into duplicate mappings.

@@ -295,6 +295,26 @@ memory_result_t pmm_init(memory_region_t* regions, uint32 region_count) {
     
             }
     
+            // Add bounds checking to prevent allocations beyond reasonable limits
+            uint32 addr = frame_to_addr(frame);
+            const uint32 MAX_SAFE_PHYSICAL_ADDR = 0x10000000; // 256MB limit for safety
+            
+            if (addr >= MAX_SAFE_PHYSICAL_ADDR) {
+                // Try to find a frame within the safe range
+                for (uint32 safe_frame = 0; safe_frame < addr_to_frame(MAX_SAFE_PHYSICAL_ADDR); safe_frame++) {
+                    if (!is_frame_used(safe_frame)) {
+                        frame = safe_frame;
+                        addr = frame_to_addr(frame);
+                        break;
+                    }
+                }
+                
+                // If no safe frame found, return 0
+                if (addr >= MAX_SAFE_PHYSICAL_ADDR) {
+                    return 0;
+                }
+            }
+    
             
     
             mark_frame_used(frame);
@@ -303,7 +323,7 @@ memory_result_t pmm_init(memory_region_t* regions, uint32 region_count) {
     
             
     
-            return frame_to_addr(frame);
+            return addr;
 }
 
 uint32 pmm_alloc_frames(uint32 count) {

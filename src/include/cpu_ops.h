@@ -10,5 +10,6 @@ void cpu_enable_interrupts(void);
 void cpu_load_idt(const void* descriptor);
 uint16 cpu_read_cs(void);
 uint16 cpu_read_ds(void);
+uint32 cpu_read_cr2(void);
 
 #endif // CPU_OPS_H

@@ -4,10 +4,11 @@
 #include "include/panic.h"
 #include "include/util.h"
 #include "include/memory.h"
+#include "include/string.h"
 
 #define TAR_BLOCK_SIZE 512
-#define MAX_RAMDISK_FILES 256
 #define RAMDISK_MAX_NAME 256
+#define RAMDISK_MIN_FILE_CAPACITY 32
 
 // Maximum path length we can store for FAT entries.
 #define FAT_MAX_PATH 240
@@ -133,14 +134,62 @@ typedef struct {
     bool active;
 } fat_lfn_buffer_t;
 
-static ramdisk_file_t files[MAX_RAMDISK_FILES];
-static char file_names[MAX_RAMDISK_FILES][RAMDISK_MAX_NAME];
+static ramdisk_file_t* files = 0;
+static char* file_name_storage = 0;
 static uint32 file_total = 0;
+static uint32 file_capacity = 0;
 static bool ramdisk_ready = false;
 static uint32 initrd_start = 0;
 static uint32 initrd_size = 0;
 static uint8 empty_file_stub = 0;
 
+static bool reserve_file_capacity(uint32 required_capacity) {
+    if (required_capacity < RAMDISK_MIN_FILE_CAPACITY) {
+        required_capacity = RAMDISK_MIN_FILE_CAPACITY;
+    }
+
+    if (files && file_name_storage && required_capacity <= file_capacity) {
+        return true;
+    }
+
+    ramdisk_file_t* new_files = (ramdisk_file_t*)kmalloc(sizeof(ramdisk_file_t) * required_capacity);
+    if (!new_files) {
+        return false;
+    }
+
+    char* new_names = (char*)kmalloc(RAMDISK_MAX_NAME * required_capacity);
+    if (!new_names) {
+        kfree(new_files);
+        return false;
+    }
+
+    if (files && file_name_storage && file_total > 0) {
+        for (uint32 i = 0; i < file_total; i++) {
+            char* dest = new_names + i * RAMDISK_MAX_NAME;
+            const char* src = file_name_storage + i * RAMDISK_MAX_NAME;
+            memcpy(dest, src, RAMDISK_MAX_NAME);
+
+            new_files[i] = files[i];
+            new_files[i].name = dest;
+        }
+    }
+
+    if (files) {
+        kfree(files);
+    }
+    if (file_name_storage) {
+        kfree(file_name_storage);
+    }
+
+    files = new_files;
+    file_name_storage = new_names;
+    file_capacity = required_capacity;
+    return true;
+}
+
+static inline char* filename_slot(uint32 index) {
+    return file_name_storage + (index * RAMDISK_MAX_NAME);
+}
 
 
 static bool cstring_equals(const char* a, const char* b) {
@@ -170,8 +219,9 @@ static uint32 octal_to_uint(const char* src, uint32 len) {
 }
 
 static const char* copy_filename(const char* src, uint32 index) {
-    uint32 max_len = sizeof(file_names[0]) - 1;
+    uint32 max_len = RAMDISK_MAX_NAME - 1;
     uint32 i = 0;
+    char* dest = filename_slot(index);
 
     // Skip tar prefixes like "./" or leading slashes.
     if (src[0] == '.' && src[1] == '/') {
@@ -182,28 +232,101 @@ static const char* copy_filename(const char* src, uint32 index) {
     }
 
     for (; i < max_len && *src != '\0'; i++, src++) {
-        file_names[index][i] = *src;
+        dest[i] = *src;
     }
 
-    while (i > 0 && file_names[index][i - 1] == '/') {
+    while (i > 0 && dest[i - 1] == '/') {
         i--;
     }
 
-    file_names[index][i] = '\0';
-    return file_names[index];
+    dest[i] = '\0';
+    return dest;
+}
+
+static bool ramdisk_has_entry(const char* path) {
+    if (!path) {
+        return false;
+    }
+    for (uint32 i = 0; i < file_total; i++) {
+        if (cstring_equals(files[i].name, path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ramdisk_add_directory_entry(const char* path) {
+    if (!path || !path[0] || ramdisk_has_entry(path)) {
+        return true;
+    }
+
+    if (file_total == file_capacity) {
+        uint32 new_capacity = file_capacity ? file_capacity * 2 : RAMDISK_MIN_FILE_CAPACITY;
+        if (!reserve_file_capacity(new_capacity)) {
+            print("[RAMDISK] Failed to grow metadata for virtual directory ");
+            print(path);
+            print("\n");
+            return false;
+        }
+    }
+
+    const char* stored_name = copy_filename(path, file_total);
+    files[file_total].name = stored_name;
+    files[file_total].data = &empty_file_stub;
+    files[file_total].size = 0;
+    files[file_total].is_dir = true;
+    file_total++;
+    return true;
+}
+
+static bool ramdisk_add_virtual_directories(void) {
+    static const char* required_dirs[] = {
+        "dev",
+        "dev/pts",
+        "dev/shm",
+        "proc",
+        "sys",
+        "run",
+        "run/lock",
+        "tmp",
+        "mnt",
+        "media",
+        "var",
+        "var/run",
+        "var/tmp",
+        "var/lock",
+        "var/cache",
+        "var/log",
+        "var/spool",
+        "var/lib"
+    };
+
+    for (uint32 i = 0; i < (sizeof(required_dirs) / sizeof(required_dirs[0])); i++) {
+        if (!ramdisk_add_directory_entry(required_dirs[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool parse_tar(const uint8* base, uint32 size) {
     const uint8* cursor = base;
     const uint8* end = base + size;
     file_total = 0;
+    bool reached_end = false;
+
+    if (!reserve_file_capacity(RAMDISK_MIN_FILE_CAPACITY)) {
+        print("[RAMDISK] Failed to allocate initial file metadata\n");
+        return false;
+    }
 
     while (cursor + TAR_BLOCK_SIZE <= end) {
         tar_header_t* header = (tar_header_t*)cursor;
 
         // End of archive is indicated by a zeroed filename.
         if (header->filename[0] == '\0') {
-            return true;
+            reached_end = true;
+            break;
         }
 
         uint32 file_size = octal_to_uint(header->size, sizeof(header->size));
@@ -214,24 +337,42 @@ static bool parse_tar(const uint8* base, uint32 size) {
             return false;
         }
 
-        if (file_total < MAX_RAMDISK_FILES) {
-            const char* name = copy_filename(header->filename, file_total);
-            files[file_total].name = name;
-            files[file_total].data = file_size ? data : &empty_file_stub;
-            files[file_total].size = file_size;
-            files[file_total].is_dir = (header->typeflag == '5');
-            file_total++;
-        } else {
-            print("[RAMDISK] Too many files in archive; skipping extras\n");
+        if (file_total == file_capacity) {
+            uint32 new_capacity = file_capacity * 2;
+            if (new_capacity < file_capacity) {
+                // Overflow guard.
+                print("[RAMDISK] Ramdisk file capacity overflow\n");
+                return false;
+            }
+            if (!reserve_file_capacity(new_capacity)) {
+                print("[RAMDISK] Failed to grow ramdisk metadata storage\n");
+                return false;
+            }
         }
+
+        const char* name = copy_filename(header->filename, file_total);
+        files[file_total].name = name;
+        files[file_total].data = file_size ? data : &empty_file_stub;
+        files[file_total].size = file_size;
+        files[file_total].is_dir = (header->typeflag == '5');
+        file_total++;
 
         // Move to next header (aligned to 512-byte boundary).
         uint32 file_blocks = (file_size + (TAR_BLOCK_SIZE - 1)) / TAR_BLOCK_SIZE;
         cursor = data + file_blocks * TAR_BLOCK_SIZE;
     }
 
-    print("[RAMDISK] Reached end of module without tar terminator\n");
-    return false;
+    if (!reached_end) {
+        print("[RAMDISK] Reached end of module without tar terminator\n");
+        return false;
+    }
+
+    if (!ramdisk_add_virtual_directories()) {
+        print("[RAMDISK] Failed to provision virtual directories\n");
+        return false;
+    }
+
+    return true;
 }
 
 static bool load_initrd_range(uint32 base, uint32 end) {

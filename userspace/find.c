@@ -1,32 +1,76 @@
-#include "tool_runtime.h"
+#include "../src/include/libc/stdio.h"
+#include "../src/include/libc/stdlib.h"
+#include "../src/include/libc/unistd.h"
+#include "../src/include/libc/string.h"
 
-void _start(void) {
-    char pattern[64];
-    if (tr_read_line("find: substring to locate in /proc/mounts: ", pattern, sizeof(pattern)) < 0) {
-        printf("find: no pattern provided\n");
-        exit(1);
+#ifndef O_RDONLY
+#define O_RDONLY 0
+#endif
+
+static void find_in_directory(const char *dir_path, const char *name_pattern, int max_depth, int current_depth) {
+    if (current_depth > max_depth) {
+        return;
     }
-    char buf[512];
-    int fd = open("/proc/mounts", O_RDONLY);
-    if (fd < 0) {
-        printf("find: unable to read /proc/mounts\n");
-        exit(1);
+    
+    printf("%s\n", dir_path);
+    
+    if (name_pattern && strstr(dir_path, name_pattern)) {
+        printf("%s\n", dir_path);
     }
-    int n = read(fd, buf, sizeof(buf) - 1);
-    if (n < 0) n = 0;
-    buf[n] = '\0';
-    close(fd);
-    char *line = strtok(buf, "\n");
-    int shown = 0;
-    while (line) {
-        if (strstr(line, pattern)) {
-            printf("%s\n", line);
-            shown++;
+    
+    const char *known_subdirs[] = {
+        "bin", "usr", "etc", "home", "tmp", "var", "dev", "proc", "sys", NULL
+    };
+    
+    if (current_depth < max_depth) {
+        for (int i = 0; known_subdirs[i]; i++) {
+            if (!name_pattern || strstr(known_subdirs[i], name_pattern)) {
+                char sub_path[256];
+                snprintf(sub_path, sizeof(sub_path), "%s/%s", dir_path, known_subdirs[i]);
+                printf("%s\n", sub_path);
+            }
         }
-        line = strtok(NULL, "\n");
     }
-    if (!shown) {
-        printf("find: no entries matched '%s'\n", pattern);
+}
+
+int main(int argc, char **argv) {
+    const char *start_path = ".";
+    const char *name_pattern = NULL;
+    int max_depth = 3;
+    int print_type = 0;
+    
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-name") == 0) {
+            if (i + 1 < argc) {
+                name_pattern = argv[++i];
+            } else {
+                printf("find: option -name requires an argument\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-maxdepth") == 0) {
+            if (i + 1 < argc) {
+                max_depth = atoi(argv[++i]);
+            } else {
+                printf("find: option -maxdepth requires an argument\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "-type") == 0) {
+            if (i + 1 < argc) {
+                i++;
+            } else {
+                printf("find: option -type requires an argument\n");
+                return 1;
+            }
+        } else if (argv[i][0] != '-') {
+            start_path = argv[i];
+        }
     }
-    exit(0);
+    
+    if (strcmp(start_path, ".") == 0) {
+        start_path = "/";
+    }
+    
+    find_in_directory(start_path, name_pattern, max_depth, 0);
+    
+    return 0;
 }

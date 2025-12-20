@@ -57,3 +57,16 @@ enter_usermode_asm:
     push dword [ebp + 4]    ; EIP (entry point)
     
     iret
+
+; task_start_usermode_asm()
+; Special entry point for new user tasks that performs IRET to user mode
+; Assumes the stack is already set up with IRET frame followed by saved registers
+global task_start_usermode_asm
+task_start_usermode_asm:
+    ; Pop general purpose registers (in reverse order of PUSHA)
+    popa
+    ; Pop flags
+    popf
+    ; Perform IRET to enter user mode
+    ; Stack should now contain: SS, ESP, EFLAGS, CS, EIP
+    iret

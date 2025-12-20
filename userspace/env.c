@@ -2,13 +2,14 @@
 
 extern char **environ;
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     if (!environ) {
         printf("env: environment unavailable\n");
-        exit(1);
+        return 1;
     }
     for (char **e = environ; *e; ++e) {
         printf("%s\n", *e);
     }
-    exit(0);
+    return 0;
 }

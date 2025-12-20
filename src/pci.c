@@ -112,6 +112,38 @@ uint8 pci_config_read8(uint16 segment, uint8 bus, uint8 device, uint8 function, 
     return (uint8)((value >> ((offset & 3) * 8)) & 0xFF);
 }
 
+static void pci_write_type1(uint8 bus, uint8 device, uint8 function, uint16 offset, uint32 value) {
+    outportd(PCI_CONFIG_ADDRESS, pci_build_address(bus, device, function, (uint8)offset));
+    outportd(PCI_CONFIG_DATA, value);
+}
+
+void pci_config_write32(uint16 segment, uint8 bus, uint8 device, uint8 function, uint16 offset, uint32 value) {
+    if (g_access_mode == PCI_ACCESS_ECAM) {
+        const pci_segment_info_t* info = pci_find_segment(segment, bus);
+        volatile uint32* addr = pci_ecam_ptr(info, bus, device, function, offset);
+        if (addr) {
+            *addr = value;
+            return;
+        }
+    }
+    (void)segment;
+    pci_write_type1(bus, device, function, offset, value);
+}
+
+void pci_config_write16(uint16 segment, uint8 bus, uint8 device, uint8 function, uint16 offset, uint16 value) {
+    uint32 temp = pci_config_read32(segment, bus, device, function, offset);
+    temp &= ~(0xFFFF << ((offset & 2) * 8));
+    temp |= (value << ((offset & 2) * 8));
+    pci_config_write32(segment, bus, device, function, offset, temp);
+}
+
+void pci_config_write8(uint16 segment, uint8 bus, uint8 device, uint8 function, uint16 offset, uint8 value) {
+    uint32 temp = pci_config_read32(segment, bus, device, function, offset);
+    temp &= ~(0xFF << ((offset & 3) * 8));
+    temp |= (value << ((offset & 3) * 8));
+    pci_config_write32(segment, bus, device, function, offset, temp);
+}
+
 static void pci_fill_device(uint16 segment, uint8 bus, uint8 device, uint8 function, pci_device_t* out_device) {
     out_device->segment = segment;
     out_device->bus = bus;

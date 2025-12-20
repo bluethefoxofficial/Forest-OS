@@ -3,7 +3,8 @@
 #include "../src/include/libc/unistd.h"
 #include "../src/include/libc/stdlib.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     char buffer[256];
     const char msg[] = "SSH probe";
     int received = forest_port_query(NET_PORT_SSH, msg, sizeof(msg) - 1, buffer, sizeof(buffer) - 1);
@@ -13,5 +14,5 @@ void _start(void) {
     } else {
         printf("ssh: no loopback handshake available\n");
     }
-    exit(0);
+    return 0;
 }

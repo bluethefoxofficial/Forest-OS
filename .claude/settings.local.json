@@ -24,12 +24,43 @@
       "Bash(then)",
       "Bash(echo:*)",
       "Bash(fi)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(do if grep -q \"exit(\" \"$file\")",
+      "Bash(then echo \"$file\")",
+      "Bash(do if grep -q 'void _start(void) { ftb_run_tool(TOOL_NAME); exit(0); }' \"$file\")",
+      "Bash(then echo \"Fixing $file\")",
+      "Bash(do if grep -q 'void _start(void)' \"$file\")",
+      "Bash(then echo \"Converting $file\")",
+      "Bash(cat:*)",
+      "Bash(cd:*)",
+      "Bash(wget:*)",
+      "Read(//home/bluet/forestos-toolchain/src/binutils-2.39/**)",
+      "Read(//home/bluet/forestos-toolchain/src/gcc-12.2.0/**)",
+      "Bash(readelf:*)",
+      "Bash(export:*)",
+      "Bash(export TARGET=i686-forestos)",
+      "Read(//home/bluet/forestos-toolchain/**)",
+      "Bash(../src/binutils-2.39/configure:*)",
+      "Read(//home/bluet/forestos-toolchain/**)",
+      "Bash(../src/gcc-12.2.0/configure:*)",
+      "Bash(sudo apt-get:*)",
+      "Bash(sudo apt-get install:*)",
+      "Bash(./contrib/download_prerequisites)",
+      "Bash(i686-forestos-gcc --sysroot=/home/bluet/forestos-toolchain/sysroot -o test_program test_program.c)",
+      "Bash(i686-forestos-gcc -nostdlib -nostartfiles -o simple_test simple_test.c)",
+      "Bash(i686-forestos-objdump:*)",
+      "Bash(i686-forestos-gcc:*)",
+      "Bash(./obj/echo.elf:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(./test_bga_constants)"
     ],
     "deny": [],
     "ask": [],
     "additionalDirectories": [
-      "/tmp"
+      "/tmp",
+      "/home/bluet/forestos-toolchain"
     ]
-  }
+  },
+  "outputStyle": "Explanatory"
 }

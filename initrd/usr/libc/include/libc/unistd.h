@@ -32,6 +32,8 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
 ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
                  void *addr, int *addrlen);
 int netinfo(net_socket_info_t* buffer, int max_entries);
+int poweroff(void);
+int reboot(int howto);
 
 #ifdef __cplusplus
 }

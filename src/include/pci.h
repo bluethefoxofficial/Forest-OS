@@ -44,6 +44,10 @@ uint32 pci_config_read32(uint16 segment, uint8 bus, uint8 device, uint8 function
 uint16 pci_config_read16(uint16 segment, uint8 bus, uint8 device, uint8 function, uint16 offset);
 uint8  pci_config_read8(uint16 segment, uint8 bus, uint8 device, uint8 function, uint16 offset);
 
+void pci_config_write32(uint16 segment, uint8 bus, uint8 device, uint8 function, uint16 offset, uint32 value);
+void pci_config_write16(uint16 segment, uint8 bus, uint8 device, uint8 function, uint16 offset, uint16 value);
+void pci_config_write8(uint16 segment, uint8 bus, uint8 device, uint8 function, uint16 offset, uint8 value);
+
 void pci_enumerate(pci_enum_callback_t callback, void* context);
 bool pci_find_by_class(uint8 class_code, uint8 subclass, pci_device_t* out_device);
 bool pci_find_by_vendor_device(uint16 vendor_id, uint16 device_id, pci_device_t* out_device);

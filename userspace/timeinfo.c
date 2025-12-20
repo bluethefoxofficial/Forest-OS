@@ -3,7 +3,8 @@
 #include "../src/include/libc/stdlib.h"
 #include "../src/include/libc/time.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     int now = time(NULL);
     printf("Forest OS fake time: %d\n", now);
 
@@ -11,5 +12,5 @@ void _start(void) {
     printf("Sleeping for ~500ms...\n");
     nanosleep(&req, NULL);
     printf("Awake again!\n");
-    exit(0);
+    return 0;
 }

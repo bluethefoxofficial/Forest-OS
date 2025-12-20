@@ -1,11 +1,11 @@
-#include <stdint.h>
 #include "libc/errno.h"
 #include "../../src/include/libc/stdlib.h"
 #include "../../src/include/libc/unistd.h"
 #include "../../src/include/libc/string.h"
+#include "../../src/include/types.h"
 
 static unsigned int rand_seed = 1;
-static uint8_t* heap_break = NULL;
+static uint8* heap_break = NULL;
 static char default_path_env[] = "PATH=/bin";
 static char *default_environ[] = { default_path_env, NULL };
 char **environ = default_environ;
@@ -69,9 +69,9 @@ static char *dup_env_string(const char *name, size_t name_len, const char *value
     return entry;
 }
 
-static uint8_t* ensure_heap_initialized(void) {
+static uint8* ensure_heap_initialized(void) {
     if (!heap_break) {
-        heap_break = (uint8_t*)brk(0);
+        heap_break = (uint8*)brk(0);
     }
     return heap_break;
 }
@@ -81,11 +81,11 @@ void *malloc(size_t size) {
         return NULL;
     }
     size = (size + 15) & ~15;
-    uint8_t* base = ensure_heap_initialized();
+    uint8* base = ensure_heap_initialized();
     if (!base) {
         return NULL;
     }
-    uint8_t* new_break = heap_break + size;
+    uint8* new_break = heap_break + size;
     if (brk(new_break) < 0) {
         return NULL;
     }

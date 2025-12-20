@@ -6,7 +6,10 @@ The kernel indexes the archive at boot and exposes a simple ramdisk API.
 The `initrd/` directory mirrors a standard Unix filesystem layout (bin, etc,
 usr/, var/, and so on). Empty directories are tracked with `.gitkeep` files and
 are stripped from the final archive via `tar --exclude='.gitkeep'` so the
-ramdisk only contains real payloads.
+ramdisk only contains real payloads. During boot, `src/ramdisk.c` additionally
+injects volatile/system-managed directories (e.g., `dev`, `proc`, `sys`, `run`,
+and `var/*` state directories) to keep the initrd aligned with the FHS without
+shipping fake placeholder files.
 
 Userspace ELFs found in `userspace/*.c` are built automatically and copied into
 both `/bin` and `/usr/bin` inside the initrd. The primary shell remains
@@ -14,6 +17,5 @@ both `/bin` and `/usr/bin` inside the initrd. The primary shell remains
 packaged alongside it.
 
 The kernel's libc headers and sources are exported to `/usr/libc` inside the
-initrd on every build. They originate from the root-level `libc/` directory so
-developers compiling on Forest can include the same libc that shipped with the
-kernel.
+initrd on every build. They originate from `libs/libc/` so developers compiling
+on Forest can include the same libc that shipped with the kernel.

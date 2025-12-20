@@ -64,19 +64,46 @@ static int copy_file(const char *src, const char *dest) {
     return 0;
 }
 
-void _start(void) {
-    char src[128];
-    char dest[128];
-
-    if (read_line("cp: enter source file path: ", src, sizeof(src)) < 0) {
-        printf("cp: no source provided\n");
-        exit(1);
+int main(int argc, char **argv) {
+    int recursive = 0;
+    int verbose = 0;
+    int src_start = 1;
+    
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            for (int j = 1; argv[i][j]; j++) {
+                switch (argv[i][j]) {
+                    case 'r':
+                    case 'R':
+                        recursive = 1;
+                        break;
+                    case 'v':
+                        verbose = 1;
+                        break;
+                    default:
+                        printf("cp: invalid option -- '%c'\n", argv[i][j]);
+                        return 1;
+                }
+            }
+            src_start++;
+        } else {
+            break;
+        }
     }
-    if (read_line("cp: enter destination file path: ", dest, sizeof(dest)) < 0) {
-        printf("cp: no destination provided\n");
-        exit(1);
+    
+    if (argc < src_start + 2) {
+        printf("cp: missing file operand\n");
+        printf("Usage: cp [-rv] source dest\n");
+        return 1;
     }
-
+    
+    const char *src = argv[src_start];
+    const char *dest = argv[src_start + 1];
+    
+    if (verbose) {
+        printf("'%s' -> '%s'\n", src, dest);
+    }
+    
     int status = copy_file(src, dest);
-    exit(status);
+    return status;
 }

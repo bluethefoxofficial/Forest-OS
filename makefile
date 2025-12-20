@@ -3,8 +3,14 @@ CC = gcc
 LD = ld
 AS = nasm
 
+# Custom Forest OS Toolchain Configuration
+FORESTOS_TOOLCHAIN_PREFIX = /home/bluet/forestos-toolchain/install/bin/i686-forestos-
+FORESTOS_CC = $(FORESTOS_TOOLCHAIN_PREFIX)gcc
+FORESTOS_LD = $(FORESTOS_TOOLCHAIN_PREFIX)ld
+FORESTOS_SYSROOT = /home/bluet/forestos-toolchain/sysroot
+
 # Compiler and Linker Flags
-CFLAGS = -m32 -c -ffreestanding -Wall -g -O0 -I$(SRCDIR)/include
+CFLAGS = -m32 -c -ffreestanding -Wall -g -O0 -I$(SRCDIR)/include -Ilibs/uacpi/include -march=i386 -mtune=i386 -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
 INTERRUPT_CFLAGS = $(CFLAGS) -mgeneral-regs-only
 LDFLAGS = -m elf_i386 -T src/link.ld --allow-multiple-definition
 ASFLAGS = -f elf32
@@ -27,9 +33,13 @@ INITRD_BIN_DIR = $(INITRD_DIR)/bin
 INITRD_USR_BIN_DIR = $(INITRD_DIR)/usr/bin
 INITRD = $(OUTDIR)/boot/initrd.tar
 INITRD_FILES := $(shell find $(INITRD_DIR) -type f 2>/dev/null)
-LIBC_DIR = libc
+LIBC_DIR = libs/libc
 LIBC_INCLUDE_DIR = $(LIBC_DIR)/include
 LIBC_INITRD_DIR = $(INITRD_DIR)/usr/libc
+FORESTCORE_DIR = libs/forestcore
+FORESTCORE_INCLUDE_DIR = $(FORESTCORE_DIR)/include
+FORESTCORE_SRC_DIR = $(FORESTCORE_DIR)/src
+UACPI_SRCDIR = libs/uacpi/source
 
 # Output Binary and ISO
 OUTPUT = $(OUTDIR)/boot/kernel.bin
@@ -38,10 +48,14 @@ ISO = $(ISO_NAME)
 
 # Source Files
 CSOURCES = $(filter-out $(SRCDIR)/interrupt.c $(SRCDIR)/interrupt_handlers.c, $(wildcard $(SRCDIR)/*.c))
+GRAPHICS_CSOURCES = $(wildcard $(SRCDIR)/graphics/*.c $(SRCDIR)/graphics/drivers/*.c)
 ASMSOURCES = $(wildcard $(SRCDIR)/*.asm)
+UACPI_CSOURCES = $(wildcard $(UACPI_SRCDIR)/*.c)
 
 # Object Files
 COBJECTS = $(CSOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
+GRAPHICS_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(GRAPHICS_CSOURCES))
+UACPI_OBJECTS = $(UACPI_CSOURCES:$(UACPI_SRCDIR)/%.c=$(OBJDIR)/uacpi_%.o)
 ASMOBJECTS = $(ASMSOURCES:$(SRCDIR)/%.asm=$(OBJDIR)/%.o)
 INTERRUPT_OBJECTS = $(OBJDIR)/interrupt.o $(OBJDIR)/interrupt_handlers.o
 
@@ -60,7 +74,7 @@ USER_ELF_BIN = $(OBJDIR)/$(USER_PRIMARY_APP)_elf.o
 USER_APP_BINARIES = $(USER_APPS:%=$(INITRD_BIN_DIR)/%.elf)
 # Keep linker address here for documentation (actual value in userspace/link.ld)
 USER_LINK_ADDR = 0x40001000
-USER_CFLAGS = -m32 -c -ffreestanding -nostdlib -Wall -g -O0 -I$(SRCDIR)/include -I$(LIBC_INCLUDE_DIR) -fno-pic -fno-pie -DUSERSPACE_BUILD
+USER_CFLAGS = -m32 -c -ffreestanding -nostdlib -Wall -g -O0 -I$(SRCDIR)/include -I$(LIBC_INCLUDE_DIR) --sysroot=$(FORESTOS_SYSROOT) -fno-pic -fno-pie -DUSERSPACE_BUILD -march=i386 -mtune=i386 -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
 
 # Build Targets
 .PHONY: all iso build run clean help
@@ -71,7 +85,7 @@ all: iso
 iso: $(ISO)
 	@echo "$(OK_COLOR)ISO ready: $(ISO)$(NO_COLOR)"
 
-$(OUTPUT): $(COBJECTS) $(ASMOBJECTS) $(INTERRUPT_OBJECTS) $(USER_ELF_BIN)
+$(OUTPUT): $(COBJECTS) $(GRAPHICS_OBJECTS) $(ASMOBJECTS) $(INTERRUPT_OBJECTS) $(USER_ELF_BIN) $(UACPI_OBJECTS)
 	@mkdir -p $(GRUBDIR)
 	@echo "$(OK_COLOR)Linking objects...$(NO_COLOR)"
 	@$(LD) $(LDFLAGS) -o $@ $^
@@ -87,6 +101,11 @@ $(OBJDIR)/interrupt_handlers.o: $(SRCDIR)/interrupt_handlers.c
 	@echo "$(OK_COLOR)Compiling (interrupt) $<...$(NO_COLOR)"
 	@$(CC) $(INTERRUPT_CFLAGS) -o $@ $<
 
+$(OBJDIR)/uacpi_%.o: $(UACPI_SRCDIR)/%.c
+	@mkdir -p $(OBJDIR)
+	@echo "$(OK_COLOR)Compiling (uACPI) $<...$(NO_COLOR)"
+	@$(CC) $(CFLAGS) -o $@ $<
+
 $(OBJDIR)/%.o: $(SRCDIR)/%.c
 	@mkdir -p $(OBJDIR)
 	@echo "$(OK_COLOR)Compiling $<...$(NO_COLOR)"
@@ -97,36 +116,57 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.asm
 	@echo "$(OK_COLOR)Assembling $<...$(NO_COLOR)"
 	@$(AS) $(ASFLAGS) -o $@ $<
 
+# Graphics subdirectory compilation rules
+$(OBJDIR)/graphics/%.o: $(SRCDIR)/graphics/%.c
+	@mkdir -p $(OBJDIR)/graphics
+	@echo "$(OK_COLOR)Compiling graphics $<...$(NO_COLOR)"
+	@$(CC) $(CFLAGS) -o $@ $<
+
+$(OBJDIR)/graphics/drivers/%.o: $(SRCDIR)/graphics/drivers/%.c
+	@mkdir -p $(OBJDIR)/graphics/drivers
+	@echo "$(OK_COLOR)Compiling graphics driver $<...$(NO_COLOR)"
+	@$(CC) $(CFLAGS) -o $@ $<
+
 $(OBJDIR)/user_%.o: $(USER_SRCDIR)/%.c
 	@mkdir -p $(OBJDIR)
-	@echo "$(OK_COLOR)Compiling userspace $<...$(NO_COLOR)"
-	@$(CC) $(USER_CFLAGS) -o $@ $<
+	@echo "$(OK_COLOR)Compiling userspace $< with Forest OS toolchain...$(NO_COLOR)"
+	@PATH=/home/bluet/forestos-toolchain/install/bin:$$PATH $(FORESTOS_CC) $(USER_CFLAGS) -o $@ $<
 
 $(OBJDIR)/userlib_%.o: userspace/libc/%.c
 	@mkdir -p $(OBJDIR)
-	@echo "$(OK_COLOR)Compiling userspace libc $<...$(NO_COLOR)"
-	@$(CC) $(USER_CFLAGS) -I$(SRCDIR)/include -o $@ $<
+	@echo "$(OK_COLOR)Compiling userspace libc $< with Forest OS toolchain...$(NO_COLOR)"
+	@PATH=/home/bluet/forestos-toolchain/install/bin:$$PATH $(FORESTOS_CC) $(USER_CFLAGS) -I$(SRCDIR)/include -o $@ $<
 
-$(USER_ELFS): $(USER_SUPPORT_OBJECTS)
-$(OBJDIR)/%.elf: $(OBJDIR)/user_%.o $(USER_SUPPORT_OBJECTS) userspace/link.ld
-	@echo "$(OK_COLOR)Linking userspace ELF $(@F)...$(NO_COLOR)"
-	@$(LD) -m elf_i386 -T userspace/link.ld -nostdlib -o $@ $(filter-out userspace/link.ld,$^)
+$(OBJDIR)/userspace_crt0.o: userspace/crt0.S
+	@mkdir -p $(OBJDIR)
+	@echo "$(OK_COLOR)Assembling userspace crt0...$(NO_COLOR)"
+	@$(AS) $(ASFLAGS) -o $@ $<
+
+$(USER_ELFS): $(USER_SUPPORT_OBJECTS) $(OBJDIR)/userspace_crt0.o
+$(OBJDIR)/%.elf: $(OBJDIR)/user_%.o $(USER_SUPPORT_OBJECTS) $(OBJDIR)/userspace_crt0.o userspace/link.ld
+	@echo "$(OK_COLOR)Linking userspace ELF $(@F) with Forest OS toolchain...$(NO_COLOR)"
+	@PATH=/home/bluet/forestos-toolchain/install/bin:$$PATH $(FORESTOS_LD) -m elf_i386 -T userspace/link.ld -nostdlib -o $@ $(OBJDIR)/userspace_crt0.o $(OBJDIR)/user_$*.o $(USER_SUPPORT_OBJECTS)
 
 $(USER_ELF_BIN): $(USER_PRIMARY_ELF)
 	@echo "$(OK_COLOR)Embedding $(USER_PRIMARY_APP) ELF into kernel...$(NO_COLOR)"
 	@$(LD) -m elf_i386 -r -b binary -o $@ $<
 
 .PHONY: refresh-libc
-refresh-libc:
+refresh-libc: refresh-forestcore
 	@echo "$(OK_COLOR)Refreshing exported libc sources...$(NO_COLOR)"
-	@mkdir -p $(LIBC_INCLUDE_DIR)/libc
-	@rm -f $(LIBC_DIR)/*.c
-	@rm -f $(LIBC_INCLUDE_DIR)/*.h
 	@rm -rf $(LIBC_INCLUDE_DIR)/libc
 	@mkdir -p $(LIBC_INCLUDE_DIR)/libc
-	@cp $(SRCDIR)/string.c $(SRCDIR)/util.c $(SRCDIR)/system.c $(SRCDIR)/audio.c $(LIBC_DIR)/
-	@cp $(SRCDIR)/include/types.h $(SRCDIR)/include/util.h $(SRCDIR)/include/string.h $(SRCDIR)/include/system.h $(SRCDIR)/include/net.h $(SRCDIR)/include/driver.h $(LIBC_INCLUDE_DIR)/
 	@cp -r $(SRCDIR)/include/libc/* $(LIBC_INCLUDE_DIR)/libc/
+
+.PHONY: refresh-forestcore
+refresh-forestcore:
+	@echo "$(OK_COLOR)Refreshing ForestCore runtime exports...$(NO_COLOR)"
+	@mkdir -p $(FORESTCORE_SRC_DIR)
+	@mkdir -p $(FORESTCORE_INCLUDE_DIR)
+	@rm -f $(FORESTCORE_SRC_DIR)/*.c
+	@rm -f $(FORESTCORE_INCLUDE_DIR)/*.h
+	@cp $(SRCDIR)/string.c $(SRCDIR)/util.c $(SRCDIR)/system.c $(SRCDIR)/audio.c $(FORESTCORE_SRC_DIR)/
+	@cp $(SRCDIR)/include/types.h $(SRCDIR)/include/util.h $(SRCDIR)/include/string.h $(SRCDIR)/include/system.h $(SRCDIR)/include/net.h $(SRCDIR)/include/driver.h $(FORESTCORE_INCLUDE_DIR)/
 
 $(INITRD): refresh-libc $(OUTPUT) $(INITRD_FILES) $(USER_APP_BINARIES)
 	@mkdir -p $(OUTDIR)/boot

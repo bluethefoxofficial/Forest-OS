@@ -3,7 +3,8 @@
 #include "../src/include/libc/unistd.h"
 #include "../src/include/libc/stdlib.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     char buffer[256];
     const char payload[] = "SCP /README.txt -> /tmp/README.txt";
     int received = forest_port_query(NET_PORT_RSYNCD, payload, sizeof(payload) - 1, buffer, sizeof(buffer) - 1);
@@ -13,5 +14,5 @@ void _start(void) {
     } else {
         printf("scp: no rsync-style responder on loopback\n");
     }
-    exit(0);
+    return 0;
 }

@@ -68,6 +68,7 @@ typedef enum {
 } memory_page_flags_t;
 
 // Memory region types - validated against multiboot specification
+#ifndef MEMORY_REGION_TYPE_T_DEFINED
 typedef enum {
     MEMORY_REGION_INVALID = 0,
     MEMORY_REGION_AVAILABLE = 1,
@@ -76,6 +77,8 @@ typedef enum {
     MEMORY_REGION_ACPI_NVS = 4,
     MEMORY_REGION_BADRAM = 5
 } memory_region_type_t;
+#define MEMORY_REGION_TYPE_T_DEFINED 1
+#endif
 
 // Memory allocation flags - clear semantics
 typedef enum {

@@ -3,9 +3,10 @@
 #include "../src/include/libc/time.h"
 #include "../src/include/libc/unistd.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     int now = time(NULL);
     printf("date (epoch): %d\n", now);
     printf("No calendar formatting support is available yet.\n");
-    exit(0);
+    return 0;
 }

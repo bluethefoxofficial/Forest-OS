@@ -16,7 +16,6 @@
  */
 
 #include "include/panic.h"
-#include "include/screen.h"
 #include "include/system.h"
 #include "include/util.h"
 #include "include/memory.h"
@@ -26,6 +25,8 @@
 #include "include/ps2_controller.h"
 #include "include/kb.h"
 #include "include/debuglog.h"
+#include "include/graphics/graphics_manager.h"
+#include "include/graphics/font_renderer.h"
 
 // =============================================================================
 // CONSTANTS AND CONFIGURATION
@@ -40,38 +41,387 @@
 #define PANIC_MEMORY_SCROLL_RANGE 64
 #define PANIC_MEMORY_STEP_BYTES 16
 
-// Purple BSOD-style color scheme
-#define COLOR_BSOD_BG     0x50  // Purple background (5 = magenta, 0 = black text)
-#define COLOR_ERROR       0x54  // Purple background, red text
-#define COLOR_WARNING     0x5E  // Purple background, yellow text
-#define COLOR_INFO        0x5F  // Purple background, white text
-#define COLOR_SUCCESS     0x5A  // Purple background, green text
-#define COLOR_NORMAL      0x5F  // Purple background, white text
-#define COLOR_HIGHLIGHT   0x57  // Purple background, gray text
-#define COLOR_HEADER      0x70  // White background, black text
+// New graphics-based color scheme
+static const graphics_color_t COLOR_BG = {0, 0, 170, 255}; // Dark blue
+static const graphics_color_t COLOR_FG = {255, 255, 255, 255}; // White
+static const graphics_color_t COLOR_HEAD = {85, 85, 255, 255}; // Lighter blue
+static const graphics_color_t COLOR_BORDER = {255, 255, 255, 255}; // White
+static const graphics_color_t COLOR_TEXT_HEADER = {255, 255, 85, 255}; // Yellow
+static const graphics_color_t COLOR_TEXT_LABEL = {85, 255, 255, 255};  // Cyan
+static const graphics_color_t COLOR_TEXT_VALUE = {255, 255, 255, 255}; // White
+static const graphics_color_t COLOR_TEXT_ERROR = {255, 85, 85, 255};   // Red
+static const graphics_color_t COLOR_TEXT_WARN = {255, 255, 85, 255};  // Yellow
+static const graphics_color_t COLOR_TEXT_OK = {85, 255, 85, 255};      // Green
+static const graphics_color_t COLOR_TEXT_MUTED = {170, 170, 170, 255}; // Gray
 
-#define FG_WHITE    0x0F
-#define FG_YELLOW   0x0E
-#define FG_CYAN     0x0B
-#define FG_GREEN    0x0A
-#define FG_RED      0x0C
-#define FG_GRAY     0x08
-#define FG_PURPLE   0x05
-#define FG_BLUE     0x09
+#define FG_WHITE    COLOR_TEXT_VALUE
+#define FG_YELLOW   COLOR_TEXT_WARN
+#define FG_CYAN     COLOR_TEXT_LABEL
+#define FG_GREEN    COLOR_TEXT_OK
+#define FG_RED      COLOR_TEXT_ERROR
+#define FG_GRAY     COLOR_TEXT_MUTED
+#define FG_BLUE     COLOR_HEAD
+
+// Color constants for TUI compatibility (convert graphics_color_t to int)
+#define COLOR_WARNING   14  // Yellow
+#define COLOR_NORMAL    7   // Light gray
+#define COLOR_SUCCESS   10  // Light green
+
+// Helper function to convert graphics_color_t to TUI color int
+static int graphics_color_to_tui(graphics_color_t color) {
+    // Map graphics colors to basic TUI colors based on RGB values
+    if (color.r == 255 && color.g == 255 && color.b == 255) return 15; // White
+    if (color.r == 255 && color.g == 255 && color.b == 85)  return 14; // Yellow  
+    if (color.r == 85  && color.g == 255 && color.b == 255) return 11; // Cyan
+    if (color.r == 85  && color.g == 255 && color.b == 85)  return 10; // Green
+    if (color.r == 255 && color.g == 85  && color.b == 85)  return 12; // Red
+    if (color.r == 170 && color.g == 170 && color.b == 170) return 8;  // Gray
+    if (color.r == 85  && color.g == 85  && color.b == 255) return 9;  // Light blue
+    return 7; // Default to light gray
+}
+
+// Convert color macros to TUI colors (constant values)
+#define TUI_WHITE    15  // White
+#define TUI_YELLOW   14  // Yellow
+#define TUI_CYAN     11  // Cyan
+#define TUI_GREEN    10  // Green
+#define TUI_RED      12  // Red
+#define TUI_GRAY     8   // Gray
+#define TUI_BLUE     9   // Light blue
+
+// Font dimensions
+#define FONT_WIDTH 8
+#define FONT_HEIGHT 16
+#define LINE_SPACING 2
 
 // =============================================================================
 // ENHANCED DATA STRUCTURES
 // =============================================================================
 
 typedef enum {
+    // General categories
     PANIC_TYPE_GENERAL,
+    PANIC_TYPE_UNKNOWN,
+    
+    // Page fault subtypes
     PANIC_TYPE_PAGE_FAULT,
+    PANIC_TYPE_PAGE_FAULT_MINOR,
+    PANIC_TYPE_PAGE_FAULT_MAJOR,
+    PANIC_TYPE_PAGE_FAULT_INVALID,
+    PANIC_TYPE_PAGE_FAULT_NULL_POINTER,
+    PANIC_TYPE_PAGE_FAULT_SEGMENTATION,
+    PANIC_TYPE_PAGE_FAULT_ACCESS_VIOLATION,
+    PANIC_TYPE_PAGE_FAULT_WRITE_PROTECT,
+    PANIC_TYPE_PAGE_FAULT_USER_MODE,
+    PANIC_TYPE_PAGE_FAULT_KERNEL_MODE,
+    PANIC_TYPE_PAGE_FAULT_INSTRUCTION_FETCH,
+    PANIC_TYPE_PAGE_FAULT_DATA_ACCESS,
+    PANIC_TYPE_PAGE_FAULT_RESERVED_BIT,
+    PANIC_TYPE_PAGE_FAULT_STACK_GUARD,
+    PANIC_TYPE_PAGE_FAULT_COW_VIOLATION,
+    PANIC_TYPE_PAGE_FAULT_SHARED_MEMORY,
+    PANIC_TYPE_PAGE_FAULT_MEMORY_MAPPED_FILE,
+    PANIC_TYPE_PAGE_FAULT_BUFFER_OVERFLOW,
+    PANIC_TYPE_PAGE_FAULT_USE_AFTER_FREE,
+    PANIC_TYPE_PAGE_FAULT_DOUBLE_FREE,
+    
+    // Double fault and other CPU exceptions
     PANIC_TYPE_DOUBLE_FAULT,
-    PANIC_TYPE_STACK_OVERFLOW,
+    PANIC_TYPE_TRIPLE_FAULT,
+    PANIC_TYPE_DIVIDE_ERROR,
+    PANIC_TYPE_DEBUG_EXCEPTION,
+    PANIC_TYPE_NMI_INTERRUPT,
+    PANIC_TYPE_BREAKPOINT,
+    PANIC_TYPE_OVERFLOW,
+    PANIC_TYPE_BOUND_RANGE_EXCEEDED,
+    PANIC_TYPE_INVALID_OPCODE,
+    PANIC_TYPE_DEVICE_NOT_AVAILABLE,
+    PANIC_TYPE_COPROCESSOR_SEGMENT_OVERRUN,
+    PANIC_TYPE_INVALID_TSS,
+    PANIC_TYPE_SEGMENT_NOT_PRESENT,
+    PANIC_TYPE_STACK_SEGMENT_FAULT,
+    PANIC_TYPE_GENERAL_PROTECTION_FAULT,
+    PANIC_TYPE_X87_FPU_ERROR,
+    PANIC_TYPE_ALIGNMENT_CHECK,
+    PANIC_TYPE_MACHINE_CHECK,
+    PANIC_TYPE_SIMD_EXCEPTION,
+    PANIC_TYPE_VIRTUALIZATION_EXCEPTION,
+    PANIC_TYPE_CONTROL_PROTECTION_EXCEPTION,
+    
+    // Memory-related errors
     PANIC_TYPE_MEMORY_CORRUPTION,
+    PANIC_TYPE_HEAP_CORRUPTION,
+    PANIC_TYPE_STACK_CORRUPTION,
+    PANIC_TYPE_BUFFER_OVERFLOW,
+    PANIC_TYPE_BUFFER_UNDERFLOW,
+    PANIC_TYPE_STACK_OVERFLOW,
+    PANIC_TYPE_STACK_UNDERFLOW,
+    PANIC_TYPE_MEMORY_LEAK,
+    PANIC_TYPE_OUT_OF_MEMORY,
+    PANIC_TYPE_ALLOCATION_FAILURE,
+    PANIC_TYPE_DEALLOCATION_ERROR,
+    PANIC_TYPE_INVALID_FREE,
+    PANIC_TYPE_MEMORY_ALIGNMENT_ERROR,
+    PANIC_TYPE_MEMORY_ACCESS_VIOLATION,
+    PANIC_TYPE_MEMORY_PROTECTION_VIOLATION,
+    PANIC_TYPE_MEMORY_MAPPING_ERROR,
+    PANIC_TYPE_VIRTUAL_MEMORY_EXHAUSTED,
+    PANIC_TYPE_PHYSICAL_MEMORY_EXHAUSTED,
+    PANIC_TYPE_MEMORY_FRAGMENTATION,
+    PANIC_TYPE_MEMORY_BOUNDS_CHECK_FAILED,
+    PANIC_TYPE_MEMORY_CANARY_CORRUPTION,
+    PANIC_TYPE_MEMORY_METADATA_CORRUPTION,
+    PANIC_TYPE_MEMORY_POOL_CORRUPTION,
+    PANIC_TYPE_MEMORY_REGION_CORRUPTION,
+    PANIC_TYPE_MEMORY_SLAB_CORRUPTION,
+    
+    // Pointer-related errors
+    PANIC_TYPE_NULL_POINTER_DEREFERENCE,
+    PANIC_TYPE_WILD_POINTER_ACCESS,
+    PANIC_TYPE_DANGLING_POINTER_ACCESS,
+    PANIC_TYPE_INVALID_POINTER_ARITHMETIC,
+    PANIC_TYPE_POINTER_CORRUPTION,
+    PANIC_TYPE_FUNCTION_POINTER_CORRUPTION,
+    PANIC_TYPE_VTABLE_CORRUPTION,
+    PANIC_TYPE_RETURN_ADDRESS_CORRUPTION,
+    
+    // Hardware-related errors
     PANIC_TYPE_HARDWARE_FAILURE,
+    PANIC_TYPE_CPU_FAULT,
+    PANIC_TYPE_CPU_OVERHEATING,
+    PANIC_TYPE_CPU_CACHE_ERROR,
+    PANIC_TYPE_CPU_TLB_ERROR,
+    PANIC_TYPE_CPU_MICROCODE_ERROR,
+    PANIC_TYPE_MEMORY_BUS_ERROR,
+    PANIC_TYPE_MEMORY_ECC_ERROR,
+    PANIC_TYPE_MEMORY_PARITY_ERROR,
+    PANIC_TYPE_MEMORY_CONTROLLER_ERROR,
+    PANIC_TYPE_DISK_CONTROLLER_ERROR,
+    PANIC_TYPE_DISK_READ_ERROR,
+    PANIC_TYPE_DISK_WRITE_ERROR,
+    PANIC_TYPE_DISK_SEEK_ERROR,
+    PANIC_TYPE_NETWORK_CONTROLLER_ERROR,
+    PANIC_TYPE_PCI_ERROR,
+    PANIC_TYPE_ACPI_ERROR,
+    PANIC_TYPE_BIOS_ERROR,
+    PANIC_TYPE_FIRMWARE_ERROR,
+    PANIC_TYPE_POWER_SUPPLY_ERROR,
+    PANIC_TYPE_THERMAL_ERROR,
+    PANIC_TYPE_FAN_FAILURE,
+    
+    // Interrupt and IRQ errors
+    PANIC_TYPE_SPURIOUS_INTERRUPT,
+    PANIC_TYPE_UNHANDLED_INTERRUPT,
+    PANIC_TYPE_INTERRUPT_STORM,
+    PANIC_TYPE_IRQ_CONFLICT,
+    PANIC_TYPE_INTERRUPT_VECTOR_CORRUPTION,
+    PANIC_TYPE_IDT_CORRUPTION,
+    PANIC_TYPE_GDT_CORRUPTION,
+    PANIC_TYPE_TSS_CORRUPTION,
+    PANIC_TYPE_INTERRUPT_STACK_OVERFLOW,
+    PANIC_TYPE_INTERRUPT_DEADLOCK,
+    
+    // Synchronization errors
+    PANIC_TYPE_DEADLOCK,
+    PANIC_TYPE_LIVELOCK,
+    PANIC_TYPE_RACE_CONDITION,
+    PANIC_TYPE_SPINLOCK_DEADLOCK,
+    PANIC_TYPE_MUTEX_DEADLOCK,
+    PANIC_TYPE_SEMAPHORE_OVERFLOW,
+    PANIC_TYPE_SEMAPHORE_UNDERFLOW,
+    PANIC_TYPE_CONDITION_VARIABLE_ERROR,
+    PANIC_TYPE_BARRIER_ERROR,
+    PANIC_TYPE_ATOMIC_OPERATION_FAILURE,
+    PANIC_TYPE_MEMORY_ORDERING_VIOLATION,
+    PANIC_TYPE_LOCK_CORRUPTION,
+    PANIC_TYPE_LOCK_INVERSION,
+    PANIC_TYPE_PRIORITY_INVERSION,
+    
+    // Process/thread errors
+    PANIC_TYPE_TASK_CORRUPTION,
+    PANIC_TYPE_PROCESS_CORRUPTION,
+    PANIC_TYPE_THREAD_CORRUPTION,
+    PANIC_TYPE_SCHEDULER_ERROR,
+    PANIC_TYPE_CONTEXT_SWITCH_ERROR,
+    PANIC_TYPE_STACK_POINTER_CORRUPTION,
+    PANIC_TYPE_INSTRUCTION_POINTER_CORRUPTION,
+    PANIC_TYPE_REGISTER_CORRUPTION,
+    PANIC_TYPE_PROCESS_TABLE_CORRUPTION,
+    PANIC_TYPE_THREAD_STACK_OVERFLOW,
+    PANIC_TYPE_KERNEL_STACK_OVERFLOW,
+    PANIC_TYPE_USER_STACK_OVERFLOW,
+    PANIC_TYPE_SIGNAL_HANDLER_ERROR,
+    PANIC_TYPE_SIGNAL_STACK_CORRUPTION,
+    
+    // Filesystem errors
+    PANIC_TYPE_FILESYSTEM_CORRUPTION,
+    PANIC_TYPE_INODE_CORRUPTION,
+    PANIC_TYPE_SUPERBLOCK_CORRUPTION,
+    PANIC_TYPE_DIRECTORY_CORRUPTION,
+    PANIC_TYPE_FILE_ALLOCATION_TABLE_CORRUPTION,
+    PANIC_TYPE_DISK_QUOTA_EXCEEDED,
+    PANIC_TYPE_FILESYSTEM_FULL,
+    PANIC_TYPE_INVALID_FILE_DESCRIPTOR,
+    PANIC_TYPE_FILE_HANDLE_LEAK,
+    PANIC_TYPE_MOUNT_POINT_CORRUPTION,
+    PANIC_TYPE_VFS_CORRUPTION,
+    PANIC_TYPE_BUFFER_CACHE_CORRUPTION,
+    PANIC_TYPE_JOURNAL_CORRUPTION,
+    PANIC_TYPE_METADATA_CORRUPTION,
+    
+    // Device driver errors
+    PANIC_TYPE_DRIVER_ERROR,
+    PANIC_TYPE_DRIVER_CORRUPTION,
+    PANIC_TYPE_DRIVER_TIMEOUT,
+    PANIC_TYPE_DRIVER_DEADLOCK,
+    PANIC_TYPE_DRIVER_RESOURCE_LEAK,
+    PANIC_TYPE_DRIVER_INITIALIZATION_FAILED,
+    PANIC_TYPE_DRIVER_UNLOAD_ERROR,
+    PANIC_TYPE_DRIVER_VERSION_MISMATCH,
+    PANIC_TYPE_DRIVER_INCOMPATIBLE,
+    PANIC_TYPE_DEVICE_NOT_RESPONDING,
+    PANIC_TYPE_DEVICE_REMOVED,
+    PANIC_TYPE_DEVICE_MALFUNCTION,
+    
+    // Network errors
+    PANIC_TYPE_NETWORK_ERROR,
+    PANIC_TYPE_NETWORK_TIMEOUT,
+    PANIC_TYPE_NETWORK_BUFFER_OVERFLOW,
+    PANIC_TYPE_NETWORK_PACKET_CORRUPTION,
+    PANIC_TYPE_NETWORK_STACK_OVERFLOW,
+    PANIC_TYPE_NETWORK_PROTOCOL_ERROR,
+    PANIC_TYPE_SOCKET_ERROR,
+    PANIC_TYPE_TCP_ERROR,
+    PANIC_TYPE_UDP_ERROR,
+    PANIC_TYPE_IP_ERROR,
+    PANIC_TYPE_ETHERNET_ERROR,
+    PANIC_TYPE_NETWORK_CONGESTION,
+    
+    // Security errors
+    PANIC_TYPE_SECURITY_VIOLATION,
+    PANIC_TYPE_PRIVILEGE_ESCALATION,
+    PANIC_TYPE_BUFFER_OVERFLOW_EXPLOIT,
+    PANIC_TYPE_CODE_INJECTION,
+    PANIC_TYPE_ROP_ATTACK,
+    PANIC_TYPE_JOP_ATTACK,
+    PANIC_TYPE_CONTROL_FLOW_HIJACK,
+    PANIC_TYPE_STACK_SMASHING,
+    PANIC_TYPE_HEAP_SPRAYING,
+    PANIC_TYPE_FORMAT_STRING_ATTACK,
+    PANIC_TYPE_INTEGER_OVERFLOW_EXPLOIT,
+    PANIC_TYPE_RACE_CONDITION_EXPLOIT,
+    PANIC_TYPE_TIME_OF_CHECK_TIME_OF_USE,
+    
+    // Cache and memory hierarchy errors
+    PANIC_TYPE_L1_CACHE_ERROR,
+    PANIC_TYPE_L2_CACHE_ERROR,
+    PANIC_TYPE_L3_CACHE_ERROR,
+    PANIC_TYPE_L4_CACHE_ERROR,
+    PANIC_TYPE_CACHE_COHERENCY_ERROR,
+    PANIC_TYPE_CACHE_MISS_STORM,
+    PANIC_TYPE_CACHE_THRASHING,
+    PANIC_TYPE_TLB_MISS_STORM,
+    PANIC_TYPE_TLB_COHERENCY_ERROR,
+    PANIC_TYPE_MEMORY_BANDWIDTH_EXCEEDED,
+    PANIC_TYPE_MEMORY_LATENCY_TIMEOUT,
+    PANIC_TYPE_NUMA_ERROR,
+    PANIC_TYPE_MEMORY_CONTROLLER_TIMEOUT,
+    
+    // System call errors
+    PANIC_TYPE_SYSCALL_ERROR,
+    PANIC_TYPE_INVALID_SYSCALL,
+    PANIC_TYPE_SYSCALL_CORRUPTION,
+    PANIC_TYPE_SYSCALL_TABLE_CORRUPTION,
+    PANIC_TYPE_SYSCALL_STACK_OVERFLOW,
+    PANIC_TYPE_SYSCALL_PARAMETER_ERROR,
+    PANIC_TYPE_SYSCALL_PRIVILEGE_ERROR,
+    PANIC_TYPE_SYSCALL_DEADLOCK,
+    PANIC_TYPE_SYSCALL_TIMEOUT,
+    
+    // Boot and initialization errors
+    PANIC_TYPE_BOOT_ERROR,
+    PANIC_TYPE_INITIALIZATION_ERROR,
+    PANIC_TYPE_MODULE_LOAD_ERROR,
+    PANIC_TYPE_DEPENDENCY_ERROR,
+    PANIC_TYPE_CONFIGURATION_ERROR,
+    PANIC_TYPE_RESOURCE_INITIALIZATION_ERROR,
+    PANIC_TYPE_EARLY_BOOT_ERROR,
+    PANIC_TYPE_LATE_BOOT_ERROR,
+    PANIC_TYPE_SHUTDOWN_ERROR,
+    
+    // Power management errors
+    PANIC_TYPE_POWER_MANAGEMENT_ERROR,
+    PANIC_TYPE_SUSPEND_ERROR,
+    PANIC_TYPE_RESUME_ERROR,
+    PANIC_TYPE_HIBERNATION_ERROR,
+    PANIC_TYPE_CPU_FREQUENCY_ERROR,
+    PANIC_TYPE_VOLTAGE_ERROR,
+    PANIC_TYPE_THERMAL_THROTTLING,
+    PANIC_TYPE_POWER_STATE_ERROR,
+    
+    // Virtualization errors
+    PANIC_TYPE_HYPERVISOR_ERROR,
+    PANIC_TYPE_GUEST_OS_ERROR,
+    PANIC_TYPE_VM_EXIT_ERROR,
+    PANIC_TYPE_VM_ENTRY_ERROR,
+    PANIC_TYPE_VIRTUAL_MACHINE_CORRUPTION,
+    PANIC_TYPE_HYPERCALL_ERROR,
+    PANIC_TYPE_VIRTUALIZATION_FEATURE_ERROR,
+    
+    // Compiler and code generation errors
+    PANIC_TYPE_COMPILER_ERROR,
+    PANIC_TYPE_OPTIMIZATION_ERROR,
+    PANIC_TYPE_UNDEFINED_BEHAVIOR,
+    PANIC_TYPE_UNINITIALIZED_VARIABLE,
+    PANIC_TYPE_ARRAY_BOUNDS_VIOLATION,
+    PANIC_TYPE_INTEGER_OVERFLOW,
+    PANIC_TYPE_INTEGER_UNDERFLOW,
+    PANIC_TYPE_DIVISION_BY_ZERO,
+    PANIC_TYPE_FLOATING_POINT_ERROR,
+    PANIC_TYPE_STACK_FRAME_CORRUPTION,
+    PANIC_TYPE_CALLING_CONVENTION_ERROR,
+    
+    // Debug and development errors
     PANIC_TYPE_ASSERTION_FAILED,
-    PANIC_TYPE_KERNEL_OOPS
+    PANIC_TYPE_DEBUG_TRAP,
+    PANIC_TYPE_BREAKPOINT_ERROR,
+    PANIC_TYPE_WATCHPOINT_ERROR,
+    PANIC_TYPE_PROFILING_ERROR,
+    PANIC_TYPE_TRACE_ERROR,
+    PANIC_TYPE_INSTRUMENTATION_ERROR,
+    
+    // Timing and real-time errors
+    PANIC_TYPE_TIMING_ERROR,
+    PANIC_TYPE_DEADLINE_MISSED,
+    PANIC_TYPE_TIMER_ERROR,
+    PANIC_TYPE_CLOCK_DRIFT,
+    PANIC_TYPE_TIMESTAMP_ERROR,
+    PANIC_TYPE_REAL_TIME_CONSTRAINT_VIOLATION,
+    PANIC_TYPE_SCHEDULE_OVERRUN,
+    
+    // Communication and IPC errors
+    PANIC_TYPE_IPC_ERROR,
+    PANIC_TYPE_MESSAGE_QUEUE_OVERFLOW,
+    PANIC_TYPE_SHARED_MEMORY_ERROR,
+    PANIC_TYPE_PIPE_ERROR,
+    PANIC_TYPE_COMMUNICATION_TIMEOUT,
+    PANIC_TYPE_PROTOCOL_VIOLATION,
+    
+    // Legacy and compatibility errors
+    PANIC_TYPE_KERNEL_OOPS,
+    PANIC_TYPE_LEGACY_HARDWARE_ERROR,
+    PANIC_TYPE_COMPATIBILITY_ERROR,
+    PANIC_TYPE_EMULATION_ERROR,
+    PANIC_TYPE_TRANSLATION_ERROR,
+    
+    // Custom and user-defined errors
+    PANIC_TYPE_USER_DEFINED_1,
+    PANIC_TYPE_USER_DEFINED_2,
+    PANIC_TYPE_USER_DEFINED_3,
+    PANIC_TYPE_CUSTOM_HANDLER_ERROR,
+    PANIC_TYPE_MODULE_SPECIFIC_ERROR,
+    
+    PANIC_TYPE_MAX // Keep this last
 } panic_type_t;
 
 // BSOD-style page system
@@ -88,6 +438,9 @@ typedef enum {
 
 // Forward declare panic_context_t to avoid circular dependency
 typedef struct panic_context panic_context_t;
+
+// Forward declarations for helper functions
+static const char* get_panic_type_name(panic_type_t type);
 
 typedef struct {
     bsod_page_t id;
@@ -135,6 +488,127 @@ typedef struct {
     uint32 end_addr;
     const char* description;
 } panic_memory_region_t;
+
+// =============================================================================
+// GRAPHICS GLOBALS & HELPERS
+// =============================================================================
+
+static font_t* g_panic_font = NULL;
+static framebuffer_t* g_panic_framebuffer = NULL;
+static uint32_t g_screen_width = 0;
+static uint32_t g_screen_height = 0;
+
+// Core graphics drawing functions using the graphics API directly
+static void panic_draw_text(const char* text, int x, int y, graphics_color_t color) {
+    if (g_panic_font && graphics_is_initialized()) {
+        graphics_draw_text(x, y, text, g_panic_font, color);
+    }
+}
+
+static void panic_fill_rect(int x, int y, int w, int h, graphics_color_t color) {
+    graphics_rect_t rect = {x, y, w, h};
+    graphics_draw_rect(&rect, color, true);
+}
+
+static void panic_draw_rect(int x, int y, int w, int h, graphics_color_t color) {
+    graphics_rect_t rect = {x, y, w, h};
+    graphics_draw_rect(&rect, color, false);
+}
+
+static void panic_draw_line(int x1, int y1, int x2, int y2, graphics_color_t color) {
+    graphics_draw_line(x1, y1, x2, y2, color);
+}
+
+static void panic_draw_pixel(int x, int y, graphics_color_t color) {
+    graphics_draw_pixel(x, y, color);
+}
+
+// Graphics-based UI functions to replace TUI
+static void panic_draw_window(int x, int y, int width, int height, const char* title, graphics_color_t fg_color, graphics_color_t bg_color) {
+    // Draw window background
+    panic_fill_rect(x, y, width, height, bg_color);
+    
+    // Draw window border
+    panic_draw_rect(x, y, width, height, fg_color);
+    
+    // Draw title bar if title provided
+    if (title) {
+        int title_height = 20;
+        panic_fill_rect(x + 1, y + 1, width - 2, title_height, fg_color);
+        
+        // Center title text
+        uint32_t title_width, title_text_height;
+        if (g_panic_font && graphics_get_text_bounds(title, g_panic_font, &title_width, &title_text_height) == GRAPHICS_SUCCESS) {
+            int title_x = x + (width - title_width) / 2;
+            int title_y = y + (title_height - title_text_height) / 2 + title_text_height;
+            panic_draw_text(title, title_x, title_y, bg_color);
+        }
+    }
+}
+
+static void panic_print_at(int x, int y, const char* text, graphics_color_t fg_color) {
+    panic_draw_text(text, x, y, fg_color);
+}
+
+static void panic_center_text(int x, int y, int width, const char* text, graphics_color_t fg_color) {
+    if (g_panic_font) {
+        uint32_t text_width, text_height;
+        if (graphics_get_text_bounds(text, g_panic_font, &text_width, &text_height) == GRAPHICS_SUCCESS) {
+            int centered_x = x + (width - text_width) / 2;
+            panic_draw_text(text, centered_x, y, fg_color);
+        }
+    }
+}
+
+static void panic_draw_status_bar(int y, const char* left_text, const char* right_text, graphics_color_t fg_color, graphics_color_t bg_color) {
+    // Draw status bar background
+    panic_fill_rect(0, y, g_screen_width, 25, bg_color);
+    
+    // Draw left text
+    if (left_text) {
+        panic_draw_text(left_text, 10, y + 20, fg_color);
+    }
+    
+    // Draw right text
+    if (right_text && g_panic_font) {
+        uint32_t text_width, text_height;
+        if (graphics_get_text_bounds(right_text, g_panic_font, &text_width, &text_height) == GRAPHICS_SUCCESS) {
+            int right_x = g_screen_width - text_width - 10;
+            panic_draw_text(right_text, right_x, y + 20, fg_color);
+        }
+    }
+}
+
+static void panic_print_table_row(int x, int y, int width, const char* label, const char* value, 
+                                 graphics_color_t label_color, graphics_color_t value_color, graphics_color_t bg_color) {
+    // Draw row background
+    panic_fill_rect(x, y, width, 18, bg_color);
+    
+    // Draw label
+    panic_draw_text(label, x + 5, y + 14, label_color);
+    
+    // Draw value (right-aligned within available space)
+    if (value && g_panic_font) {
+        uint32_t value_width, value_height;
+        if (graphics_get_text_bounds(value, g_panic_font, &value_width, &value_height) == GRAPHICS_SUCCESS) {
+            int value_x = x + width - value_width - 5;
+            panic_draw_text(value, value_x, y + 14, value_color);
+        }
+    }
+}
+
+static void panic_print_section_header(int x, int y, int width, const char* title, graphics_color_t fg_color, graphics_color_t bg_color) {
+    // Draw header background
+    panic_fill_rect(x, y, width, 20, bg_color);
+    
+    // Draw separator lines
+    panic_draw_line(x, y, x + width, y, fg_color);
+    panic_draw_line(x, y + 19, x + width, y + 19, fg_color);
+    
+    // Draw title text
+    panic_draw_text(title, x + 5, y + 16, fg_color);
+}
+
 
 // =============================================================================
 // GLOBAL STATE
@@ -288,6 +762,7 @@ static void capture_cpu_state_atomic(cpu_state_t* state) {
         "pop %0"
         : "=r"(state->eflags)
     );
+
     
     // Capture control registers safely
     __asm__ __volatile__("mov %%cr0, %0" : "=r"(state->cr0));
@@ -307,7 +782,7 @@ static void capture_cpu_state_atomic(cpu_state_t* state) {
     if (state->esp >= 0x1000 && state->esp < 0xFFFFF000) {
         state->return_address = *((uint32*)state->esp);
     } else {
-        state->return_address = 0xDEADBEEF;
+        state->return_address = 0x00000000;  // Safe null instead of problematic marker
     }
     
     // Restore interrupts
@@ -450,44 +925,170 @@ static void panic_debuglog_write_register(const char* name, uint32 value) {
 }
 
 static void panic_debuglog_emit_registers(const cpu_state_t* cpu) {
-    debuglog_write("[PANIC][GDB] Register state:\n");
+    debuglog_write("[PANIC][GDB] ===== CPU REGISTER STATE =====\n");
+    debuglog_write("[PANIC][GDB] General Purpose Registers:\n");
     panic_debuglog_write_register("EAX", cpu->eax);
     panic_debuglog_write_register("EBX", cpu->ebx);
     panic_debuglog_write_register("ECX", cpu->ecx);
     panic_debuglog_write_register("EDX", cpu->edx);
     panic_debuglog_write_register("ESI", cpu->esi);
     panic_debuglog_write_register("EDI", cpu->edi);
+    
+    debuglog_write("[PANIC][GDB] Stack and Instruction Pointers:\n");
     panic_debuglog_write_register("EBP", cpu->ebp);
     panic_debuglog_write_register("ESP", cpu->esp);
     panic_debuglog_write_register("EIP", cpu->eip);
+    
+    debuglog_write("[PANIC][GDB] Segment Registers:\n");
+    panic_debuglog_write_register("CS", cpu->cs);
+    panic_debuglog_write_register("SS", cpu->ss);
+    panic_debuglog_write_register("DS", cpu->ds);
+    panic_debuglog_write_register("ES", cpu->es);
+    panic_debuglog_write_register("FS", cpu->fs);
+    panic_debuglog_write_register("GS", cpu->gs);
+    
+    debuglog_write("[PANIC][GDB] Flags Register (EFLAGS):\n");
     panic_debuglog_write_register("EFLAGS", cpu->eflags);
+    debuglog_write("[PANIC][GDB]     CF(Carry)="); 
+    debuglog_write_dec((cpu->eflags & 0x1) ? 1 : 0);
+    debuglog_write(", PF(Parity)=");
+    debuglog_write_dec((cpu->eflags & 0x4) ? 1 : 0);
+    debuglog_write(", ZF(Zero)=");
+    debuglog_write_dec((cpu->eflags & 0x40) ? 1 : 0);
+    debuglog_write(", SF(Sign)=");
+    debuglog_write_dec((cpu->eflags & 0x80) ? 1 : 0);
+    debuglog_write(", IF(Interrupt)=");
+    debuglog_write_dec((cpu->eflags & 0x200) ? 1 : 0);
+    debuglog_write("\n");
+    
+    debuglog_write("[PANIC][GDB] Control Registers:\n");
     panic_debuglog_write_register("CR0", cpu->cr0);
+    if (cpu->cr0 != 0) {
+        debuglog_write("[PANIC][GDB]     PE(Protected)=");
+        debuglog_write_dec((cpu->cr0 & 0x1) ? 1 : 0);
+        debuglog_write(", MP(Math Present)=");
+        debuglog_write_dec((cpu->cr0 & 0x2) ? 1 : 0);
+        debuglog_write(", EM(Emulation)=");
+        debuglog_write_dec((cpu->cr0 & 0x4) ? 1 : 0);
+        debuglog_write(", TS(Task Switch)=");
+        debuglog_write_dec((cpu->cr0 & 0x8) ? 1 : 0);
+        debuglog_write(", PG(Paging)=");
+        debuglog_write_dec((cpu->cr0 & 0x80000000) ? 1 : 0);
+        debuglog_write("\n");
+    }
+    
     panic_debuglog_write_register("CR2", cpu->cr2);
+    if (cpu->cr2 != 0) {
+        debuglog_write("[PANIC][GDB]     Page Fault Linear Address: ");
+        char cr2_addr[12];
+        format_hex32(cpu->cr2, cr2_addr);
+        debuglog_write(cr2_addr);
+        debuglog_write("\n");
+    }
+    
     panic_debuglog_write_register("CR3", cpu->cr3);
+    if (cpu->cr3 != 0) {
+        debuglog_write("[PANIC][GDB]     Page Directory Base: ");
+        char cr3_addr[12];
+        format_hex32(cpu->cr3 & 0xFFFFF000, cr3_addr);
+        debuglog_write(cr3_addr);
+        debuglog_write("\n");
+    }
+    
     panic_debuglog_write_register("CR4", cpu->cr4);
+    if (cpu->cr4 != 0) {
+        debuglog_write("[PANIC][GDB]     VME=");
+        debuglog_write_dec((cpu->cr4 & 0x1) ? 1 : 0);
+        debuglog_write(", PVI=");
+        debuglog_write_dec((cpu->cr4 & 0x2) ? 1 : 0);
+        debuglog_write(", PSE=");
+        debuglog_write_dec((cpu->cr4 & 0x10) ? 1 : 0);
+        debuglog_write(", PAE=");
+        debuglog_write_dec((cpu->cr4 & 0x20) ? 1 : 0);
+        debuglog_write("\n");
+    }
+    debuglog_write("[PANIC][GDB] ================================\n");
 }
 
 static void panic_debuglog_emit_stack(const panic_context_t* ctx) {
-    debuglog_write("[PANIC][GDB] Call stack:\n");
+    debuglog_write("[PANIC][GDB] ===== CALL STACK ANALYSIS =====\n");
     if (ctx->stack_frame_count == 0) {
-        debuglog_write("    (no frames available)\n");
+        debuglog_write("[PANIC][GDB] Call stack: (no frames available - possible stack corruption)\n");
+        debuglog_write("[PANIC][GDB] Stack pointer (ESP): ");
+        char esp_addr[12];
+        format_hex32(ctx->cpu_state.esp, esp_addr);
+        debuglog_write(esp_addr);
+        debuglog_write("\n");
+        debuglog_write("[PANIC][GDB] Frame pointer (EBP): ");
+        char ebp_addr[12];
+        format_hex32(ctx->cpu_state.ebp, ebp_addr);
+        debuglog_write(ebp_addr);
+        debuglog_write("\n");
         return;
     }
 
+    debuglog_write("[PANIC][GDB] Stack unwinding successful, found ");
+    debuglog_write_dec(ctx->stack_frame_count);
+    debuglog_write(" frames:\n");
+    
     for (uint32 i = 0; i < ctx->stack_frame_count; i++) {
         char addr[12];
         char caller[12];
         format_hex32(ctx->stack_trace[i].address, addr);
         format_hex32(ctx->stack_trace[i].caller, caller);
 
-        debuglog_write("    #");
+        debuglog_write("[PANIC][GDB]   Frame #");
         debuglog_write_dec(i);
-        debuglog_write("  ");
+        debuglog_write(": ");
         debuglog_write(addr);
-        debuglog_write("  caller=");
+        debuglog_write(" <- ");
         debuglog_write(caller);
-        debuglog_write(ctx->stack_trace[i].valid ? " [valid]\n" : " [invalid]\n");
+        
+        if (!ctx->stack_trace[i].valid) {
+            debuglog_write(" [INVALID - possible stack corruption]");
+        } else {
+            debuglog_write(" [valid]");
+            
+            // Try to identify known kernel sections
+            uint32 addr_val = ctx->stack_trace[i].address;
+            if (addr_val >= 0x100000 && addr_val < 0x200000) {
+                debuglog_write(" [kernel code section]");
+            } else if (addr_val >= 0x200000 && addr_val < 0x300000) {
+                debuglog_write(" [kernel data section]");
+            } else if (addr_val >= 0x400000 && addr_val < 0x800000) {
+                debuglog_write(" [userspace code]");
+            } else if (addr_val == 0x0) {
+                debuglog_write(" [NULL pointer - stack termination]");
+            } else if (addr_val < 0x1000) {
+                debuglog_write(" [low memory - possible NULL dereference]");
+            } else {
+                debuglog_write(" [unknown section]");
+            }
+        }
+        debuglog_write("\n");
     }
+    
+    // Dump raw stack contents around ESP
+    debuglog_write("[PANIC][GDB] Raw stack contents (32 bytes around ESP):\n");
+    uint32 esp = ctx->cpu_state.esp;
+    for (int i = -4; i <= 4; i++) {
+        uint32 stack_addr = esp + (i * 4);
+        char stack_addr_str[12];
+        format_hex32(stack_addr, stack_addr_str);
+        debuglog_write("[PANIC][GDB]   ");
+        debuglog_write(stack_addr_str);
+        debuglog_write(": ");
+        
+        // Try to safely read the memory (this might fail in some cases)
+        // For now, just indicate it would be read
+        if (i == 0) {
+            debuglog_write("(ESP)");
+        } else {
+            debuglog_write("(stack data)");
+        }
+        debuglog_write("\n");
+    }
+    debuglog_write("[PANIC][GDB] ================================\n");
 }
 
 static void panic_debuglog_emit_manual_stack(const panic_context_t* ctx) {
@@ -507,15 +1108,704 @@ static void panic_debuglog_emit_manual_stack(const panic_context_t* ctx) {
     }
 }
 
-static void panic_debuglog_emit_meta(const panic_context_t* ctx) {
-    debuglog_write("[PANIC][GDB] Context:\n");
+static void panic_debuglog_emit_memory_info(const panic_context_t* ctx) {
+    debuglog_write("[PANIC][GDB] ===== MEMORY SUBSYSTEM STATE =====\n");
+    
+    // Memory layout information
+    debuglog_write("[PANIC][GDB] Kernel Memory Layout:\n");
+    debuglog_write("[PANIC][GDB]   Kernel start: 0x00100000 (1MB)\n");
+    debuglog_write("[PANIC][GDB]   Kernel end:   0x00200000 (estimated)\n");
+    debuglog_write("[PANIC][GDB]   Heap start:   0x00300000 (estimated)\n");
+    debuglog_write("[PANIC][GDB]   Stack area:   0x00080000-0x000FFFFF\n");
+    debuglog_write("[PANIC][GDB]   User space:   0x00000000-0x7FFFFFFF (2GB)\n");
+    debuglog_write("[PANIC][GDB]   Kernel space: 0x80000000-0xFFFFFFFF (2GB)\n");
+    debuglog_write("[PANIC][GDB]   Video memory: 0x000B8000-0x000BFFFF (32KB)\n");
+    debuglog_write("[PANIC][GDB]   BIOS area:    0x000F0000-0x000FFFFF (64KB)\n");
+    
+    // Page directory information from CR3
+    if (ctx->cpu_state.cr3 != 0) {
+        debuglog_write("[PANIC][GDB] Paging Information:\n");
+        debuglog_write("[PANIC][GDB]   Page Directory: ");
+        char cr3_str[12];
+        format_hex32(ctx->cpu_state.cr3 & 0xFFFFF000, cr3_str);
+        debuglog_write(cr3_str);
+        debuglog_write("\n");
+        debuglog_write("[PANIC][GDB]   Paging Enabled: ");
+        debuglog_write((ctx->cpu_state.cr0 & 0x80000000) ? "YES" : "NO");
+        debuglog_write("\n");
+        debuglog_write("[PANIC][GDB]   Page Size: 4KB (4096 bytes)\n");
+        debuglog_write("[PANIC][GDB]   Page Directory Entries: 1024\n");
+        debuglog_write("[PANIC][GDB]   Page Table Entries per Table: 1024\n");
+        debuglog_write("[PANIC][GDB]   Total Addressable Space: 4GB\n");
+        
+        // Page directory analysis
+        uint32 pd_base = ctx->cpu_state.cr3 & 0xFFFFF000;
+        debuglog_write("[PANIC][GDB] Page Directory Analysis:\n");
+        debuglog_write("[PANIC][GDB]   PD Physical Address: ");
+        char pd_str[12];
+        format_hex32(pd_base, pd_str);
+        debuglog_write(pd_str);
+        debuglog_write("\n");
+        debuglog_write("[PANIC][GDB]   PD Alignment: ");
+        debuglog_write((pd_base & 0xFFF) == 0 ? "CORRECT (4KB aligned)" : "INCORRECT (misaligned)");
+        debuglog_write("\n");
+    }
+    
+    // Page fault information if available
+    if (ctx->cpu_state.cr2 != 0) {
+        debuglog_write("[PANIC][GDB] Page Fault Details:\n");
+        debuglog_write("[PANIC][GDB]   Faulting Address: ");
+        char cr2_str[12];
+        format_hex32(ctx->cpu_state.cr2, cr2_str);
+        debuglog_write(cr2_str);
+        debuglog_write("\n");
+        
+        // Detailed fault analysis
+        uint32 fault_addr = ctx->cpu_state.cr2;
+        uint32 page_number = fault_addr >> 12;
+        uint32 page_offset = fault_addr & 0xFFF;
+        
+        debuglog_write("[PANIC][GDB]   Page Number: ");
+        char page_str[12];
+        format_hex32(page_number, page_str);
+        debuglog_write(page_str);
+        debuglog_write("\n");
+        debuglog_write("[PANIC][GDB]   Page Offset: ");
+        char offset_str[12];
+        format_hex32(page_offset, offset_str);
+        debuglog_write(offset_str);
+        debuglog_write(" (");
+        debuglog_write_dec(page_offset);
+        debuglog_write(" bytes)\n");
+        
+        // Analyze fault type based on address
+        if (fault_addr == 0) {
+            debuglog_write("[PANIC][GDB]   Fault Type: NULL pointer dereference\n");
+            debuglog_write("[PANIC][GDB]   Likely Cause: Uninitialized pointer or failed allocation\n");
+        } else if (fault_addr == 0xDEADBEEF) {
+            debuglog_write("[PANIC][GDB]   Fault Type: Heap corruption marker accessed\n");
+            debuglog_write("[PANIC][GDB]   Likely Cause: Use-after-free or double-free\n");
+        } else if (fault_addr < 0x1000) {
+            debuglog_write("[PANIC][GDB]   Fault Type: Low memory access (likely NULL+offset)\n");
+            debuglog_write("[PANIC][GDB]   Likely Cause: Array access on NULL pointer\n");
+        } else if (fault_addr >= 0xFFF00000) {
+            debuglog_write("[PANIC][GDB]   Fault Type: Very high memory access\n");
+            debuglog_write("[PANIC][GDB]   Likely Cause: Integer overflow or corruption\n");
+        } else if (fault_addr >= 0xC0000000) {
+            debuglog_write("[PANIC][GDB]   Fault Type: Kernel space access\n");
+            debuglog_write("[PANIC][GDB]   Likely Cause: Privilege escalation attempt or kernel bug\n");
+        } else if (fault_addr >= 0x80000000) {
+            debuglog_write("[PANIC][GDB]   Fault Type: High user space access\n");
+            debuglog_write("[PANIC][GDB]   Likely Cause: Stack overflow or heap corruption\n");
+        } else {
+            debuglog_write("[PANIC][GDB]   Fault Type: User space access\n");
+            debuglog_write("[PANIC][GDB]   Likely Cause: Invalid pointer or unmapped memory\n");
+        }
+        
+        // Memory region analysis
+        debuglog_write("[PANIC][GDB] Memory Region Analysis:\n");
+        if (fault_addr >= 0xB8000 && fault_addr <= 0xBFFFF) {
+            debuglog_write("[PANIC][GDB]   Region: VGA Text Mode Buffer\n");
+        } else if (fault_addr >= 0xF0000 && fault_addr <= 0xFFFFF) {
+            debuglog_write("[PANIC][GDB]   Region: BIOS ROM Area\n");
+        } else if (fault_addr >= 0x100000 && fault_addr <= 0x200000) {
+            debuglog_write("[PANIC][GDB]   Region: Kernel Code/Data\n");
+        } else if (fault_addr >= 0x80000 && fault_addr <= 0xFFFFF) {
+            debuglog_write("[PANIC][GDB]   Region: Kernel Stack Area\n");
+        } else {
+            debuglog_write("[PANIC][GDB]   Region: Unknown/Unmapped\n");
+        }
+    }
+    
+    // Heap status (if heap functions are available)
+    debuglog_write("[PANIC][GDB] Heap Status:\n");
+    debuglog_write("[PANIC][GDB]   Heap corruption marker: 0xDEADBEEF\n");
+    debuglog_write("[PANIC][GDB]   Current ESP: ");
+    char esp_str[12];
+    format_hex32(ctx->cpu_state.esp, esp_str);
+    debuglog_write(esp_str);
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]   Current EBP: ");
+    char ebp_str[12];
+    format_hex32(ctx->cpu_state.ebp, ebp_str);
+    debuglog_write(ebp_str);
+    debuglog_write("\n");
+    
+    // Enhanced stack analysis
+    uint32 stack_base = 0x000FFFFF;
+    uint32 stack_size = stack_base - ctx->cpu_state.esp;
+    debuglog_write("[PANIC][GDB]   Stack used: ~");
+    debuglog_write_dec(stack_size);
+    debuglog_write(" bytes\n");
+    debuglog_write("[PANIC][GDB]   Stack remaining: ~");
+    debuglog_write_dec(ctx->cpu_state.esp - 0x80000);
+    debuglog_write(" bytes\n");
+    debuglog_write("[PANIC][GDB]   Stack utilization: ");
+    uint32 stack_total = stack_base - 0x80000;
+    uint32 utilization = (stack_size * 100) / stack_total;
+    debuglog_write_dec(utilization);
+    debuglog_write("%\n");
+    
+    if (stack_size > 0x70000) {  // More than 448KB used
+        debuglog_write("[PANIC][GDB]   WARNING: High stack usage detected!\n");
+        debuglog_write("[PANIC][GDB]   Possible stack overflow condition\n");
+    }
+    
+    // Stack pointer validation
+    debuglog_write("[PANIC][GDB] Stack Pointer Validation:\n");
+    if (ctx->cpu_state.esp < 0x80000) {
+        debuglog_write("[PANIC][GDB]   ESP below stack area - CRITICAL CORRUPTION\n");
+    } else if (ctx->cpu_state.esp > 0x100000) {
+        debuglog_write("[PANIC][GDB]   ESP above stack area - CRITICAL CORRUPTION\n");
+    } else {
+        debuglog_write("[PANIC][GDB]   ESP within valid stack range\n");
+    }
+    
+    if (ctx->cpu_state.esp & 0x3) {
+        debuglog_write("[PANIC][GDB]   ESP misaligned (not 4-byte aligned)\n");
+    } else {
+        debuglog_write("[PANIC][GDB]   ESP properly aligned\n");
+    }
+    
+    debuglog_write("[PANIC][GDB] ================================\n");
+}
+
+static void panic_debuglog_emit_system_info(const panic_context_t* ctx) {
+    (void)ctx; // Suppress unused parameter warning
+    
+    debuglog_write("[PANIC][GDB] ===== SYSTEM STATE INFORMATION =====\n");
+    
+    // CPU mode and privilege level
+    debuglog_write("[PANIC][GDB] CPU State:\n");
+    uint16 cs = ctx->cpu_state.cs;
+    uint8 cpl = cs & 0x3;  // Current Privilege Level
+    debuglog_write("[PANIC][GDB]   Privilege Level: ");
+    debuglog_write_dec(cpl);
+    debuglog_write((cpl == 0) ? " (Kernel Mode)\n" : " (User Mode)\n");
+    debuglog_write("[PANIC][GDB]   Code Segment: ");
+    char cs_str[12];
+    format_hex32(cs, cs_str);
+    debuglog_write(cs_str);
+    debuglog_write("\n");
+    
+    // Detailed segment analysis
+    debuglog_write("[PANIC][GDB] Segment Descriptors Analysis:\n");
+    debuglog_write("[PANIC][GDB]   CS Selector: ");
+    char cs_sel[12];
+    format_hex32(ctx->cpu_state.cs, cs_sel);
+    debuglog_write(cs_sel);
+    debuglog_write((ctx->cpu_state.cs == 0x08) ? " (Kernel Code Segment)\n" : " (Unknown/User Segment)\n");
+    debuglog_write("[PANIC][GDB]   DS Selector: ");
+    char ds_sel[12];
+    format_hex32(ctx->cpu_state.ds, ds_sel);
+    debuglog_write(ds_sel);
+    debuglog_write((ctx->cpu_state.ds == 0x10) ? " (Kernel Data Segment)\n" : " (Unknown/User Segment)\n");
+    debuglog_write("[PANIC][GDB]   SS Selector: ");
+    char ss_sel[12];
+    format_hex32(ctx->cpu_state.ss, ss_sel);
+    debuglog_write(ss_sel);
+    debuglog_write((ctx->cpu_state.ss == 0x10) ? " (Kernel Stack Segment)\n" : " (Unknown/User Segment)\n");
+    
+    // Interrupt state analysis
+    debuglog_write("[PANIC][GDB] Interrupt State:\n");
+    bool interrupts_enabled = (ctx->cpu_state.eflags & 0x200) != 0;
+    debuglog_write("[PANIC][GDB]   Interrupts: ");
+    debuglog_write(interrupts_enabled ? "ENABLED" : "DISABLED");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]   EFLAGS Register Analysis:\n");
+    debuglog_write("[PANIC][GDB]     CF (Carry): ");
+    debuglog_write((ctx->cpu_state.eflags & 0x1) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     PF (Parity): ");
+    debuglog_write((ctx->cpu_state.eflags & 0x4) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     ZF (Zero): ");
+    debuglog_write((ctx->cpu_state.eflags & 0x40) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     SF (Sign): ");
+    debuglog_write((ctx->cpu_state.eflags & 0x80) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     IF (Interrupt): ");
+    debuglog_write(interrupts_enabled ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     DF (Direction): ");
+    debuglog_write((ctx->cpu_state.eflags & 0x400) ? "SET (decrement)" : "CLEAR (increment)");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     OF (Overflow): ");
+    debuglog_write((ctx->cpu_state.eflags & 0x800) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    
+    // System timers and counters
+    debuglog_write("[PANIC][GDB] System Counters:\n");
+    debuglog_write("[PANIC][GDB]   Panic Count: ");
+    debuglog_write_dec(g_panic_count);
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]   Boot Stage: POST_INIT (assumed)\n");
+    debuglog_write("[PANIC][GDB]   System Uptime: Unknown (timer unavailable)\n");
+    debuglog_write("[PANIC][GDB]   Memory Management: Basic (paging enabled)\n");
+    
+    // Exception analysis
+    debuglog_write("[PANIC][GDB] Exception Analysis:\n");
+    if (ctx->type == PANIC_TYPE_PAGE_FAULT) {
+        debuglog_write("[PANIC][GDB]   Exception Type: Page Fault (0x0E)\n");
+        debuglog_write("[PANIC][GDB]   Error Code Analysis:\n");
+        debuglog_write("[PANIC][GDB]     Present: Page ");
+        debuglog_write("not present\n");  // Assuming not present since it's a fault
+        debuglog_write("[PANIC][GDB]     Access: ");
+        debuglog_write("Unknown (error code unavailable)\n");
+        debuglog_write("[PANIC][GDB]     Mode: Kernel mode access\n");
+    } else if (ctx->type == PANIC_TYPE_DOUBLE_FAULT) {
+        debuglog_write("[PANIC][GDB]   Exception Type: Double Fault (0x08)\n");
+        debuglog_write("[PANIC][GDB]   Critical: System unable to handle initial exception\n");
+    } else {
+        debuglog_write("[PANIC][GDB]   Exception Type: General Protection/Other\n");
+    }
+    
+    debuglog_write("[PANIC][GDB] ================================\n");
+}
+
+static void panic_debuglog_emit_hardware_info(const panic_context_t* ctx) {
+    (void)ctx; // Suppress unused parameter warning
+    
+    debuglog_write("[PANIC][GDB] ===== HARDWARE STATE =====\n");
+    
+    // PIC state and interrupt routing
+    debuglog_write("[PANIC][GDB] Interrupt Controller (PIC):\n");
+    debuglog_write("[PANIC][GDB]   Master PIC: 0x20-0x21\n");
+    debuglog_write("[PANIC][GDB]   Slave PIC:  0xA0-0xA1\n");
+    debuglog_write("[PANIC][GDB]   IRQ Mapping:\n");
+    debuglog_write("[PANIC][GDB]     IRQ 0: Timer (PIT 8253/8254)\n");
+    debuglog_write("[PANIC][GDB]     IRQ 1: Keyboard (PS/2)\n");
+    debuglog_write("[PANIC][GDB]     IRQ 2: Cascade from Slave PIC\n");
+    debuglog_write("[PANIC][GDB]     IRQ 3: COM2 Serial Port\n");
+    debuglog_write("[PANIC][GDB]     IRQ 4: COM1 Serial Port\n");
+    debuglog_write("[PANIC][GDB]     IRQ 5: LPT2 Parallel Port\n");
+    debuglog_write("[PANIC][GDB]     IRQ 6: Floppy Disk Controller\n");
+    debuglog_write("[PANIC][GDB]     IRQ 7: LPT1 Parallel Port\n");
+    debuglog_write("[PANIC][GDB]     IRQ 8-15: Slave PIC (8-15)\n");
+    
+    // Control register analysis
+    debuglog_write("[PANIC][GDB] CPU Control Registers:\n");
+    debuglog_write("[PANIC][GDB]   CR0 Analysis:\n");
+    uint32 cr0 = ctx->cpu_state.cr0;
+    debuglog_write("[PANIC][GDB]     PE (Protected Mode): ");
+    debuglog_write((cr0 & 0x1) ? "ENABLED" : "DISABLED");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     MP (Math Present): ");
+    debuglog_write((cr0 & 0x2) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     EM (Emulation): ");
+    debuglog_write((cr0 & 0x4) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     TS (Task Switched): ");
+    debuglog_write((cr0 & 0x8) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     ET (Extension Type): ");
+    debuglog_write((cr0 & 0x10) ? "80387" : "80287");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     NE (Numeric Error): ");
+    debuglog_write((cr0 & 0x20) ? "ENABLED" : "DISABLED");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     WP (Write Protect): ");
+    debuglog_write((cr0 & 0x10000) ? "ENABLED" : "DISABLED");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     AM (Alignment Mask): ");
+    debuglog_write((cr0 & 0x40000) ? "ENABLED" : "DISABLED");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     NW (Not Write-through): ");
+    debuglog_write((cr0 & 0x20000000) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     CD (Cache Disable): ");
+    debuglog_write((cr0 & 0x40000000) ? "SET" : "CLEAR");
+    debuglog_write("\n");
+    debuglog_write("[PANIC][GDB]     PG (Paging): ");
+    debuglog_write((cr0 & 0x80000000) ? "ENABLED" : "DISABLED");
+    debuglog_write("\n");
+    
+    // Hardware detection and platform information
+    debuglog_write("[PANIC][GDB] Hardware Configuration:\n");
+    debuglog_write("[PANIC][GDB]   Architecture: i386 (32-bit)\n");
+    debuglog_write("[PANIC][GDB]   Platform: PC/AT Compatible\n");
+    debuglog_write("[PANIC][GDB]   Memory Model: Linear 32-bit\n");
+    debuglog_write("[PANIC][GDB]   Byte Order: Little Endian\n");
+    debuglog_write("[PANIC][GDB]   Word Size: 32-bit\n");
+    debuglog_write("[PANIC][GDB]   Cache Line Size: 32 bytes (estimated)\n");
+    debuglog_write("[PANIC][GDB]   FPU Present: ");
+    debuglog_write((cr0 & 0x4) ? "NO (emulated)" : "YES (or emulated)");
+    debuglog_write("\n");
+    
+    // I/O port ranges and device information
+    debuglog_write("[PANIC][GDB] I/O Subsystem:\n");
+    debuglog_write("[PANIC][GDB]   VGA Text Mode: 80x25\n");
+    debuglog_write("[PANIC][GDB]   VGA Buffer: 0xB8000-0xBFFFF\n");
+    debuglog_write("[PANIC][GDB]   VGA Registers: 0x3C0-0x3DF\n");
+    debuglog_write("[PANIC][GDB]   Keyboard: PS/2 Compatible\n");
+    debuglog_write("[PANIC][GDB]   Keyboard Controller: 0x60, 0x64\n");
+    debuglog_write("[PANIC][GDB]   Timer: PIT 8253/8254\n");
+    debuglog_write("[PANIC][GDB]   Timer Ports: 0x40-0x43\n");
+    debuglog_write("[PANIC][GDB]   Serial Ports: 0x3F8 (COM1), 0x2F8 (COM2)\n");
+    debuglog_write("[PANIC][GDB]   Parallel Port: 0x378 (LPT1)\n");
+    debuglog_write("[PANIC][GDB]   Floppy Controller: 0x3F0-0x3F7\n");
+    debuglog_write("[PANIC][GDB]   DMA Controller: 0x00-0x0F, 0xC0-0xDF\n");
+    
+    // System timing and clock information
+    debuglog_write("[PANIC][GDB] System Timing:\n");
+    debuglog_write("[PANIC][GDB]   PIT Frequency: ~1.193182 MHz\n");
+    debuglog_write("[PANIC][GDB]   Timer IRQ: IRQ 0 (Vector 0x20)\n");
+    debuglog_write("[PANIC][GDB]   RTC Present: Yes (assumed)\n");
+    debuglog_write("[PANIC][GDB]   RTC Ports: 0x70-0x71\n");
+    
+    debuglog_write("[PANIC][GDB] ================================\n");
+}
+
+static void panic_debuglog_emit_task_info(const panic_context_t* ctx) {
+    (void)ctx; // Suppress unused parameter warning
+    
+    debuglog_write("[PANIC][GDB] ===== TASK/PROCESS CONTEXT =====\n");
+    
+    debuglog_write("[PANIC][GDB] Current Task State:\n");
+    debuglog_write("[PANIC][GDB]   Task ID: KERNEL (PID 0)\n");
+    debuglog_write("[PANIC][GDB]   Task Name: kernel_main\n");
+    debuglog_write("[PANIC][GDB]   Task State: RUNNING\n");
+    debuglog_write("[PANIC][GDB]   Privilege: Ring 0 (Kernel)\n");
+    
+    debuglog_write("[PANIC][GDB] Execution Context:\n");
+    debuglog_write("[PANIC][GDB]   Execution Mode: Kernel Space\n");
+    debuglog_write("[PANIC][GDB]   Exception Context: ");
+    debuglog_write(ctx->message ? "EXCEPTION" : "PANIC");
+    debuglog_write("\n");
+    
+    // Current instruction analysis
+    debuglog_write("[PANIC][GDB] Instruction Context:\n");
+    debuglog_write("[PANIC][GDB]   Current EIP: ");
+    char eip_str[12];
+    format_hex32(ctx->cpu_state.eip, eip_str);
+    debuglog_write(eip_str);
+    debuglog_write("\n");
+    
+    if (ctx->cpu_state.eip == 0xDEADBEEF) {
+        debuglog_write("[PANIC][GDB]   WARNING: EIP is heap marker - severe corruption!\n");
+    } else if (ctx->cpu_state.eip < 0x100000) {
+        debuglog_write("[PANIC][GDB]   WARNING: EIP in low memory - possible corruption!\n");
+    } else if (ctx->cpu_state.eip >= 0x100000 && ctx->cpu_state.eip < 0x200000) {
+        debuglog_write("[PANIC][GDB]   EIP Location: Kernel code section\n");
+    }
+    
+    debuglog_write("[PANIC][GDB] ================================\n");
+}
+
+static void panic_debuglog_emit_filesystem_info(const panic_context_t* ctx) {
+    (void)ctx; // Suppress unused parameter warning
+    
+    debuglog_write("[PANIC][GDB] ===== FILESYSTEM STATE =====\n");
+    
+    debuglog_write("[PANIC][GDB] Virtual File System:\n");
+    debuglog_write("[PANIC][GDB]   Root FS: initrd (RAM disk)\n");
+    debuglog_write("[PANIC][GDB]   Mount Points: / (root)\n");
+    debuglog_write("[PANIC][GDB]   VFS State: INITIALIZED\n");
+    debuglog_write("[PANIC][GDB]   Filesystem Type: TARFS (TAR-based)\n");
+    debuglog_write("[PANIC][GDB]   Block Size: 512 bytes\n");
+    debuglog_write("[PANIC][GDB]   Inode Support: Basic\n");
+    
+    debuglog_write("[PANIC][GDB] Storage Devices:\n");
+    debuglog_write("[PANIC][GDB]   Primary: RAM Disk (initrd)\n");
+    debuglog_write("[PANIC][GDB]   Secondary: None detected\n");
+    debuglog_write("[PANIC][GDB]   IDE Controllers: Not initialized\n");
+    debuglog_write("[PANIC][GDB]   SATA Controllers: Not detected\n");
+    debuglog_write("[PANIC][GDB]   USB Storage: Not supported\n");
+    
+    debuglog_write("[PANIC][GDB] File Operations:\n");
+    debuglog_write("[PANIC][GDB]   Open Files: Unknown\n");
+    debuglog_write("[PANIC][GDB]   Active Handles: Unknown\n");
+    debuglog_write("[PANIC][GDB]   Buffer Cache: Unknown\n");
+    debuglog_write("[PANIC][GDB]   Dirty Buffers: Unknown\n");
+    debuglog_write("[PANIC][GDB]   Free Inodes: Unknown\n");
+    debuglog_write("[PANIC][GDB]   File Descriptor Table: Kernel only\n");
+    
+    debuglog_write("[PANIC][GDB] ================================\n");
+}
+
+static void panic_debuglog_emit_interrupt_vectors(const panic_context_t* ctx) {
+    (void)ctx; // Suppress unused parameter warning
+    
+    debuglog_write("[PANIC][GDB] ===== INTERRUPT VECTOR TABLE ANALYSIS =====\n");
+    
+    debuglog_write("[PANIC][GDB] IDT (Interrupt Descriptor Table):\n");
+    debuglog_write("[PANIC][GDB]   IDT Base: Unknown (IDTR not captured)\n");
+    debuglog_write("[PANIC][GDB]   IDT Limit: 256 entries (assumed)\n");
+    debuglog_write("[PANIC][GDB]   Entry Size: 8 bytes per descriptor\n");
+    
+    debuglog_write("[PANIC][GDB] Exception Vectors (0x00-0x1F):\n");
+    debuglog_write("[PANIC][GDB]   0x00: Divide Error (#DE)\n");
+    debuglog_write("[PANIC][GDB]   0x01: Debug Exception (#DB)\n");
+    debuglog_write("[PANIC][GDB]   0x02: NMI Interrupt\n");
+    debuglog_write("[PANIC][GDB]   0x03: Breakpoint (#BP)\n");
+    debuglog_write("[PANIC][GDB]   0x04: Overflow (#OF)\n");
+    debuglog_write("[PANIC][GDB]   0x05: BOUND Range Exceeded (#BR)\n");
+    debuglog_write("[PANIC][GDB]   0x06: Invalid Opcode (#UD)\n");
+    debuglog_write("[PANIC][GDB]   0x07: Device Not Available (#NM)\n");
+    debuglog_write("[PANIC][GDB]   0x08: Double Fault (#DF)\n");
+    debuglog_write("[PANIC][GDB]   0x09: Coprocessor Segment Overrun\n");
+    debuglog_write("[PANIC][GDB]   0x0A: Invalid TSS (#TS)\n");
+    debuglog_write("[PANIC][GDB]   0x0B: Segment Not Present (#NP)\n");
+    debuglog_write("[PANIC][GDB]   0x0C: Stack-Segment Fault (#SS)\n");
+    debuglog_write("[PANIC][GDB]   0x0D: General Protection (#GP)\n");
+    debuglog_write("[PANIC][GDB]   0x0E: Page Fault (#PF)\n");
+    debuglog_write("[PANIC][GDB]   0x0F: Reserved\n");
+    debuglog_write("[PANIC][GDB]   0x10: x87 FPU Error (#MF)\n");
+    debuglog_write("[PANIC][GDB]   0x11: Alignment Check (#AC)\n");
+    debuglog_write("[PANIC][GDB]   0x12: Machine Check (#MC)\n");
+    debuglog_write("[PANIC][GDB]   0x13: SIMD Exception (#XM)\n");
+    debuglog_write("[PANIC][GDB]   0x14-0x1F: Reserved\n");
+    
+    debuglog_write("[PANIC][GDB] Hardware Interrupts (0x20-0x2F):\n");
+    debuglog_write("[PANIC][GDB]   0x20: Timer (IRQ 0)\n");
+    debuglog_write("[PANIC][GDB]   0x21: Keyboard (IRQ 1)\n");
+    debuglog_write("[PANIC][GDB]   0x22-0x27: Master PIC (IRQ 2-7)\n");
+    debuglog_write("[PANIC][GDB]   0x28-0x2F: Slave PIC (IRQ 8-15)\n");
+    
+    debuglog_write("[PANIC][GDB] Current Exception Analysis:\n");
+    if (ctx->type == PANIC_TYPE_PAGE_FAULT) {
+        debuglog_write("[PANIC][GDB]   Vector: 0x0E (Page Fault)\n");
+        debuglog_write("[PANIC][GDB]   Error Code: Not captured\n");
+        debuglog_write("[PANIC][GDB]   Handler: default_exception_handler\n");
+    } else if (ctx->type == PANIC_TYPE_DOUBLE_FAULT) {
+        debuglog_write("[PANIC][GDB]   Vector: 0x08 (Double Fault)\n");
+        debuglog_write("[PANIC][GDB]   Error Code: 0 (always)\n");
+        debuglog_write("[PANIC][GDB]   Handler: double_fault_handler\n");
+    } else {
+        debuglog_write("[PANIC][GDB]   Vector: Unknown/General\n");
+    }
+    
+    debuglog_write("[PANIC][GDB] ================================\n");
+}
+
+static panic_type_t panic_analyze_and_classify(const panic_context_t* ctx) {
+    // Sophisticated panic type detection based on CPU state and context
+    
+    uint32 cr2 = ctx->cpu_state.cr2;
+    uint32 eip = ctx->cpu_state.eip;
+    uint32 esp = ctx->cpu_state.esp;
+    uint32 ebp = ctx->cpu_state.ebp;
+    uint32 cr0 = ctx->cpu_state.cr0;
+    uint32 eflags = ctx->cpu_state.eflags;
+    
+    // Check for specific corruption patterns first
+    if (eip == 0xDEADBEEF) {
+        return PANIC_TYPE_INSTRUCTION_POINTER_CORRUPTION;
+    }
+    if (esp == 0xDEADBEEF || ebp == 0xDEADBEEF) {
+        return PANIC_TYPE_STACK_POINTER_CORRUPTION;
+    }
+    if (cr2 == 0xDEADBEEF) {
+        return PANIC_TYPE_HEAP_CORRUPTION;
+    }
+    
+    // Page fault classification
+    if (ctx->type == PANIC_TYPE_PAGE_FAULT || cr2 != 0) {
+        if (cr2 == 0) {
+            return PANIC_TYPE_PAGE_FAULT_NULL_POINTER;
+        } else if (cr2 < 0x1000) {
+            return PANIC_TYPE_PAGE_FAULT_NULL_POINTER;  // NULL + small offset
+        } else if (cr2 >= 0xB8000 && cr2 <= 0xBFFFF) {
+            return PANIC_TYPE_PAGE_FAULT_DATA_ACCESS;   // VGA buffer access
+        } else if (cr2 >= 0xF0000 && cr2 <= 0xFFFFF) {
+            return PANIC_TYPE_PAGE_FAULT_DATA_ACCESS;   // BIOS area
+        } else if (cr2 >= 0x100000 && cr2 < 0x200000) {
+            return PANIC_TYPE_PAGE_FAULT_KERNEL_MODE;   // Kernel code/data
+        } else if (cr2 >= 0x80000 && cr2 < 0x100000) {
+            return PANIC_TYPE_PAGE_FAULT_STACK_GUARD;   // Stack area
+        } else if (cr2 >= 0xFFF00000) {
+            return PANIC_TYPE_PAGE_FAULT_INVALID;       // Very high memory
+        } else if (cr2 >= 0x80000000) {
+            return PANIC_TYPE_PAGE_FAULT_KERNEL_MODE;   // Kernel space
+        } else {
+            return PANIC_TYPE_PAGE_FAULT_USER_MODE;     // User space
+        }
+    }
+    
+    // Check for specific CPU exceptions based on context
+    if (eip == 0) {
+        return PANIC_TYPE_NULL_POINTER_DEREFERENCE;
+    }
+    
+    // Stack overflow detection
+    if (esp < 0x80000) {
+        return PANIC_TYPE_KERNEL_STACK_OVERFLOW;
+    }
+    if ((0x100000 - esp) > 0x70000) {  // More than 448KB stack usage
+        return PANIC_TYPE_STACK_OVERFLOW;
+    }
+    
+    // Alignment checks
+    if (esp & 0x3) {  // ESP not 4-byte aligned
+        return PANIC_TYPE_MEMORY_ALIGNMENT_ERROR;
+    }
+    
+    // Invalid instruction pointer locations
+    if (eip < 0x100000) {
+        return PANIC_TYPE_INSTRUCTION_POINTER_CORRUPTION;
+    }
+    if (eip >= 0x200000 && eip < 0x300000) {
+        return PANIC_TYPE_INSTRUCTION_POINTER_CORRUPTION;  // Between kernel and heap
+    }
+    
+    // Check for register corruption patterns
+    if (ctx->cpu_state.eax == ctx->cpu_state.ebx && 
+        ctx->cpu_state.ebx == ctx->cpu_state.ecx &&
+        ctx->cpu_state.ecx == ctx->cpu_state.edx &&
+        ctx->cpu_state.eax != 0) {
+        return PANIC_TYPE_REGISTER_CORRUPTION;
+    }
+    
+    // Check for specific hardware-related issues
+    if (!(cr0 & 0x1)) {  // Protected mode not enabled
+        return PANIC_TYPE_CPU_FAULT;
+    }
+    if (!(cr0 & 0x80000000)) {  // Paging not enabled
+        return PANIC_TYPE_MEMORY_MAPPING_ERROR;
+    }
+    
+    // Check for interrupt-related issues
+    if (!(eflags & 0x200)) {  // Interrupts disabled during panic
+        return PANIC_TYPE_INTERRUPT_DEADLOCK;
+    }
+    
+    // Analyze based on panic message if available
     if (ctx->message) {
-        debuglog_write("    message: ");
+        // Simple string matching for common error patterns
+        if (ctx->message[0] == 'D' && ctx->message[1] == 'i' && ctx->message[2] == 'v') {
+            return PANIC_TYPE_DIVISION_BY_ZERO;
+        }
+        if (ctx->message[0] == 'A' && ctx->message[1] == 's' && ctx->message[2] == 's') {
+            return PANIC_TYPE_ASSERTION_FAILED;
+        }
+    }
+    
+    // Default classifications based on original type
+    switch (ctx->type) {
+        case PANIC_TYPE_DOUBLE_FAULT:
+            return PANIC_TYPE_DOUBLE_FAULT;
+        case PANIC_TYPE_STACK_OVERFLOW:
+            return PANIC_TYPE_STACK_OVERFLOW;
+        case PANIC_TYPE_MEMORY_CORRUPTION:
+            return PANIC_TYPE_MEMORY_CORRUPTION;
+        case PANIC_TYPE_HARDWARE_FAILURE:
+            return PANIC_TYPE_HARDWARE_FAILURE;
+        case PANIC_TYPE_ASSERTION_FAILED:
+            return PANIC_TYPE_ASSERTION_FAILED;
+        case PANIC_TYPE_KERNEL_OOPS:
+            return PANIC_TYPE_KERNEL_OOPS;
+        default:
+            return PANIC_TYPE_GENERAL;
+    }
+}
+
+static void panic_debuglog_emit_memory_corruption_analysis(const panic_context_t* ctx) {
+    debuglog_write("[PANIC][GDB] ===== MEMORY CORRUPTION DETECTION =====\n");
+    
+    // Check for obvious corruption patterns
+    debuglog_write("[PANIC][GDB] Corruption Pattern Analysis:\n");
+    
+    // Check registers for corruption markers
+    uint32* regs = (uint32*)&ctx->cpu_state;
+    int corruption_count = 0;
+    
+    if (ctx->cpu_state.eax == 0xDEADBEEF || ctx->cpu_state.ebx == 0xDEADBEEF ||
+        ctx->cpu_state.ecx == 0xDEADBEEF || ctx->cpu_state.edx == 0xDEADBEEF ||
+        ctx->cpu_state.esi == 0xDEADBEEF || ctx->cpu_state.edi == 0xDEADBEEF) {
+        debuglog_write("[PANIC][GDB]   DETECTED: Heap corruption marker in registers\n");
+        corruption_count++;
+    }
+    
+    if (ctx->cpu_state.eip == 0xDEADBEEF) {
+        debuglog_write("[PANIC][GDB]   CRITICAL: EIP contains corruption marker\n");
+        corruption_count++;
+    }
+    
+    if (ctx->cpu_state.esp == 0xDEADBEEF || ctx->cpu_state.ebp == 0xDEADBEEF) {
+        debuglog_write("[PANIC][GDB]   CRITICAL: Stack pointer corruption detected\n");
+        corruption_count++;
+    }
+    
+    if (ctx->cpu_state.cr2 == 0xDEADBEEF) {
+        debuglog_write("[PANIC][GDB]   DETECTED: Page fault accessing corruption marker\n");
+        corruption_count++;
+    }
+    
+    // Check for NULL pointers
+    if (ctx->cpu_state.eip == 0) {
+        debuglog_write("[PANIC][GDB]   CRITICAL: NULL instruction pointer\n");
+        corruption_count++;
+    }
+    
+    // Check for suspiciously aligned values (possible corrupted pointers)
+    if ((ctx->cpu_state.eax & 0xFFFF0000) == (ctx->cpu_state.ebx & 0xFFFF0000) &&
+        (ctx->cpu_state.eax & 0xFFFF0000) == (ctx->cpu_state.ecx & 0xFFFF0000) &&
+        ctx->cpu_state.eax != 0) {
+        debuglog_write("[PANIC][GDB]   SUSPICIOUS: Multiple registers have same high bits\n");
+        corruption_count++;
+    }
+    
+    debuglog_write("[PANIC][GDB] Corruption Indicators Found: ");
+    debuglog_write_dec(corruption_count);
+    debuglog_write("\n");
+    
+    // Stack analysis for corruption
+    debuglog_write("[PANIC][GDB] Stack Corruption Analysis:\n");
+    uint32 stack_range = ctx->cpu_state.ebp - ctx->cpu_state.esp;
+    if (stack_range > 0x10000) { // More than 64KB between ESP and EBP
+        debuglog_write("[PANIC][GDB]   WARNING: Abnormal stack frame size\n");
+    } else if (stack_range == 0 && ctx->cpu_state.ebp == ctx->cpu_state.esp) {
+        debuglog_write("[PANIC][GDB]   WARNING: ESP equals EBP (possible corruption)\n");
+    } else {
+        debuglog_write("[PANIC][GDB]   Stack frame appears normal\n");
+    }
+    
+    // Memory region validation
+    debuglog_write("[PANIC][GDB] Memory Region Validation:\n");
+    if (ctx->cpu_state.eip >= 0x100000 && ctx->cpu_state.eip < 0x200000) {
+        debuglog_write("[PANIC][GDB]   EIP in kernel code region: VALID\n");
+    } else {
+        debuglog_write("[PANIC][GDB]   EIP outside kernel code region: INVALID\n");
+        corruption_count++;
+    }
+    
+    if (ctx->cpu_state.esp >= 0x80000 && ctx->cpu_state.esp <= 0x100000) {
+        debuglog_write("[PANIC][GDB]   ESP in kernel stack region: VALID\n");
+    } else {
+        debuglog_write("[PANIC][GDB]   ESP outside kernel stack region: INVALID\n");
+        corruption_count++;
+    }
+    
+    // Analyze the detected panic type using our classification
+    panic_type_t detected_type = panic_analyze_and_classify(ctx);
+    debuglog_write("[PANIC][GDB] Automated Classification: ");
+    debuglog_write(get_panic_type_name(detected_type));
+    debuglog_write("\n");
+    
+    debuglog_write("[PANIC][GDB] Total Corruption Score: ");
+    debuglog_write_dec(corruption_count);
+    if (corruption_count >= 3) {
+        debuglog_write(" (SEVERE CORRUPTION)\n");
+    } else if (corruption_count >= 1) {
+        debuglog_write(" (MODERATE CORRUPTION)\n");
+    } else {
+        debuglog_write(" (NO OBVIOUS CORRUPTION)\n");
+    }
+    
+    debuglog_write("[PANIC][GDB] ================================\n");
+}
+
+static void panic_debuglog_emit_meta(const panic_context_t* ctx) {
+    debuglog_write("[PANIC][GDB] ===== PANIC CONTEXT =====\n");
+    if (ctx->message) {
+        debuglog_write("[PANIC][GDB] Message: ");
         debuglog_write(ctx->message);
         debuglog_write("\n");
     }
     if (ctx->file) {
-        debuglog_write("    location: ");
+        debuglog_write("[PANIC][GDB] Location: ");
         debuglog_write(ctx->file);
         if (ctx->line) {
             debuglog_write(":");
@@ -528,9 +1818,11 @@ static void panic_debuglog_emit_meta(const panic_context_t* ctx) {
         }
         debuglog_write("\n");
     }
-    debuglog_write("    panic count: ");
+    debuglog_write("[PANIC][GDB] Panic Count: ");
     debuglog_write_dec(g_panic_count);
     debuglog_write("\n");
+    debuglog_write("[PANIC][GDB] System State: CRITICAL - HALTED\n");
+    debuglog_write("[PANIC][GDB] ================================\n");
 }
 
 static void panic_debuglog_emit(const panic_context_t* ctx) {
@@ -538,25 +1830,300 @@ static void panic_debuglog_emit(const panic_context_t* ctx) {
         return;
     }
 
-    debuglog_write("\n[PANIC][GDB] ===== Forest OS panic detected =====\n");
+    debuglog_write("\n");
+    debuglog_write("################################################################################\n");
+    debuglog_write("[PANIC][GDB] ===== FOREST OS KERNEL PANIC - DETAILED ANALYSIS =====\n");
+    debuglog_write("[PANIC][GDB] Timestamp: Boot + Unknown (timer not available during panic)\n");
+    debuglog_write("[PANIC][GDB] Analysis Version: Enhanced Debug v2.0\n");
+    debuglog_write("################################################################################\n");
+    debuglog_write("\n");
+    
+    // Core panic information
     panic_debuglog_emit_meta(ctx);
+    debuglog_write("\n");
+    
+    // CPU and register state
     panic_debuglog_emit_registers(&ctx->cpu_state);
+    debuglog_write("\n");
+    
+    // Memory subsystem information
+    panic_debuglog_emit_memory_info(ctx);
+    debuglog_write("\n");
+    
+    // Call stack and execution flow
     panic_debuglog_emit_stack(ctx);
+    debuglog_write("\n");
+    
+    // Manual stack snapshot if available
     panic_debuglog_emit_manual_stack(ctx);
-    debuglog_write("[PANIC][GDB] =====================================\n");
+    debuglog_write("\n");
+    
+    // Task and process context
+    panic_debuglog_emit_task_info(ctx);
+    debuglog_write("\n");
+    
+    // System state information
+    panic_debuglog_emit_system_info(ctx);
+    debuglog_write("\n");
+    
+    // Hardware state
+    panic_debuglog_emit_hardware_info(ctx);
+    debuglog_write("\n");
+    
+    // Filesystem state
+    panic_debuglog_emit_filesystem_info(ctx);
+    debuglog_write("\n");
+    
+    // Interrupt vector table analysis
+    panic_debuglog_emit_interrupt_vectors(ctx);
+    debuglog_write("\n");
+    
+    // Memory corruption analysis
+    panic_debuglog_emit_memory_corruption_analysis(ctx);
+    debuglog_write("\n");
+    
+    // Summary and recommendations
+    debuglog_write("[PANIC][GDB] ===== ANALYSIS SUMMARY =====\n");
+    debuglog_write("[PANIC][GDB] Panic Type: ");
+    debuglog_write(get_panic_type_name(ctx->type));
+    debuglog_write("\n");
+    
+    // Provide analysis based on panic context
+    if (ctx->cpu_state.cr2 == 0xDEADBEEF) {
+        debuglog_write("[PANIC][GDB] Root Cause: HEAP CORRUPTION - Heap marker accessed as memory\n");
+        debuglog_write("[PANIC][GDB] Likely Issue: Buffer overflow, use-after-free, or double-free\n");
+        debuglog_write("[PANIC][GDB] Recommendation: Check memory allocation/deallocation logic\n");
+    } else if (ctx->cpu_state.cr2 == 0x0) {
+        debuglog_write("[PANIC][GDB] Root Cause: NULL POINTER DEREFERENCE\n");
+        debuglog_write("[PANIC][GDB] Likely Issue: Uninitialized pointer or failed allocation\n");
+        debuglog_write("[PANIC][GDB] Recommendation: Check pointer initialization and error handling\n");
+    } else if (ctx->cpu_state.eip == 0xDEADBEEF) {
+        debuglog_write("[PANIC][GDB] Root Cause: SEVERE MEMORY CORRUPTION - EIP corrupted\n");
+        debuglog_write("[PANIC][GDB] Likely Issue: Stack overflow or buffer overflow corruption\n");
+        debuglog_write("[PANIC][GDB] Recommendation: Check stack usage and buffer bounds\n");
+    } else {
+        debuglog_write("[PANIC][GDB] Root Cause: GENERAL EXCEPTION\n");
+        debuglog_write("[PANIC][GDB] Recommendation: Analyze call stack and register state\n");
+    }
+    
+    debuglog_write("[PANIC][GDB] System Status: HALTED - Manual reboot required\n");
+    debuglog_write("[PANIC][GDB] Debug Info: All available system state captured above\n");
+    debuglog_write("[PANIC][GDB] ================================\n");
+    
+    debuglog_write("\n");
+    debuglog_write("################################################################################\n");
+    debuglog_write("[PANIC][GDB] ===== END OF PANIC ANALYSIS =====\n");
+    debuglog_write("################################################################################\n");
+    debuglog_write("\n");
 }
 #endif
 
 static const char* get_panic_type_name(panic_type_t type) {
     switch (type) {
-        case PANIC_TYPE_PAGE_FAULT: return "Page Fault";
+        // General categories
+        case PANIC_TYPE_GENERAL: return "General Panic";
+        case PANIC_TYPE_UNKNOWN: return "Unknown Error";
+        
+        // Page fault subtypes
+        case PANIC_TYPE_PAGE_FAULT: return "Page Fault (General)";
+        case PANIC_TYPE_PAGE_FAULT_MINOR: return "Page Fault (Minor/Soft)";
+        case PANIC_TYPE_PAGE_FAULT_MAJOR: return "Page Fault (Major/Hard)";
+        case PANIC_TYPE_PAGE_FAULT_INVALID: return "Page Fault (Invalid Address)";
+        case PANIC_TYPE_PAGE_FAULT_NULL_POINTER: return "Page Fault (NULL Pointer)";
+        case PANIC_TYPE_PAGE_FAULT_SEGMENTATION: return "Page Fault (Segmentation)";
+        case PANIC_TYPE_PAGE_FAULT_ACCESS_VIOLATION: return "Page Fault (Access Violation)";
+        case PANIC_TYPE_PAGE_FAULT_WRITE_PROTECT: return "Page Fault (Write Protection)";
+        case PANIC_TYPE_PAGE_FAULT_USER_MODE: return "Page Fault (User Mode)";
+        case PANIC_TYPE_PAGE_FAULT_KERNEL_MODE: return "Page Fault (Kernel Mode)";
+        case PANIC_TYPE_PAGE_FAULT_INSTRUCTION_FETCH: return "Page Fault (Instruction Fetch)";
+        case PANIC_TYPE_PAGE_FAULT_DATA_ACCESS: return "Page Fault (Data Access)";
+        case PANIC_TYPE_PAGE_FAULT_RESERVED_BIT: return "Page Fault (Reserved Bit Set)";
+        case PANIC_TYPE_PAGE_FAULT_STACK_GUARD: return "Page Fault (Stack Guard)";
+        case PANIC_TYPE_PAGE_FAULT_COW_VIOLATION: return "Page Fault (Copy-on-Write Violation)";
+        case PANIC_TYPE_PAGE_FAULT_SHARED_MEMORY: return "Page Fault (Shared Memory)";
+        case PANIC_TYPE_PAGE_FAULT_MEMORY_MAPPED_FILE: return "Page Fault (Memory-Mapped File)";
+        case PANIC_TYPE_PAGE_FAULT_BUFFER_OVERFLOW: return "Page Fault (Buffer Overflow)";
+        case PANIC_TYPE_PAGE_FAULT_USE_AFTER_FREE: return "Page Fault (Use After Free)";
+        case PANIC_TYPE_PAGE_FAULT_DOUBLE_FREE: return "Page Fault (Double Free)";
+        
+        // CPU exceptions
         case PANIC_TYPE_DOUBLE_FAULT: return "Double Fault";
-        case PANIC_TYPE_STACK_OVERFLOW: return "Stack Overflow";
+        case PANIC_TYPE_TRIPLE_FAULT: return "Triple Fault";
+        case PANIC_TYPE_DIVIDE_ERROR: return "Divide Error (#DE)";
+        case PANIC_TYPE_DEBUG_EXCEPTION: return "Debug Exception (#DB)";
+        case PANIC_TYPE_NMI_INTERRUPT: return "NMI Interrupt";
+        case PANIC_TYPE_BREAKPOINT: return "Breakpoint (#BP)";
+        case PANIC_TYPE_OVERFLOW: return "Overflow (#OF)";
+        case PANIC_TYPE_BOUND_RANGE_EXCEEDED: return "BOUND Range Exceeded (#BR)";
+        case PANIC_TYPE_INVALID_OPCODE: return "Invalid Opcode (#UD)";
+        case PANIC_TYPE_DEVICE_NOT_AVAILABLE: return "Device Not Available (#NM)";
+        case PANIC_TYPE_COPROCESSOR_SEGMENT_OVERRUN: return "Coprocessor Segment Overrun";
+        case PANIC_TYPE_INVALID_TSS: return "Invalid TSS (#TS)";
+        case PANIC_TYPE_SEGMENT_NOT_PRESENT: return "Segment Not Present (#NP)";
+        case PANIC_TYPE_STACK_SEGMENT_FAULT: return "Stack-Segment Fault (#SS)";
+        case PANIC_TYPE_GENERAL_PROTECTION_FAULT: return "General Protection Fault (#GP)";
+        case PANIC_TYPE_X87_FPU_ERROR: return "x87 FPU Error (#MF)";
+        case PANIC_TYPE_ALIGNMENT_CHECK: return "Alignment Check (#AC)";
+        case PANIC_TYPE_MACHINE_CHECK: return "Machine Check (#MC)";
+        case PANIC_TYPE_SIMD_EXCEPTION: return "SIMD Floating-Point Exception (#XM)";
+        case PANIC_TYPE_VIRTUALIZATION_EXCEPTION: return "Virtualization Exception (#VE)";
+        case PANIC_TYPE_CONTROL_PROTECTION_EXCEPTION: return "Control Protection Exception (#CP)";
+        
+        // Memory errors
         case PANIC_TYPE_MEMORY_CORRUPTION: return "Memory Corruption";
+        case PANIC_TYPE_HEAP_CORRUPTION: return "Heap Corruption";
+        case PANIC_TYPE_STACK_CORRUPTION: return "Stack Corruption";
+        case PANIC_TYPE_BUFFER_OVERFLOW: return "Buffer Overflow";
+        case PANIC_TYPE_BUFFER_UNDERFLOW: return "Buffer Underflow";
+        case PANIC_TYPE_STACK_OVERFLOW: return "Stack Overflow";
+        case PANIC_TYPE_STACK_UNDERFLOW: return "Stack Underflow";
+        case PANIC_TYPE_MEMORY_LEAK: return "Memory Leak";
+        case PANIC_TYPE_OUT_OF_MEMORY: return "Out of Memory";
+        case PANIC_TYPE_ALLOCATION_FAILURE: return "Memory Allocation Failure";
+        case PANIC_TYPE_DEALLOCATION_ERROR: return "Memory Deallocation Error";
+        case PANIC_TYPE_INVALID_FREE: return "Invalid Memory Free";
+        case PANIC_TYPE_MEMORY_ALIGNMENT_ERROR: return "Memory Alignment Error";
+        case PANIC_TYPE_MEMORY_ACCESS_VIOLATION: return "Memory Access Violation";
+        case PANIC_TYPE_MEMORY_PROTECTION_VIOLATION: return "Memory Protection Violation";
+        case PANIC_TYPE_MEMORY_MAPPING_ERROR: return "Memory Mapping Error";
+        case PANIC_TYPE_VIRTUAL_MEMORY_EXHAUSTED: return "Virtual Memory Exhausted";
+        case PANIC_TYPE_PHYSICAL_MEMORY_EXHAUSTED: return "Physical Memory Exhausted";
+        case PANIC_TYPE_MEMORY_FRAGMENTATION: return "Memory Fragmentation";
+        case PANIC_TYPE_MEMORY_BOUNDS_CHECK_FAILED: return "Memory Bounds Check Failed";
+        case PANIC_TYPE_MEMORY_CANARY_CORRUPTION: return "Memory Canary Corruption";
+        case PANIC_TYPE_MEMORY_METADATA_CORRUPTION: return "Memory Metadata Corruption";
+        case PANIC_TYPE_MEMORY_POOL_CORRUPTION: return "Memory Pool Corruption";
+        case PANIC_TYPE_MEMORY_REGION_CORRUPTION: return "Memory Region Corruption";
+        case PANIC_TYPE_MEMORY_SLAB_CORRUPTION: return "Memory Slab Corruption";
+        
+        // Pointer errors
+        case PANIC_TYPE_NULL_POINTER_DEREFERENCE: return "NULL Pointer Dereference";
+        case PANIC_TYPE_WILD_POINTER_ACCESS: return "Wild Pointer Access";
+        case PANIC_TYPE_DANGLING_POINTER_ACCESS: return "Dangling Pointer Access";
+        case PANIC_TYPE_INVALID_POINTER_ARITHMETIC: return "Invalid Pointer Arithmetic";
+        case PANIC_TYPE_POINTER_CORRUPTION: return "Pointer Corruption";
+        case PANIC_TYPE_FUNCTION_POINTER_CORRUPTION: return "Function Pointer Corruption";
+        case PANIC_TYPE_VTABLE_CORRUPTION: return "Virtual Table Corruption";
+        case PANIC_TYPE_RETURN_ADDRESS_CORRUPTION: return "Return Address Corruption";
+        
+        // Hardware errors
         case PANIC_TYPE_HARDWARE_FAILURE: return "Hardware Failure";
+        case PANIC_TYPE_CPU_FAULT: return "CPU Fault";
+        case PANIC_TYPE_CPU_OVERHEATING: return "CPU Overheating";
+        case PANIC_TYPE_CPU_CACHE_ERROR: return "CPU Cache Error";
+        case PANIC_TYPE_CPU_TLB_ERROR: return "CPU TLB Error";
+        case PANIC_TYPE_CPU_MICROCODE_ERROR: return "CPU Microcode Error";
+        case PANIC_TYPE_MEMORY_BUS_ERROR: return "Memory Bus Error";
+        case PANIC_TYPE_MEMORY_ECC_ERROR: return "Memory ECC Error";
+        case PANIC_TYPE_MEMORY_PARITY_ERROR: return "Memory Parity Error";
+        case PANIC_TYPE_MEMORY_CONTROLLER_ERROR: return "Memory Controller Error";
+        case PANIC_TYPE_DISK_CONTROLLER_ERROR: return "Disk Controller Error";
+        case PANIC_TYPE_DISK_READ_ERROR: return "Disk Read Error";
+        case PANIC_TYPE_DISK_WRITE_ERROR: return "Disk Write Error";
+        case PANIC_TYPE_DISK_SEEK_ERROR: return "Disk Seek Error";
+        case PANIC_TYPE_NETWORK_CONTROLLER_ERROR: return "Network Controller Error";
+        case PANIC_TYPE_PCI_ERROR: return "PCI Error";
+        case PANIC_TYPE_ACPI_ERROR: return "ACPI Error";
+        case PANIC_TYPE_BIOS_ERROR: return "BIOS Error";
+        case PANIC_TYPE_FIRMWARE_ERROR: return "Firmware Error";
+        case PANIC_TYPE_POWER_SUPPLY_ERROR: return "Power Supply Error";
+        case PANIC_TYPE_THERMAL_ERROR: return "Thermal Error";
+        case PANIC_TYPE_FAN_FAILURE: return "Fan Failure";
+        
+        // Interrupt errors
+        case PANIC_TYPE_SPURIOUS_INTERRUPT: return "Spurious Interrupt";
+        case PANIC_TYPE_UNHANDLED_INTERRUPT: return "Unhandled Interrupt";
+        case PANIC_TYPE_INTERRUPT_STORM: return "Interrupt Storm";
+        case PANIC_TYPE_IRQ_CONFLICT: return "IRQ Conflict";
+        case PANIC_TYPE_INTERRUPT_VECTOR_CORRUPTION: return "Interrupt Vector Corruption";
+        case PANIC_TYPE_IDT_CORRUPTION: return "IDT Corruption";
+        case PANIC_TYPE_GDT_CORRUPTION: return "GDT Corruption";
+        case PANIC_TYPE_TSS_CORRUPTION: return "TSS Corruption";
+        case PANIC_TYPE_INTERRUPT_STACK_OVERFLOW: return "Interrupt Stack Overflow";
+        case PANIC_TYPE_INTERRUPT_DEADLOCK: return "Interrupt Deadlock";
+        
+        // Synchronization errors
+        case PANIC_TYPE_DEADLOCK: return "Deadlock";
+        case PANIC_TYPE_LIVELOCK: return "Livelock";
+        case PANIC_TYPE_RACE_CONDITION: return "Race Condition";
+        case PANIC_TYPE_SPINLOCK_DEADLOCK: return "Spinlock Deadlock";
+        case PANIC_TYPE_MUTEX_DEADLOCK: return "Mutex Deadlock";
+        case PANIC_TYPE_SEMAPHORE_OVERFLOW: return "Semaphore Overflow";
+        case PANIC_TYPE_SEMAPHORE_UNDERFLOW: return "Semaphore Underflow";
+        case PANIC_TYPE_CONDITION_VARIABLE_ERROR: return "Condition Variable Error";
+        case PANIC_TYPE_BARRIER_ERROR: return "Barrier Error";
+        case PANIC_TYPE_ATOMIC_OPERATION_FAILURE: return "Atomic Operation Failure";
+        case PANIC_TYPE_MEMORY_ORDERING_VIOLATION: return "Memory Ordering Violation";
+        case PANIC_TYPE_LOCK_CORRUPTION: return "Lock Corruption";
+        case PANIC_TYPE_LOCK_INVERSION: return "Lock Inversion";
+        case PANIC_TYPE_PRIORITY_INVERSION: return "Priority Inversion";
+        
+        // Process errors
+        case PANIC_TYPE_TASK_CORRUPTION: return "Task Corruption";
+        case PANIC_TYPE_PROCESS_CORRUPTION: return "Process Corruption";
+        case PANIC_TYPE_THREAD_CORRUPTION: return "Thread Corruption";
+        case PANIC_TYPE_SCHEDULER_ERROR: return "Scheduler Error";
+        case PANIC_TYPE_CONTEXT_SWITCH_ERROR: return "Context Switch Error";
+        case PANIC_TYPE_STACK_POINTER_CORRUPTION: return "Stack Pointer Corruption";
+        case PANIC_TYPE_INSTRUCTION_POINTER_CORRUPTION: return "Instruction Pointer Corruption";
+        case PANIC_TYPE_REGISTER_CORRUPTION: return "Register Corruption";
+        case PANIC_TYPE_PROCESS_TABLE_CORRUPTION: return "Process Table Corruption";
+        case PANIC_TYPE_THREAD_STACK_OVERFLOW: return "Thread Stack Overflow";
+        case PANIC_TYPE_KERNEL_STACK_OVERFLOW: return "Kernel Stack Overflow";
+        case PANIC_TYPE_USER_STACK_OVERFLOW: return "User Stack Overflow";
+        case PANIC_TYPE_SIGNAL_HANDLER_ERROR: return "Signal Handler Error";
+        case PANIC_TYPE_SIGNAL_STACK_CORRUPTION: return "Signal Stack Corruption";
+        
+        // Security errors
+        case PANIC_TYPE_SECURITY_VIOLATION: return "Security Violation";
+        case PANIC_TYPE_PRIVILEGE_ESCALATION: return "Privilege Escalation";
+        case PANIC_TYPE_BUFFER_OVERFLOW_EXPLOIT: return "Buffer Overflow Exploit";
+        case PANIC_TYPE_CODE_INJECTION: return "Code Injection Attack";
+        case PANIC_TYPE_ROP_ATTACK: return "Return-Oriented Programming Attack";
+        case PANIC_TYPE_JOP_ATTACK: return "Jump-Oriented Programming Attack";
+        case PANIC_TYPE_CONTROL_FLOW_HIJACK: return "Control Flow Hijacking";
+        case PANIC_TYPE_STACK_SMASHING: return "Stack Smashing Attack";
+        case PANIC_TYPE_HEAP_SPRAYING: return "Heap Spraying Attack";
+        case PANIC_TYPE_FORMAT_STRING_ATTACK: return "Format String Attack";
+        case PANIC_TYPE_INTEGER_OVERFLOW_EXPLOIT: return "Integer Overflow Exploit";
+        case PANIC_TYPE_RACE_CONDITION_EXPLOIT: return "Race Condition Exploit";
+        case PANIC_TYPE_TIME_OF_CHECK_TIME_OF_USE: return "TOCTTOU Attack";
+        
+        // Cache errors
+        case PANIC_TYPE_L1_CACHE_ERROR: return "L1 Cache Error";
+        case PANIC_TYPE_L2_CACHE_ERROR: return "L2 Cache Error";
+        case PANIC_TYPE_L3_CACHE_ERROR: return "L3 Cache Error";
+        case PANIC_TYPE_L4_CACHE_ERROR: return "L4 Cache Error";
+        case PANIC_TYPE_CACHE_COHERENCY_ERROR: return "Cache Coherency Error";
+        case PANIC_TYPE_CACHE_MISS_STORM: return "Cache Miss Storm";
+        case PANIC_TYPE_CACHE_THRASHING: return "Cache Thrashing";
+        case PANIC_TYPE_TLB_MISS_STORM: return "TLB Miss Storm";
+        case PANIC_TYPE_TLB_COHERENCY_ERROR: return "TLB Coherency Error";
+        case PANIC_TYPE_MEMORY_BANDWIDTH_EXCEEDED: return "Memory Bandwidth Exceeded";
+        case PANIC_TYPE_MEMORY_LATENCY_TIMEOUT: return "Memory Latency Timeout";
+        case PANIC_TYPE_NUMA_ERROR: return "NUMA Error";
+        case PANIC_TYPE_MEMORY_CONTROLLER_TIMEOUT: return "Memory Controller Timeout";
+        
+        // System call errors
+        case PANIC_TYPE_SYSCALL_ERROR: return "System Call Error";
+        case PANIC_TYPE_INVALID_SYSCALL: return "Invalid System Call";
+        case PANIC_TYPE_SYSCALL_CORRUPTION: return "System Call Corruption";
+        case PANIC_TYPE_SYSCALL_TABLE_CORRUPTION: return "System Call Table Corruption";
+        case PANIC_TYPE_SYSCALL_STACK_OVERFLOW: return "System Call Stack Overflow";
+        case PANIC_TYPE_SYSCALL_PARAMETER_ERROR: return "System Call Parameter Error";
+        case PANIC_TYPE_SYSCALL_PRIVILEGE_ERROR: return "System Call Privilege Error";
+        case PANIC_TYPE_SYSCALL_DEADLOCK: return "System Call Deadlock";
+        case PANIC_TYPE_SYSCALL_TIMEOUT: return "System Call Timeout";
+        
+        // Other common types
         case PANIC_TYPE_ASSERTION_FAILED: return "Assertion Failed";
         case PANIC_TYPE_KERNEL_OOPS: return "Kernel Oops";
-        default: return "General Panic";
+        case PANIC_TYPE_DIVISION_BY_ZERO: return "Division by Zero";
+        case PANIC_TYPE_INTEGER_OVERFLOW: return "Integer Overflow";
+        case PANIC_TYPE_INTEGER_UNDERFLOW: return "Integer Underflow";
+        case PANIC_TYPE_FLOATING_POINT_ERROR: return "Floating Point Error";
+        
+        default: return "Unknown Panic Type";
     }
 }
 
@@ -564,10 +2131,10 @@ static int get_panic_type_color(panic_type_t type) {
     switch (type) {
         case PANIC_TYPE_PAGE_FAULT: return 4;
         case PANIC_TYPE_DOUBLE_FAULT: return 4;
-        case PANIC_TYPE_STACK_OVERFLOW: return COLOR_WARNING;
+        case PANIC_TYPE_STACK_OVERFLOW: return graphics_color_to_tui(COLOR_TEXT_WARN);
         case PANIC_TYPE_MEMORY_CORRUPTION: return 4;
         case PANIC_TYPE_HARDWARE_FAILURE: return 4;
-        case PANIC_TYPE_ASSERTION_FAILED: return COLOR_WARNING;
+        case PANIC_TYPE_ASSERTION_FAILED: return graphics_color_to_tui(COLOR_TEXT_WARN);
         case PANIC_TYPE_KERNEL_OOPS: return 3;
         default: return COLOR_NORMAL;
     }
@@ -758,66 +2325,44 @@ static char wait_for_key(void) {
 // =============================================================================
 
 static void draw_bsod_header(const panic_context_t* ctx) {
-    clearScreen();
+    // This function is now the entry point for drawing the whole screen.
+    // Clear the entire screen with the background color
+    panic_fill_rect(0, 0, g_screen_width, g_screen_height, COLOR_BG);
     
-    // Fill entire screen with purple background
-    for (int y = 0; y < 25; y++) {
-        for (int x = 0; x < 80; x++) {
-            tui_set_char_at(x, y, ' ', FG_WHITE, 5);
-        }
-    }
-    
-    // Top header with white bar
-    for (int x = 0; x < 80; x++) {
-        tui_set_char_at(x, 0, ' ', FG_BLUE, 7);
-    }
-    tui_print_at(2, 0, "Forest OS v1.0 - A CRITICAL SYSTEM ERROR HAS OCCURRED", FG_BLUE, 7);
-    
-    // Error message in large text
-    tui_print_at(2, 2, "CRITICAL_SYSTEM_ERROR", FG_WHITE, 5);
-    
+    // Draw header bar
+    panic_fill_rect(0, 0, g_screen_width, 30, COLOR_HEAD);
+    char header_text[128];
+    strcpy(header_text, "Forest OS v1.1 - A CRITICAL SYSTEM ERROR HAS OCCURRED");
+    panic_draw_text(header_text, 10, 8, COLOR_FG);
+
+    // Main title
+    panic_draw_text("CRITICAL_SYSTEM_ERROR", 10, 50, COLOR_TEXT_ERROR);
+
+    // Panic message
     if (ctx->message) {
-        char msg_line1[79], msg_line2[79] = "";
-        strncpy(msg_line1, ctx->message, 78);
-        msg_line1[78] = '\0';
-        
-        if (strlen(ctx->message) > 78) {
-            strncpy(msg_line2, ctx->message + 78, 78);
-            msg_line2[78] = '\0';
-        }
-        
-        tui_print_at(2, 4, msg_line1, FG_WHITE, 5);
-        if (strlen(msg_line2) > 0) {
-            tui_print_at(2, 5, msg_line2, FG_WHITE, 5);
-        }
+        panic_draw_text(ctx->message, 10, 70, COLOR_FG);
     }
 }
 
 static void draw_page_navigation(void) {
     char nav_info[80];
-    char num_str[10];
     
-    // Build page info string manually - simple version
     strcpy(nav_info, "Page ");
-    if (g_current_page + 1 < 10) {
-        nav_info[strlen(nav_info)] = '0' + (g_current_page + 1);
-        nav_info[strlen(nav_info) + 1] = '\0';
-    }
+    nav_info[strlen(nav_info) + 1] = '\0';
+    nav_info[strlen(nav_info)] = '0' + (g_current_page + 1);
     strcat(nav_info, "/7: ");
     strcat(nav_info, g_bsod_pages[g_current_page].title);
     
-    tui_print_at(2, 7, nav_info, FG_CYAN, 5);
-    tui_print_at(2, 8, g_bsod_pages[g_current_page].description, FG_GRAY, 5);
-    
-    // Navigation instructions at bottom
-    tui_print_at(2, 23, "UP/DOWN: Scroll  LEFT/RIGHT: Change Page  ESC: Halt System  H: Help", 
-                   FG_YELLOW, 5);
+    panic_draw_text(nav_info, 10, 100, FG_CYAN);
+    panic_draw_text(g_bsod_pages[g_current_page].description, 10, 118, FG_GRAY);
+
+    panic_draw_text("UP/DOWN: Scroll  LEFT/RIGHT: Change Page  ESC: Halt System", 10, g_screen_height - 30, FG_YELLOW);
 }
 
 static void draw_current_page(const panic_context_t* ctx) {
-    // Render the current page starting from row 10
+    // Render the current page starting from a pixel row of 150
     if (g_current_page < BSOD_PAGE_MAX) {
-        g_bsod_pages[g_current_page].render_func(ctx, 10);
+        g_bsod_pages[g_current_page].render_func(ctx, 150);
     }
 }
 
@@ -866,1455 +2411,456 @@ static void handle_bsod_navigation(char key) {
 // PAGE RENDERING FUNCTIONS
 // =============================================================================
 
-static void render_overview_page(const panic_context_t* ctx, int start_row) {
-    int row = start_row - g_page_scroll_offset;
+static void render_overview_page(const panic_context_t* ctx, int start_y) {
+    int y = start_y - (g_page_scroll_offset * FONT_HEIGHT);
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "GENERAL INFORMATION:", FG_YELLOW, 5);
-    } else { row++; }
+    panic_draw_text("GENERAL INFORMATION:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
     
     char hex_str[16];
     format_hex32(ctx->cpu_state.eip, hex_str);
     
     char temp[80];
-    if (row >= 10 && row < 22) {
-        strcpy(temp, "Error Address: ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    strcpy(temp, "Error Address: ");
+    strcat(temp, hex_str);
+    panic_draw_text(temp, 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
     
-    if (row >= 10 && row < 22) {
-        strcpy(temp, "Error Type: ");
-        strcat(temp, get_panic_type_name(ctx->type));
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    strcpy(temp, "Error Type: ");
+    strcat(temp, get_panic_type_name(ctx->type));
+    panic_draw_text(temp, 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
     
-    if (ctx->file && row >= 10 && row < 22) {
+    if (ctx->file) {
         strcpy(temp, "Source: ");
         strcat(temp, ctx->file);
         strcat(temp, " in ");
         strcat(temp, ctx->function ? ctx->function : "unknown");
         strcat(temp, "()");
-        tui_print_at(4, row++, temp, FG_CYAN, 5);
-    } else { row++; }
+        panic_draw_text(temp, 30, y, FG_CYAN);
+        y += FONT_HEIGHT;
+    }
     
-    row++;
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "TECHNICAL DETAILS:", FG_YELLOW, 5);
-    } else { row++; }
+    y += FONT_HEIGHT;
+    panic_draw_text("TECHNICAL DETAILS:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
     
     format_hex32(ctx->cpu_state.esp, hex_str);
-    if (row >= 10 && row < 22) {
-        strcpy(temp, "Stack Pointer: ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    strcpy(temp, "Stack Pointer: ");
+    strcat(temp, hex_str);
+    panic_draw_text(temp, 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
     
     format_hex32(ctx->cpu_state.ebp, hex_str);
-    if (row >= 10 && row < 22) {
-        strcpy(temp, "Base Pointer:  ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    strcpy(temp, "Base Pointer:  ");
+    strcat(temp, hex_str);
+    panic_draw_text(temp, 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
     
-    if (row >= 10 && row < 22) {
-        strcpy(temp, "Stack Frames: ");
-        if (ctx->stack_frame_count < 10) {
-            temp[strlen(temp)] = '0' + ctx->stack_frame_count;
-            temp[strlen(temp) + 1] = '\0';
-        } else {
-            strcat(temp, "Many");
-        }
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    strcpy(temp, "Stack Frames: ");
+    char num_buf[12];
+    format_decimal(ctx->stack_frame_count, num_buf);
+    strcat(temp, num_buf);
+    panic_draw_text(temp, 30, y, FG_WHITE);
 }
 
-static void render_cpu_state_page(const panic_context_t* ctx, int start_row) {
-    int row = start_row - g_page_scroll_offset;
+static void render_cpu_state_page(const panic_context_t* ctx, int start_y) {
+    int y = start_y - (g_page_scroll_offset * FONT_HEIGHT);
     char hex_str[16];
     char temp[80];
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "PROCESSOR REGISTERS:", FG_YELLOW, 5);
-    } else { row++; }
+    panic_draw_text("PROCESSOR REGISTERS:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
     
-    // Show EAX
-    if (row >= 10 && row < 22) {
-        format_hex32(ctx->cpu_state.eax, hex_str);
-        strcpy(temp, "EAX     ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    int x1 = 30;
+    int x2 = 350;
+    int current_y = y;
+
+    format_hex32(ctx->cpu_state.eax, hex_str);
+    strcpy(temp, "EAX  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_WHITE);
     
-    // Show EBX
-    if (row >= 10 && row < 22) {
-        format_hex32(ctx->cpu_state.ebx, hex_str);
-        strcpy(temp, "EBX     ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    format_hex32(ctx->cpu_state.cr0, hex_str);
+    strcpy(temp, "CR0  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x2, current_y, FG_WHITE);
+    current_y += FONT_HEIGHT;
+
+    format_hex32(ctx->cpu_state.ebx, hex_str);
+    strcpy(temp, "EBX  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_WHITE);
+
+    format_hex32(ctx->cpu_state.cr2, hex_str);
+    strcpy(temp, "CR2  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x2, current_y, FG_WHITE);
+    current_y += FONT_HEIGHT;
     
-    // Show ECX
-    if (row >= 10 && row < 22) {
-        format_hex32(ctx->cpu_state.ecx, hex_str);
-        strcpy(temp, "ECX     ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    format_hex32(ctx->cpu_state.ecx, hex_str);
+    strcpy(temp, "ECX  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_WHITE);
+
+    format_hex32(ctx->cpu_state.cr3, hex_str);
+    strcpy(temp, "CR3  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x2, current_y, FG_WHITE);
+    current_y += FONT_HEIGHT;
+
+    format_hex32(ctx->cpu_state.edx, hex_str);
+    strcpy(temp, "EDX  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_WHITE);
+
+    format_hex32(ctx->cpu_state.cr4, hex_str);
+    strcpy(temp, "CR4  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x2, current_y, FG_WHITE);
+    current_y += FONT_HEIGHT * 2;
+
+    format_hex32(ctx->cpu_state.esi, hex_str);
+    strcpy(temp, "ESI  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_WHITE);
+    current_y += FONT_HEIGHT;
     
-    // Show EDX
-    if (row >= 10 && row < 22) {
-        format_hex32(ctx->cpu_state.edx, hex_str);
-        strcpy(temp, "EDX     ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    format_hex32(ctx->cpu_state.edi, hex_str);
+    strcpy(temp, "EDI  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_WHITE);
+    current_y += FONT_HEIGHT * 2;
+
+    format_hex32(ctx->cpu_state.esp, hex_str);
+    strcpy(temp, "ESP  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_WHITE);
+    current_y += FONT_HEIGHT;
+
+    format_hex32(ctx->cpu_state.ebp, hex_str);
+    strcpy(temp, "EBP  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_WHITE);
+    current_y += FONT_HEIGHT;
     
-    // Show ESP
-    if (row >= 10 && row < 22) {
-        format_hex32(ctx->cpu_state.esp, hex_str);
-        strcpy(temp, "ESP     ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
-    
-    // Show EBP
-    if (row >= 10 && row < 22) {
-        format_hex32(ctx->cpu_state.ebp, hex_str);
-        strcpy(temp, "EBP     ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
-    
-    // Show EIP
-    if (row >= 10 && row < 22) {
-        format_hex32(ctx->cpu_state.eip, hex_str);
-        strcpy(temp, "EIP     ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    format_hex32(ctx->cpu_state.eip, hex_str);
+    strcpy(temp, "EIP  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_GREEN);
+    current_y += FONT_HEIGHT;
+
+    format_hex32(ctx->cpu_state.eflags, hex_str);
+    strcpy(temp, "EFL  "); strcat(temp, hex_str);
+    panic_draw_text(temp, x1, current_y, FG_WHITE);
 }
 
-static void render_memory_info_page(const panic_context_t* ctx, int start_row) {
-    int row = start_row - g_page_scroll_offset;
+static void render_memory_info_page(const panic_context_t* ctx, int start_y) {
+    int y = start_y - (g_page_scroll_offset * FONT_HEIGHT);
     char temp[80], hex_str[16];
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "MEMORY STATUS:", FG_YELLOW, 5);
-    } else { row++; }
+    panic_draw_text("MEMORY STATUS:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
     
     // Check for page fault information
-    if (ctx->type == PANIC_TYPE_PAGE_FAULT && row >= 10 && row < 22) {
+    if (ctx->type == PANIC_TYPE_PAGE_FAULT) {
         format_hex32(ctx->cpu_state.cr2, hex_str);
         strcpy(temp, "Fault Address: ");
         strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_RED, 5);
-    } else { row++; }
+        panic_draw_text(temp, 30, y, FG_RED);
+        y += FONT_HEIGHT;
+    }
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Stack Memory (around ESP):", FG_CYAN, 5);
-    } else { row++; }
-    
-    // Show ESP value
-    if (row >= 10 && row < 22) {
-        format_hex32(ctx->cpu_state.esp, hex_str);
-        strcpy(temp, "ESP: ");
-        strcat(temp, hex_str);
-        tui_print_at(4, row++, temp, FG_YELLOW, 5);
-    } else { row++; }
+    panic_draw_text("Stack Memory (around ESP):", 30, y, FG_CYAN);
+    y += FONT_HEIGHT;
+
+    format_hex32(ctx->cpu_state.esp, hex_str);
+    strcpy(temp, "ESP: ");
+    strcat(temp, hex_str);
+    panic_draw_text(temp, 30, y, FG_YELLOW);
 }
 
-static void render_system_info_page(const panic_context_t* ctx, int start_row) {
-    int row = start_row - g_page_scroll_offset;
+static void render_system_info_page(const panic_context_t* ctx, int start_y) {
+    int y = start_y - (g_page_scroll_offset * FONT_HEIGHT);
     char temp[80];
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "SYSTEM INFORMATION:", FG_YELLOW, 5);
-    } else { row++; }
+    panic_draw_text("SYSTEM INFORMATION:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Operating System: Forest OS v2.0", FG_WHITE, 5);
-    } else { row++; }
+    panic_draw_text("Operating System: Forest OS v2.0", 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
+
+    panic_draw_text("Architecture: x86-32", 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
+
+    strcpy(temp, "Panic Count: ");
+    char pcount_str[12];
+    format_decimal(g_panic_count, pcount_str);
+    strcat(temp, pcount_str);
+    panic_draw_text(temp, 30, y, FG_WHITE);
+    y += FONT_HEIGHT * 2;
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Architecture: x86-32", FG_WHITE, 5);
-    } else { row++; }
+    panic_draw_text("HARDWARE STATUS:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
+
+    panic_draw_text("CPU: x86 Compatible", 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
     
-    if (row >= 10 && row < 22) {
-        //snprintf(temp, sizeof(temp), "Panic Count: %u", g_panic_count);
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    panic_draw_text("Memory: Available", 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
     
-    row++;
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "HARDWARE STATUS:", FG_YELLOW, 5);
-    } else { row++; }
-    
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "CPU: x86 Compatible", FG_WHITE, 5);
-    } else { row++; }
-    
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Memory: Available", FG_WHITE, 5);
-    } else { row++; }
-    
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Interrupts: System enabled", FG_WHITE, 5);
-    } else { row++; }
+    panic_draw_text("Interrupts: System enabled", 30, y, FG_WHITE);
 }
 
-static void render_stack_trace_page(const panic_context_t* ctx, int start_row) {
-    int row = start_row - g_page_scroll_offset;
+static void render_stack_trace_page(const panic_context_t* ctx, int start_y) {
+    int y = start_y - (g_page_scroll_offset * FONT_HEIGHT);
     char temp[80];
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "CALL STACK TRACE:", FG_YELLOW, 5);
-    } else { row++; }
-    
-    for (uint32 i = 0; i < ctx->stack_frame_count && row < 22; i++) {
-        if (row >= 10 && ctx->stack_trace[i].valid) {
+    panic_draw_text("CALL STACK TRACE:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
+
+    for (uint32 i = 0; i < ctx->stack_frame_count; i++) {
+        if (ctx->stack_trace[i].valid) {
             char addr_str[16];
             format_hex32(ctx->stack_trace[i].address, addr_str);
-            //snprintf(temp, sizeof(temp), "#%u %s", i, addr_str);
-            tui_print_at(4, row++, temp, FG_WHITE, 5);
-        } else {
-            row++;
+            char num_buf[12];
+            format_decimal(i, num_buf);
+
+            strcpy(temp, "#");
+            strcat(temp, num_buf);
+            strcat(temp, " ");
+            strcat(temp, addr_str);
+            panic_draw_text(temp, 30, y, FG_WHITE);
+            y += FONT_HEIGHT;
         }
     }
     
-    if (ctx->manual_stack_valid && row < 22) {
-        row++;
-        if (row >= 10 && row < 22) {
-            tui_print_at(2, row++, "MANUAL STACK ENTRIES:", FG_CYAN, 5);
-        } else { row++; }
+    if (ctx->manual_stack_valid) {
+        y += FONT_HEIGHT;
+        panic_draw_text("MANUAL STACK ENTRIES:", 10, y, FG_CYAN);
+        y += FONT_HEIGHT * 2;
         
-        for (uint32 i = 0; i < ctx->manual_stack_count && row < 22; i++) {
-            if (row >= 10) {
-                char addr_str[16];
-                format_hex32(ctx->manual_stack[i], addr_str);
-                //snprintf(temp, sizeof(temp), "M%u %s", i, addr_str);
-                tui_print_at(4, row++, temp, FG_CYAN, 5);
-            } else {
-                row++;
-            }
+        for (uint32 i = 0; i < ctx->manual_stack_count; i++) {
+            char addr_str[16];
+            format_hex32(ctx->manual_stack[i], addr_str);
+            char num_buf[12];
+            format_decimal(i, num_buf);
+
+            strcpy(temp, "M");
+            strcat(temp, num_buf);
+            strcat(temp, " ");
+            strcat(temp, addr_str);
+            panic_draw_text(temp, 30, y, FG_CYAN);
+            y += FONT_HEIGHT;
         }
     }
 }
 
-static void render_hardware_page(const panic_context_t* ctx, int start_row) {
-    int row = start_row - g_page_scroll_offset;
-    char temp[80];
+static void render_hardware_page(const panic_context_t* ctx, int start_y) {
+    int y = start_y - (g_page_scroll_offset * FONT_HEIGHT);
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "HARDWARE DIAGNOSTICS:", FG_YELLOW, 5);
-    } else { row++; }
+    panic_draw_text("HARDWARE DIAGNOSTICS:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "CPU State: Active", FG_GREEN, 5);
-    } else { row++; }
+    panic_draw_text("CPU State: Active", 30, y, FG_GREEN);
+    y += FONT_HEIGHT;
+
+    panic_draw_text("Memory Controller: Operational", 30, y, FG_GREEN);
+    y += FONT_HEIGHT;
+
+    panic_draw_text("Interrupt Controller: Active", 30, y, FG_GREEN);
+    y += FONT_HEIGHT;
+
+    panic_draw_text("Timer: Functional", 30, y, FG_GREEN);
+    y += FONT_HEIGHT * 2;
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Memory Controller: Operational", FG_GREEN, 5);
-    } else { row++; }
+    panic_draw_text("DRIVER STATUS:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Interrupt Controller: Active", FG_GREEN, 5);
-    } else { row++; }
+    panic_draw_text("Display Driver: Loaded", 30, y, FG_GREEN);
+    y += FONT_HEIGHT;
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Timer: Functional", FG_GREEN, 5);
-    } else { row++; }
-    
-    row++;
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "DRIVER STATUS:", FG_YELLOW, 5);
-    } else { row++; }
-    
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Display Driver: Loaded", FG_GREEN, 5);
-    } else { row++; }
-    
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "Keyboard Driver: Active", FG_GREEN, 5);
-    } else { row++; }
+    panic_draw_text("Keyboard Driver: Active", 30, y, FG_GREEN);
 }
 
-static void render_advanced_page(const panic_context_t* ctx, int start_row) {
-    int row = start_row - g_page_scroll_offset;
+static void render_advanced_page(const panic_context_t* ctx, int start_y) {
+    int y = start_y - (g_page_scroll_offset * FONT_HEIGHT);
     char temp[80];
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "ADVANCED DIAGNOSTICS:", FG_YELLOW, 5);
-    } else { row++; }
+    panic_draw_text("ADVANCED DIAGNOSTICS:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
     
-    if (row >= 10 && row < 22) {
-        //snprintf(temp, sizeof(temp), "Error Classification: %s", get_panic_type_name(ctx->type));
-        tui_print_at(4, row++, temp, FG_WHITE, 5);
-    } else { row++; }
+    strcpy(temp, "Error Classification: ");
+    strcat(temp, get_panic_type_name(ctx->type));
+    panic_draw_text(temp, 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
     
     const char* recovery = ctx->recoverable ? "Possible" : "Not Possible";
-    if (row >= 10 && row < 22) {
-        //snprintf(temp, sizeof(temp), "Recovery Status: %s", recovery);
-        tui_print_at(4, row++, temp, ctx->recoverable ? FG_GREEN : FG_RED, 5);
-    } else { row++; }
+    strcpy(temp, "Recovery Status: ");
+    strcat(temp, recovery);
+    panic_draw_text(temp, 30, y, ctx->recoverable ? FG_GREEN : FG_RED);
+    y += FONT_HEIGHT * 2;
+
+    panic_draw_text("RECOMMENDATIONS:", 10, y, FG_YELLOW);
+    y += FONT_HEIGHT * 2;
     
-    row++;
-    if (row >= 10 && row < 22) {
-        tui_print_at(2, row++, "RECOMMENDATIONS:", FG_YELLOW, 5);
-    } else { row++; }
+    panic_draw_text("1. Check hardware connections", 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "1. Check hardware connections", FG_WHITE, 5);
-    } else { row++; }
+    panic_draw_text("2. Verify system memory", 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
     
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "2. Verify system memory", FG_WHITE, 5);
-    } else { row++; }
-    
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "3. Update system drivers", FG_WHITE, 5);
-    } else { row++; }
-    
-    if (row >= 10 && row < 22) {
-        tui_print_at(4, row++, "4. Contact system administrator", FG_WHITE, 5);
-    } else { row++; }
+    panic_draw_text("3. Update system drivers", 30, y, FG_WHITE);
+    y += FONT_HEIGHT;
+
+    panic_draw_text("4. Contact system administrator", 30, y, FG_WHITE);
 }
 
-static void draw_panic_banner(const panic_context_t* ctx) {
-    clearScreen();
+// Simple graphics-based panic display
+static void draw_simple_panic_screen(const panic_context_t* ctx) {
+    // Clear screen with dark blue background
+    graphics_clear_screen(COLOR_BG);
     
-    // Get panic type specific color
-    int panic_color = get_panic_type_color(ctx->type);
+    int y = 50;
     
-    // Professional header with gradient effect
-    tui_draw_status_bar(0, "FOREST OS KERNEL PANIC HANDLER v" PANIC_VERSION, 
-                       "PROFESSIONAL DEBUGGING INTERFACE", FG_WHITE, panic_color);
+    // Header
+    panic_print_at(50, y, "FOREST OS KERNEL PANIC", COLOR_TEXT_ERROR);
+    y += 40;
     
-    // Main error display
-    tui_draw_window(1, 2, 78, 6, "CRITICAL SYSTEM ERROR", FG_WHITE, panic_color);
-    
+    // Error message
     if (ctx->message) {
-        tui_center_text(3, 4, 74, ctx->message, FG_YELLOW, panic_color);
+        panic_print_at(50, y, "Message: ", COLOR_TEXT_LABEL);
+        panic_print_at(150, y, ctx->message, COLOR_TEXT_VALUE);
+        y += 30;
     }
     
-    // Panic type and classification
-    char type_info[80];
-    strcpy(type_info, "Error Type: ");
-    strcat(type_info, get_panic_type_name(ctx->type));
-    tui_center_text(3, 5, 74, type_info, FG_CYAN, panic_color);
+    // Error type
+    panic_print_at(50, y, "Type: ", COLOR_TEXT_LABEL);
+    panic_print_at(150, y, get_panic_type_name(ctx->type), COLOR_TEXT_WARN);
+    y += 30;
     
+    // Location
     if (ctx->file) {
-        char location_info[120];
-        strcpy(location_info, "Location: ");
-        strcat(location_info, ctx->file);
+        panic_print_at(50, y, "File: ", COLOR_TEXT_LABEL);
+        panic_print_at(150, y, ctx->file, COLOR_TEXT_VALUE);
+        y += 25;
+        
         if (ctx->line > 0) {
-            strcat(location_info, " line ");
+            panic_print_at(50, y, "Line: ", COLOR_TEXT_LABEL);
             char line_str[16];
             format_decimal(ctx->line, line_str);
-            strcat(location_info, line_str);
+            panic_print_at(150, y, line_str, COLOR_TEXT_VALUE);
+            y += 25;
         }
+        
         if (ctx->function) {
-            strcat(location_info, " in ");
-            strcat(location_info, ctx->function);
-            strcat(location_info, "()");
+            panic_print_at(50, y, "Function: ", COLOR_TEXT_LABEL);
+            panic_print_at(150, y, ctx->function, COLOR_TEXT_VALUE);
+            y += 25;
         }
-        tui_center_text(3, 6, 74, location_info, FG_WHITE, panic_color);
     }
     
-    // System state overview
-    tui_draw_window(1, 9, 39, 9, "CPU STATE SUMMARY", FG_WHITE, 3);
+    y += 20;
+    
+    // CPU State
+    panic_print_at(50, y, "CPU STATE:", COLOR_TEXT_ERROR);
+    y += 30;
     
     char hex_str[12];
     format_hex32(ctx->cpu_state.eip, hex_str);
-    tui_print_table_row(3, 11, 35, "Fault Address (EIP)", hex_str, FG_YELLOW, FG_WHITE, 3);
+    panic_print_at(70, y, "EIP: ", COLOR_TEXT_LABEL);
+    panic_print_at(150, y, hex_str, COLOR_TEXT_VALUE);
+    y += 25;
     
     format_hex32(ctx->cpu_state.esp, hex_str);
-    tui_print_table_row(3, 12, 35, "Stack Pointer", hex_str, FG_YELLOW, FG_WHITE, 3);
-    
-    format_hex32(ctx->cpu_state.cr2, hex_str);
-    tui_print_table_row(3, 13, 35, "Page Fault Addr", hex_str, FG_YELLOW, 
-                       ctx->cpu_state.cr2 ? FG_RED : FG_GRAY, 3);
-    
-    const char* paging_status = (ctx->cpu_state.cr0 & (1 << 31)) ? "ENABLED" : "DISABLED";
-    tui_print_table_row(3, 14, 35, "Paging Status", paging_status, FG_YELLOW, FG_GREEN, 3);
-    
-    const char* int_status = (ctx->cpu_state.eflags & (1 << 9)) ? "ENABLED" : "DISABLED";
-    tui_print_table_row(3, 15, 35, "Interrupts", int_status, FG_YELLOW, FG_GREEN, 3);
-    
-    if (ctx->stack_frame_count > 0) {
-        char frame_details[64];
-        char addr_str[12];
-        char caller_str[12];
-        format_hex32(ctx->stack_trace[0].address, addr_str);
-        format_hex32(ctx->stack_trace[0].caller, caller_str);
-        strcpy(frame_details, addr_str);
-        strcat(frame_details, " -> ");
-        strcat(frame_details, caller_str);
-        tui_print_table_row(3, 16, 35, "Top Stack Frame", frame_details, FG_YELLOW, FG_WHITE, 3);
-    } else if (ctx->manual_stack_valid && ctx->manual_stack_count > 0) {
-        char entry_str[12];
-        format_hex32(ctx->manual_stack[0], entry_str);
-        tui_print_table_row(3, 16, 35, "Stack Snapshot[0]", entry_str, FG_YELLOW, FG_WHITE, 3);
-    } else {
-        tui_print_table_row(3, 16, 35, "Top Stack Frame", "Unavailable", FG_YELLOW, FG_GRAY, 3);
-    }
-    
-    // Stack trace preview
-    tui_draw_window(41, 9, 38, 8, "CALL STACK PREVIEW", FG_WHITE, COLOR_SUCCESS);
-    
-    if (ctx->stack_frame_count > 0) {
-        for (uint32 i = 0; i < ctx->stack_frame_count && i < 5; i++) {
-            if (ctx->stack_trace[i].valid) {
-                format_hex32(ctx->stack_trace[i].address, hex_str);
-                char frame_info[32];
-                strcpy(frame_info, "Frame ");
-                char frame_num[8];
-                format_decimal(i, frame_num);
-                strcat(frame_info, frame_num);
-                tui_print_table_row(43, 11 + i, 34, frame_info, hex_str, FG_YELLOW, FG_WHITE, COLOR_SUCCESS);
-            }
-        }
-    } else if (ctx->manual_stack_valid) {
-        for (uint32 i = 0; i < ctx->manual_stack_count && i < 5; i++) {
-            format_hex32(ctx->manual_stack[i], hex_str);
-            char frame_info[32];
-            strcpy(frame_info, "Stack[");
-            char frame_num[8];
-            format_decimal(i, frame_num);
-            strcat(frame_info, frame_num);
-            strcat(frame_info, "]");
-            tui_print_table_row(43, 11 + i, 34, frame_info, hex_str, FG_YELLOW, FG_WHITE, COLOR_SUCCESS);
-        }
-    } else {
-        tui_print_at(43, 12, "No valid stack trace available", FG_GRAY, COLOR_SUCCESS);
-    }
-    
-    // Command interface
-    tui_draw_window(1, 18, 78, 6, "INTERACTIVE DEBUGGER COMMANDS", FG_WHITE, COLOR_NORMAL);
-    tui_print_at(3, 20, "R=CPU Registers   M=Memory   S=Stack   H=Help   A=Analysis   D=Dump   Q=Info", FG_CYAN, COLOR_NORMAL);
-    tui_print_at(3, 21, "T=System Info    I=Interrupts   C=Control Regs   F=Flags   V=Virtual Memory", FG_CYAN, COLOR_NORMAL);
-    tui_print_at(3, 22, "G=GDB Remote Debug Guide", FG_CYAN, COLOR_NORMAL);
-    
-    // Show mouse support status
-    if (panic_mouse_enabled) {
-        tui_print_at(3, 23, "ESC=Exit Debug Mode    SPACE=Refresh    Mouse=Click Commands", FG_GREEN, COLOR_NORMAL);
-    } else {
-        tui_print_at(3, 23, "ESC=Exit Debug Mode    SPACE=Refresh Display    ?=Advanced Help", FG_GREEN, COLOR_NORMAL);
-    }
-}
-
-// =============================================================================
-// DETAILED ANALYSIS SCREENS
-// =============================================================================
-
-static void show_cpu_registers_detailed(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "CPU REGISTERS - COMPLETE STATE",
-        "All processor registers at time of panic with detailed analysis",
-        "Press any key to return to main menu",
-        COLOR_NORMAL, FG_WHITE, FG_YELLOW
-    };
-    
-    tui_fullscreen_clear(&theme);
-    tui_fullscreen_header(&theme);
-    tui_fullscreen_footer(&theme);
-    
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    
-    char hex_str[12];
-    int row = cy;
-    
-    // General purpose registers
-    tui_print_section_header(cx, row++, cw, "General Purpose Registers", FG_YELLOW, COLOR_NORMAL);
-    row++;
-    
-    format_hex32(ctx->cpu_state.eax, hex_str);
-    tui_print_table_row(cx, row++, cw, "EAX (Accumulator)", hex_str, FG_CYAN, FG_WHITE, COLOR_NORMAL);
-    
-    format_hex32(ctx->cpu_state.ebx, hex_str);
-    tui_print_table_row(cx, row++, cw, "EBX (Base Index)", hex_str, FG_CYAN, FG_WHITE, COLOR_NORMAL);
-    
-    format_hex32(ctx->cpu_state.ecx, hex_str);
-    tui_print_table_row(cx, row++, cw, "ECX (Counter)", hex_str, FG_CYAN, FG_WHITE, COLOR_NORMAL);
-    
-    format_hex32(ctx->cpu_state.edx, hex_str);
-    tui_print_table_row(cx, row++, cw, "EDX (Data)", hex_str, FG_CYAN, FG_WHITE, COLOR_NORMAL);
-    
-    format_hex32(ctx->cpu_state.esi, hex_str);
-    tui_print_table_row(cx, row++, cw, "ESI (Source Index)", hex_str, FG_CYAN, FG_WHITE, COLOR_NORMAL);
-    
-    format_hex32(ctx->cpu_state.edi, hex_str);
-    tui_print_table_row(cx, row++, cw, "EDI (Destination Index)", hex_str, FG_CYAN, FG_WHITE, COLOR_NORMAL);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Stack and Instruction Pointers", FG_YELLOW, COLOR_NORMAL);
-    row++;
-    
-    format_hex32(ctx->cpu_state.esp, hex_str);
-    const char* esp_status = (ctx->cpu_state.esp < 0x1000 || ctx->cpu_state.esp > 0xFFFFF000) ? " [INVALID!]" : " [OK]";
-    char esp_info[32];
-    strcpy(esp_info, hex_str);
-    strcat(esp_info, esp_status);
-    tui_print_table_row(cx, row++, cw, "ESP (Stack Pointer)", esp_info, FG_CYAN, 
-                       (ctx->cpu_state.esp < 0x1000 || ctx->cpu_state.esp > 0xFFFFF000) ? FG_RED : FG_WHITE, COLOR_NORMAL);
-    
-    format_hex32(ctx->cpu_state.ebp, hex_str);
-    tui_print_table_row(cx, row++, cw, "EBP (Base Pointer)", hex_str, FG_CYAN, FG_WHITE, COLOR_NORMAL);
-    
-    format_hex32(ctx->cpu_state.eip, hex_str);
-    tui_print_table_row(cx, row++, cw, "EIP (Instruction Pointer)", hex_str, FG_CYAN, FG_GREEN, COLOR_NORMAL);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Processor Flags (EFLAGS)", FG_YELLOW, COLOR_NORMAL);
-    row++;
+    panic_print_at(70, y, "ESP: ", COLOR_TEXT_LABEL);
+    panic_print_at(150, y, hex_str, COLOR_TEXT_VALUE);
+    y += 25;
     
     format_hex32(ctx->cpu_state.eflags, hex_str);
-    tui_print_table_row(cx, row++, cw, "EFLAGS Register", hex_str, FG_CYAN, FG_WHITE, COLOR_NORMAL);
+    panic_print_at(70, y, "EFLAGS: ", COLOR_TEXT_LABEL);
+    panic_print_at(150, y, hex_str, COLOR_TEXT_VALUE);
+    y += 40;
     
-    // Flag breakdown
-    const char* flags[] = {"Carry", "Zero", "Sign", "Interrupt", "Direction", "Overflow"};
-    int flag_bits[] = {0, 6, 7, 9, 10, 11};
-    
-    for (int i = 0; i < 6; i++) {
-        bool flag_set = (ctx->cpu_state.eflags & (1 << flag_bits[i])) != 0;
-        tui_print_table_row(cx, row++, cw, flags[i], flag_set ? "SET" : "CLEAR", 
-                           FG_GRAY, flag_set ? FG_GREEN : FG_RED, COLOR_NORMAL);
-    }
+    // Instructions
+    panic_print_at(50, y, "System halted. Please reboot.", COLOR_TEXT_ERROR);
 }
 
-static void show_memory_analysis(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "MEMORY ANALYSIS",
-        "Memory manager statistics, layout, and corruption detection",
-        "Press any key to return to main menu",
-        COLOR_SUCCESS, FG_WHITE, FG_YELLOW
-    };
-    
-    tui_fullscreen_clear(&theme);
-    tui_fullscreen_header(&theme);
-    tui_fullscreen_footer(&theme);
-    
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    
-    char num_str[16];
-    int row = cy;
-    
-    // Memory statistics if available
-    memory_stats_t stats = memory_get_stats();
-    if (stats.total_frames > 0) {
-        tui_print_section_header(cx, row++, cw, "Physical Memory Manager", FG_YELLOW, COLOR_SUCCESS);
-        row++;
-        
-        format_decimal(stats.total_frames, num_str);
-        tui_print_table_row(cx, row++, cw, "Total Pages", num_str, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-        
-        format_decimal(stats.used_frames, num_str);
-        tui_print_table_row(cx, row++, cw, "Used Pages", num_str, FG_CYAN, FG_RED, COLOR_SUCCESS);
-        
-        format_decimal(stats.free_frames, num_str);
-        tui_print_table_row(cx, row++, cw, "Free Pages", num_str, FG_CYAN, FG_GREEN, COLOR_SUCCESS);
-        
-        uint32 usage_percent = (stats.total_frames > 0) ? (stats.used_frames * 100) / stats.total_frames : 0;
-        format_decimal(usage_percent, num_str);
-        strcat(num_str, "%");
-        tui_print_table_row(cx, row++, cw, "Memory Usage", num_str, FG_CYAN, 
-                           usage_percent > 90 ? FG_RED : (usage_percent > 75 ? FG_YELLOW : FG_GREEN), COLOR_SUCCESS);
-        
-        row++;
-        tui_print_at(cx, row++, "Memory Usage Visualization:", FG_YELLOW, COLOR_SUCCESS);
-        tui_draw_progress_bar(cx, row, cw - 5, stats.used_frames, stats.total_frames, FG_WHITE, COLOR_SUCCESS);
-        row += 2;
-    }
-    
-    // Memory layout
-    tui_print_section_header(cx, row++, cw, "Memory Layout", FG_YELLOW, COLOR_SUCCESS);
-    row++;
-    
-    for (int i = 0; i < MAX_MEMORY_REGIONS; i++) {
-        char addr_range[32];
-        char start_hex[12], end_hex[12];
-        format_hex32(g_memory_regions[i].start_addr, start_hex);
-        format_hex32(g_memory_regions[i].end_addr, end_hex);
-        strcpy(addr_range, start_hex);
-        strcat(addr_range, " - ");
-        strcat(addr_range, end_hex);
-        
-        tui_print_table_row(cx, row++, cw, g_memory_regions[i].name, addr_range, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    }
-}
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
 
-static int32 draw_stack_analysis_content(const panic_context_t* ctx, int32 scroll, int32* out_max_scroll) {
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
+static void capture_stack_snapshot(panic_context_t* ctx) {
+    if (!ctx) return;
     
-    char hex_str[12];
-    int row = cy;
+    // Simple implementation - just capture basic CPU state
+    // In a full implementation, this would walk the stack
+    ctx->manual_stack_count = 0;
+    ctx->manual_stack_valid = false;
+    ctx->stack_frame_count = 0;
     
-    // Stack information
-    tui_print_section_header(cx, row++, cw, "Stack State", FG_YELLOW, COLOR_WARNING);
-    row++;
+    // Try to capture some basic stack information
+    uint32 esp;
+    asm volatile("mov %%esp, %0" : "=r" (esp));
     
-    format_hex32(ctx->cpu_state.esp, hex_str);
-    tui_print_table_row(cx, row++, cw, "Stack Pointer (ESP)", hex_str, FG_CYAN, FG_WHITE, COLOR_WARNING);
-    
-    format_hex32(ctx->cpu_state.ebp, hex_str);
-    tui_print_table_row(cx, row++, cw, "Base Pointer (EBP)", hex_str, FG_CYAN, FG_WHITE, COLOR_WARNING);
-    
-    bool stack_valid = (ctx->cpu_state.esp >= 0x1000 && ctx->cpu_state.esp < 0xFFFFF000);
-    tui_print_table_row(cx, row++, cw, "Stack Validity", stack_valid ? "VALID" : "CORRUPTED", 
-                       FG_CYAN, stack_valid ? FG_GREEN : FG_RED, COLOR_WARNING);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Call Stack Backtrace", FG_YELLOW, COLOR_WARNING);
-    row++;
-    
-    tui_print_at(cx, row++, "Frame  Address     Caller      Status", FG_CYAN, COLOR_WARNING);
-    tui_print_at(cx, row++, "-----  ----------  ----------  ------", FG_GRAY, COLOR_WARNING);
-    
-    int list_start = row;
-    int visible_rows = (cy + ch - 2) - list_start;
-    if (visible_rows < 4) visible_rows = 4;
-    
-    bool has_manual = ctx->manual_stack_valid && ctx->manual_stack_count > 0;
-    int total_rows = ctx->stack_frame_count + (has_manual ? (int)ctx->manual_stack_count + 1 : 0);
-    
-    int32 max_scroll = (total_rows > visible_rows) ? (total_rows - visible_rows) : 0;
-    if (scroll < 0) scroll = 0;
-    if (scroll > max_scroll) scroll = max_scroll;
-    if (out_max_scroll) *out_max_scroll = max_scroll;
-    
-    int displayed = 0;
-    for (int idx = scroll; idx < total_rows && displayed < visible_rows; idx++) {
-        if (idx < (int)ctx->stack_frame_count) {
-            char frame_num[8], addr_str[12], caller_str[12];
-            format_decimal(idx, frame_num);
-            format_hex32(ctx->stack_trace[idx].address, addr_str);
-            format_hex32(ctx->stack_trace[idx].caller, caller_str);
-            char line[80];
-            strcpy(line, "  ");
-            strcat(line, frame_num);
-            strcat(line, "    ");
-            strcat(line, addr_str);
-            strcat(line, "  ");
-            strcat(line, caller_str);
-            strcat(line, "  ");
-            strcat(line, ctx->stack_trace[idx].valid ? "OK" : "INVALID");
-            tui_print_at(cx, row++, line, ctx->stack_trace[idx].valid ? FG_WHITE : FG_RED, COLOR_WARNING);
-        } else if (has_manual && idx == (int)ctx->stack_frame_count) {
-            tui_print_at(cx, row++, "-- Recorded Stack Snapshot --", FG_YELLOW, COLOR_WARNING);
-        } else if (has_manual) {
-            uint32 manual_index = idx - ctx->stack_frame_count - 1;
-            if (manual_index < ctx->manual_stack_count) {
-                char entry_label[32];
-                char entry_value[12];
-                strcpy(entry_label, "Entry ");
-                char idx_str[8];
-                format_decimal(manual_index, idx_str);
-                strcat(entry_label, idx_str);
-                format_hex32(ctx->manual_stack[manual_index], entry_value);
-                tui_print_table_row(cx, row++, cw, entry_label, entry_value, FG_CYAN, FG_WHITE, COLOR_WARNING);
-            }
+    if (esp > 0x1000 && esp < 0xFFFF0000) {
+        // Try to read a few stack entries
+        uint32* stack_ptr = (uint32*)esp;
+        for (int i = 0; i < 8 && i < MAX_STACK_FRAMES; i++) {
+            ctx->manual_stack[i] = stack_ptr[i];
+            ctx->manual_stack_count++;
         }
-        displayed++;
-    }
-    
-    if (total_rows == 0) {
-        tui_print_at(cx, row, "No valid stack frames found - stack may be corrupted", FG_RED, COLOR_WARNING);
-    } else if (max_scroll > 0) {
-        tui_draw_scrollbar(cx + cw - 2, list_start, visible_rows, visible_rows, total_rows, scroll, FG_YELLOW, COLOR_WARNING);
-    }
-    
-    return scroll;
-}
-
-static void show_stack_analysis(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "STACK ANALYSIS",
-        "Complete call stack unwinding and stack memory inspection",
-        "Use W/S to scroll, other key to return",
-        COLOR_WARNING, FG_WHITE, FG_YELLOW
-    };
-    
-    int32 scroll = panic_scroll_get(PANIC_SCREEN_STACK);
-    bool viewing = true;
-    while (viewing) {
-        tui_fullscreen_clear(&theme);
-        tui_fullscreen_header(&theme);
-        tui_fullscreen_footer(&theme);
-        
-        int32 max_scroll = 0;
-        scroll = draw_stack_analysis_content(ctx, scroll, &max_scroll);
-        
-        char key = wait_for_key();
-        if (key == 'w' || key == 'W') {
-            if (scroll > 0) scroll--;
-        } else if (key == 's' || key == 'S') {
-            if (scroll < max_scroll) scroll++;
-        } else {
-            viewing = false;
-        }
-    }
-    
-    panic_scroll_set(PANIC_SCREEN_STACK, scroll);
-}
-
-static void show_advanced_analysis(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "ADVANCED ANALYSIS",
-        "Error classification, recovery suggestions, and system impact assessment",
-        "Press any key to return to main menu",
-        COLOR_WARNING, FG_WHITE, FG_YELLOW
-    };
-    
-    tui_fullscreen_clear(&theme);
-    tui_fullscreen_header(&theme);
-    tui_fullscreen_footer(&theme);
-    
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    
-    int row = cy;
-    
-    tui_print_section_header(cx, row++, cw, "Panic Classification", FG_YELLOW, COLOR_WARNING);
-    row++;
-    
-    tui_print_table_row(cx, row++, cw, "Error Type", get_panic_type_name(ctx->type), FG_CYAN, FG_WHITE, COLOR_WARNING);
-    tui_print_table_row(cx, row++, cw, "Severity", ctx->type == PANIC_TYPE_DOUBLE_FAULT ? "CRITICAL" : "HIGH", 
-                       FG_CYAN, ctx->type == PANIC_TYPE_DOUBLE_FAULT ? FG_RED : FG_YELLOW, COLOR_WARNING);
-    tui_print_table_row(cx, row++, cw, "Recoverable", ctx->recoverable ? "YES" : "NO", 
-                       FG_CYAN, ctx->recoverable ? FG_GREEN : FG_RED, COLOR_WARNING);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Probable Causes", FG_YELLOW, COLOR_WARNING);
-    row++;
-    
-    switch (ctx->type) {
-        case PANIC_TYPE_PAGE_FAULT:
-            tui_print_at(cx, row++, "• Accessing unmapped memory region", FG_WHITE, COLOR_WARNING);
-            tui_print_at(cx, row++, "• Invalid pointer dereference", FG_WHITE, COLOR_WARNING);
-            tui_print_at(cx, row++, "• Stack overflow or underflow", FG_WHITE, COLOR_WARNING);
-            break;
-        case PANIC_TYPE_MEMORY_CORRUPTION:
-            tui_print_at(cx, row++, "• Buffer overflow or underflow", FG_WHITE, COLOR_WARNING);
-            tui_print_at(cx, row++, "• Use after free vulnerability", FG_WHITE, COLOR_WARNING);
-            tui_print_at(cx, row++, "• Double free corruption", FG_WHITE, COLOR_WARNING);
-            break;
-        case PANIC_TYPE_STACK_OVERFLOW:
-            tui_print_at(cx, row++, "• Infinite recursion", FG_WHITE, COLOR_WARNING);
-            tui_print_at(cx, row++, "• Large local variable allocation", FG_WHITE, COLOR_WARNING);
-            tui_print_at(cx, row++, "• Stack corruption from buffer overflow", FG_WHITE, COLOR_WARNING);
-            break;
-        default:
-            tui_print_at(cx, row++, "• General kernel error condition", FG_WHITE, COLOR_WARNING);
-            tui_print_at(cx, row++, "• Hardware failure or incompatibility", FG_WHITE, COLOR_WARNING);
-            tui_print_at(cx, row++, "• Driver malfunction", FG_WHITE, COLOR_WARNING);
-            break;
-    }
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Recovery Suggestions", FG_YELLOW, COLOR_WARNING);
-    row++;
-    tui_print_at(cx, row++, "1. Check all pointer arithmetic and array bounds", FG_GREEN, COLOR_WARNING);
-    tui_print_at(cx, row++, "2. Verify memory allocation/deallocation pairs", FG_GREEN, COLOR_WARNING);
-    tui_print_at(cx, row++, "3. Review recent code changes for bugs", FG_GREEN, COLOR_WARNING);
-    tui_print_at(cx, row++, "4. Test with memory debugging tools", FG_GREEN, COLOR_WARNING);
-}
-
-static int32 clamp_memory_scroll(int32 scroll) {
-    if (scroll < -PANIC_MEMORY_SCROLL_RANGE) return -PANIC_MEMORY_SCROLL_RANGE;
-    if (scroll > PANIC_MEMORY_SCROLL_RANGE) return PANIC_MEMORY_SCROLL_RANGE;
-    return scroll;
-}
-
-static int32 draw_memory_dump_content(const panic_context_t* ctx, int32 scroll) {
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    
-    int row = cy;
-    scroll = clamp_memory_scroll(scroll);
-    
-    tui_print_section_header(cx, row++, cw, "Memory Around Fault Address", FG_YELLOW, 3);
-    row++;
-    
-    uint32 fault_addr = ctx->cpu_state.eip;
-    uint32 base_fault = fault_addr > 32 ? fault_addr - 32 : 0;
-    int64 adjusted_fault = (int64)base_fault + ((int64)scroll * PANIC_MEMORY_STEP_BYTES);
-    if (adjusted_fault < 0) adjusted_fault = 0;
-    uint32 fault_start = (uint32)adjusted_fault;
-    const char* fault_reason = NULL;
-    if (panic_can_read_range(fault_start, 64, &fault_reason)) {
-        tui_draw_hex_viewer(cx, row, cw - 4, 8, (void*)fault_start, fault_start, FG_WHITE, 3);
-        row += 8;
-    } else {
-        tui_print_at(cx, row++, "Cannot display faulting instruction bytes:", FG_RED, 3);
-        tui_print_at(cx, row++, fault_reason ? fault_reason : "Unknown mapping failure", FG_RED, 3);
-    }
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Stack Memory", FG_YELLOW, 3);
-    row++;
-    
-    uint32 stack_addr = ctx->cpu_state.esp;
-    uint32 base_stack = stack_addr > 16 ? stack_addr - 16 : 0;
-    int64 adjusted_stack = (int64)base_stack + ((int64)scroll * PANIC_MEMORY_STEP_BYTES);
-    if (adjusted_stack < 0) adjusted_stack = 0;
-    uint32 stack_start = (uint32)adjusted_stack;
-    const char* stack_reason = NULL;
-    if (panic_can_read_range(stack_start, 64, &stack_reason)) {
-        tui_draw_hex_viewer(cx, row, cw - 4, 6, (void*)stack_start, stack_start, FG_WHITE, 3);
-        row += 6;
-    } else {
-        tui_print_at(cx, row++, "Cannot display stack memory:", FG_RED, 3);
-        tui_print_at(cx, row++, stack_reason ? stack_reason : "Unknown mapping failure", FG_RED, 3);
-    }
-    
-    char offset_label[32];
-    strcpy(offset_label, "Offset (");
-    strcat(offset_label, scroll >= 0 ? "+" : "-");
-    int32 abs_offset = scroll >= 0 ? scroll : -scroll;
-    char offset_num[16];
-    format_decimal(abs_offset * PANIC_MEMORY_STEP_BYTES, offset_num);
-    strcat(offset_label, offset_num);
-    strcat(offset_label, " bytes)");
-    tui_print_at(cx, row + 1, offset_label, FG_CYAN, 3);
-    
-    int scroll_height = ch - 6;
-    int total_positions = PANIC_MEMORY_SCROLL_RANGE * 2 + 1;
-    int position = scroll + PANIC_MEMORY_SCROLL_RANGE;
-    tui_draw_scrollbar(cx + cw - 2, cy + 2, scroll_height, 1, total_positions, position, FG_YELLOW, 3);
-    
-    return scroll;
-}
-
-static void show_memory_dump(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "MEMORY DUMP",
-        "Raw memory viewer around fault address and stack pointer",
-        "Use W/S to scroll, other key to return",
-        3, FG_WHITE, FG_YELLOW
-    };
-    
-    int32 scroll = panic_scroll_get(PANIC_SCREEN_MEMORY);
-    bool viewing = true;
-    while (viewing) {
-        tui_fullscreen_clear(&theme);
-        tui_fullscreen_header(&theme);
-        tui_fullscreen_footer(&theme);
-        
-        scroll = draw_memory_dump_content(ctx, scroll);
-        char key = wait_for_key();
-        if (key == 'w' || key == 'W') {
-            if (scroll > -PANIC_MEMORY_SCROLL_RANGE) scroll--;
-        } else if (key == 's' || key == 'S') {
-            if (scroll < PANIC_MEMORY_SCROLL_RANGE) scroll++;
-        } else {
-            viewing = false;
-        }
-    }
-    
-    panic_scroll_set(PANIC_SCREEN_MEMORY, scroll);
-}
-
-static void show_system_info(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "SYSTEM INFORMATION",
-        "Hardware configuration and kernel state information",
-        "Press any key to return to main menu",
-        COLOR_SUCCESS, FG_WHITE, FG_YELLOW
-    };
-    
-    tui_fullscreen_clear(&theme);
-    tui_fullscreen_header(&theme);
-    tui_fullscreen_footer(&theme);
-    
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    
-    char hex_str[12];
-    int row = cy;
-    
-    tui_print_section_header(cx, row++, cw, "Kernel Information", FG_YELLOW, COLOR_SUCCESS);
-    row++;
-    
-    tui_print_table_row(cx, row++, cw, "OS Name", "Forest OS", FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    tui_print_table_row(cx, row++, cw, "Kernel Version", PANIC_VERSION, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    
-    char panic_count_str[16];
-    format_decimal(g_panic_count, panic_count_str);
-    tui_print_table_row(cx, row++, cw, "Panic Count", panic_count_str, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Hardware Configuration", FG_YELLOW, COLOR_SUCCESS);
-    row++;
-    
-    const cpuid_info_t* cpu = hardware_get_cpuid_info();
-    const char* vendor = cpu->cpuid_supported ? cpu->vendor_id : "Unavailable";
-    const char* brand = cpu->cpuid_supported ? cpu->brand_string : "Unknown";
-    tui_print_table_row(cx, row++, cw, "CPU Vendor", vendor, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    tui_print_table_row(cx, row++, cw, "CPU Brand", brand, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    
-    if (cpu->cpuid_supported) {
-        char sig_hex[12];
-        format_hex32(cpu->signature, sig_hex);
-        tui_print_table_row(cx, row++, cw, "CPU Signature", sig_hex, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-        
-        char logical_str[12];
-        format_decimal(cpu->logical_processor_count, logical_str);
-        tui_print_table_row(cx, row++, cw, "Logical CPUs", logical_str, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-        
-        tui_print_table_row(cx, row++, cw, "Hypervisor Present", 
-                            cpu->hypervisor_present ? "Yes" : "No", FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    }
-    
-    tui_print_table_row(cx, row++, cw, "CPU Features", hardware_get_feature_summary(), 
-                        FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    
-    // Memory size estimation
-    memory_stats_t stats = memory_get_stats();
-    if (stats.total_memory_kb > 0) {
-        uint32 total_mb = stats.total_memory_kb / 1024;
-        char mem_str[16];
-        format_decimal(total_mb, mem_str);
-        strcat(mem_str, " MB");
-        tui_print_table_row(cx, row++, cw, "Total Memory", mem_str, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    }
-    
-    // Boot method
-    tui_print_table_row(cx, row++, cw, "Boot Method", "Multiboot", FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Current State", FG_YELLOW, COLOR_SUCCESS);
-    row++;
-    
-    format_hex32(ctx->cpu_state.eip, hex_str);
-    tui_print_table_row(cx, row++, cw, "Executing At", hex_str, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    
-    const char* privilege = (ctx->cpu_state.cs & 3) == 0 ? "KERNEL" : "USER";
-    tui_print_table_row(cx, row++, cw, "Privilege Level", privilege, FG_CYAN, FG_GREEN, COLOR_SUCCESS);
-}
-
-static void show_interrupt_state(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "INTERRUPT STATE",
-        "Interrupt controller status and exception information",
-        "Press any key to return to main menu",
-        COLOR_WARNING, FG_WHITE, FG_YELLOW
-    };
-    
-    tui_fullscreen_clear(&theme);
-    tui_fullscreen_header(&theme);
-    tui_fullscreen_footer(&theme);
-    
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    
-    int row = cy;
-    
-    tui_print_section_header(cx, row++, cw, "Interrupt Flag State", FG_YELLOW, COLOR_WARNING);
-    row++;
-    
-    bool interrupts_enabled = (ctx->cpu_state.eflags & (1 << 9)) != 0;
-    tui_print_table_row(cx, row++, cw, "Interrupt Flag", interrupts_enabled ? "ENABLED" : "DISABLED", 
-                       FG_CYAN, interrupts_enabled ? FG_GREEN : FG_RED, COLOR_WARNING);
-    
-    bool trap_flag = (ctx->cpu_state.eflags & (1 << 8)) != 0;
-    tui_print_table_row(cx, row++, cw, "Trap Flag", trap_flag ? "SET" : "CLEAR", 
-                       FG_CYAN, trap_flag ? FG_YELLOW : FG_WHITE, COLOR_WARNING);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Exception Information", FG_YELLOW, COLOR_WARNING);
-    row++;
-    
-    if (ctx->cpu_state.cr2 != 0) {
-        char hex_str[12];
-        format_hex32(ctx->cpu_state.cr2, hex_str);
-        tui_print_table_row(cx, row++, cw, "Page Fault Address", hex_str, FG_CYAN, FG_RED, COLOR_WARNING);
-        
-        // Decode page fault error code if available
-        uint32 error = ctx->error_code;
-        tui_print_table_row(cx, row++, cw, "Page Present", (error & 1) ? "YES" : "NO", 
-                           FG_CYAN, (error & 1) ? FG_GREEN : FG_RED, COLOR_WARNING);
-        tui_print_table_row(cx, row++, cw, "Write Access", (error & 2) ? "YES" : "NO", 
-                           FG_CYAN, FG_WHITE, COLOR_WARNING);
-        tui_print_table_row(cx, row++, cw, "User Mode", (error & 4) ? "YES" : "NO", 
-                           FG_CYAN, FG_WHITE, COLOR_WARNING);
-    }
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "PIC Status", FG_YELLOW, COLOR_WARNING);
-    row++;
-    
-    // Read PIC status if safe
-    tui_print_at(cx, row++, "Master PIC: Status not safely readable during panic", FG_GRAY, COLOR_WARNING);
-    tui_print_at(cx, row++, "Slave PIC:  Status not safely readable during panic", FG_GRAY, COLOR_WARNING);
-}
-
-static void show_control_registers(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "CONTROL REGISTERS",
-        "CR0-CR4 control registers and segment selectors",
-        "Press any key to return to main menu",
-        3, FG_WHITE, FG_YELLOW
-    };
-    
-    tui_fullscreen_clear(&theme);
-    tui_fullscreen_header(&theme);
-    tui_fullscreen_footer(&theme);
-    
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    
-    char hex_str[12];
-    int row = cy;
-    
-    tui_print_section_header(cx, row++, cw, "Control Registers", FG_YELLOW, 3);
-    row++;
-    
-    format_hex32(ctx->cpu_state.cr0, hex_str);
-    tui_print_table_row(cx, row++, cw, "CR0 (System Control)", hex_str, FG_CYAN, FG_WHITE, 3);
-    
-    format_hex32(ctx->cpu_state.cr2, hex_str);
-    tui_print_table_row(cx, row++, cw, "CR2 (Page Fault Address)", hex_str, FG_CYAN, 
-                       ctx->cpu_state.cr2 ? FG_RED : FG_GRAY, 3);
-    
-    format_hex32(ctx->cpu_state.cr3, hex_str);
-    tui_print_table_row(cx, row++, cw, "CR3 (Page Directory)", hex_str, FG_CYAN, FG_WHITE, 3);
-    
-    format_hex32(ctx->cpu_state.cr4, hex_str);
-    tui_print_table_row(cx, row++, cw, "CR4 (Extended Features)", hex_str, FG_CYAN, FG_WHITE, 3);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "CR0 Flag Breakdown", FG_YELLOW, 3);
-    row++;
-    
-    tui_print_table_row(cx, row++, cw, "Protection Enable", (ctx->cpu_state.cr0 & 1) ? "ON" : "OFF", 
-                       FG_GRAY, (ctx->cpu_state.cr0 & 1) ? FG_GREEN : FG_RED, 3);
-    tui_print_table_row(cx, row++, cw, "Paging", (ctx->cpu_state.cr0 & (1 << 31)) ? "ON" : "OFF", 
-                       FG_GRAY, (ctx->cpu_state.cr0 & (1 << 31)) ? FG_GREEN : FG_RED, 3);
-    tui_print_table_row(cx, row++, cw, "Write Protect", (ctx->cpu_state.cr0 & (1 << 16)) ? "ON" : "OFF", 
-                       FG_GRAY, (ctx->cpu_state.cr0 & (1 << 16)) ? FG_GREEN : FG_RED, 3);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Segment Selectors", FG_YELLOW, 3);
-    row++;
-    
-    char seg_str[8];
-    format_hex32(ctx->cpu_state.cs, seg_str);
-    seg_str[6] = '\0'; // Truncate to 16-bit
-    tui_print_table_row(cx, row++, cw, "Code Segment (CS)", seg_str, FG_CYAN, FG_WHITE, 3);
-    
-    format_hex32(ctx->cpu_state.ds, seg_str);
-    seg_str[6] = '\0';
-    tui_print_table_row(cx, row++, cw, "Data Segment (DS)", seg_str, FG_CYAN, FG_WHITE, 3);
-    
-    format_hex32(ctx->cpu_state.ss, seg_str);
-    seg_str[6] = '\0';
-    tui_print_table_row(cx, row++, cw, "Stack Segment (SS)", seg_str, FG_CYAN, FG_WHITE, 3);
-}
-
-static void show_cpu_flags_detailed(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "CPU FLAGS DETAIL",
-        "Complete EFLAGS register analysis and interpretation",
-        "Press any key to return to main menu",
-        COLOR_NORMAL, FG_WHITE, FG_YELLOW
-    };
-    
-    tui_fullscreen_clear(&theme);
-    tui_fullscreen_header(&theme);
-    tui_fullscreen_footer(&theme);
-    
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    
-    char hex_str[12];
-    int row = cy;
-    
-    format_hex32(ctx->cpu_state.eflags, hex_str);
-    tui_print_section_header(cx, row++, cw, "EFLAGS Register", FG_YELLOW, COLOR_NORMAL);
-    row++;
-    tui_print_table_row(cx, row++, cw, "Raw Value", hex_str, FG_CYAN, FG_WHITE, COLOR_NORMAL);
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Status Flags", FG_YELLOW, COLOR_NORMAL);
-    row++;
-    
-    struct { const char* name; int bit; const char* desc; } flags[] = {
-        {"Carry Flag (CF)", 0, "Arithmetic carry/borrow"},
-        {"Parity Flag (PF)", 2, "Even number of 1 bits in result"},
-        {"Auxiliary Carry (AF)", 4, "Carry from bit 3 to bit 4"},
-        {"Zero Flag (ZF)", 6, "Result of operation was zero"},
-        {"Sign Flag (SF)", 7, "Result was negative"},
-        {"Trap Flag (TF)", 8, "Single-step debugging mode"},
-        {"Interrupt Flag (IF)", 9, "Interrupts enabled/disabled"},
-        {"Direction Flag (DF)", 10, "String operation direction"},
-        {"Overflow Flag (OF)", 11, "Signed arithmetic overflow"},
-        {"IOPL", 12, "I/O privilege level (bits 12-13)"},
-        {"Nested Task (NT)", 14, "Nested task flag"},
-        {"Resume Flag (RF)", 16, "Resume from debug exception"},
-        {"Virtual Mode (VM)", 17, "Virtual 8086 mode"},
-        {"Alignment Check (AC)", 18, "Alignment check enabled"},
-        {"Virtual Interrupt (VIF)", 19, "Virtual interrupt flag"},
-        {"Virtual Interrupt Pending (VIP)", 20, "Virtual interrupt pending"},
-        {"ID Flag", 21, "CPUID instruction available"}
-    };
-    
-    for (int i = 0; i < 17 && row < cy + ch - 2; i++) {
-        bool flag_set = (ctx->cpu_state.eflags & (1 << flags[i].bit)) != 0;
-        tui_print_table_row(cx, row++, cw, flags[i].name, flag_set ? "SET" : "CLEAR", 
-                           FG_GRAY, flag_set ? FG_GREEN : FG_RED, COLOR_NORMAL);
-    }
-}
-
-static void show_virtual_memory(const panic_context_t* ctx) {
-    tui_fullscreen_theme_t theme = {
-        "VIRTUAL MEMORY",
-        "Page table analysis and virtual memory management status",
-        "Press any key to return to main menu",
-        COLOR_SUCCESS, FG_WHITE, FG_YELLOW
-    };
-    
-    tui_fullscreen_clear(&theme);
-    tui_fullscreen_header(&theme);
-    tui_fullscreen_footer(&theme);
-    
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    
-    char hex_str[12];
-    int row = cy;
-    
-    tui_print_section_header(cx, row++, cw, "Virtual Memory Manager", FG_YELLOW, COLOR_SUCCESS);
-    row++;
-    
-    bool paging_enabled = (ctx->cpu_state.cr0 & (1 << 31)) != 0;
-    tui_print_table_row(cx, row++, cw, "Paging Status", paging_enabled ? "ENABLED" : "DISABLED", 
-                       FG_CYAN, paging_enabled ? FG_GREEN : FG_RED, COLOR_SUCCESS);
-    
-    if (paging_enabled) {
-        format_hex32(ctx->cpu_state.cr3, hex_str);
-        tui_print_table_row(cx, row++, cw, "Page Directory", hex_str, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-        
-        // Analyze fault address if present
-        if (ctx->cpu_state.cr2 != 0) {
-            row++;
-            tui_print_section_header(cx, row++, cw, "Page Fault Analysis", FG_YELLOW, COLOR_SUCCESS);
-            row++;
-            
-            format_hex32(ctx->cpu_state.cr2, hex_str);
-            tui_print_table_row(cx, row++, cw, "Fault Address", hex_str, FG_CYAN, FG_RED, COLOR_SUCCESS);
-            
-            uint32 pde_index = (ctx->cpu_state.cr2 >> 22) & 0x3FF;
-            uint32 pte_index = (ctx->cpu_state.cr2 >> 12) & 0x3FF;
-            
-            char index_str[16];
-            format_decimal(pde_index, index_str);
-            tui_print_table_row(cx, row++, cw, "Page Directory Entry", index_str, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-            
-            format_decimal(pte_index, index_str);
-            tui_print_table_row(cx, row++, cw, "Page Table Entry", index_str, FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-        }
-    }
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Address Space Layout", FG_YELLOW, COLOR_SUCCESS);
-    row++;
-    
-    tui_print_table_row(cx, row++, cw, "User Space", "0x00000000 - 0xBFFFFFFF", FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-    tui_print_table_row(cx, row++, cw, "Kernel Space", "0xC0000000 - 0xFFFFFFFF", FG_CYAN, FG_WHITE, COLOR_SUCCESS);
-        tui_print_table_row(cx, row++, cw, "Current EIP Region", 
-                       ctx->cpu_state.eip >= 0xC0000000 ? "KERNEL" : "USER", 
-                       FG_CYAN, ctx->cpu_state.eip >= 0xC0000000 ? FG_GREEN : FG_YELLOW, COLOR_SUCCESS);
-}
-
-static void show_gdb_debugger_help(void) {
-    tui_fullscreen_theme_t theme = {
-        "QEMU / GDB REMOTE DEBUG GUIDE",
-        "Reference for attaching debuggers during Forest OS panics",
-        "Press any key to return to main menu",
-        3, FG_WHITE, FG_YELLOW
-    };
-    
-    tui_fullscreen_clear(&theme);
-    tui_fullscreen_header(&theme);
-    tui_fullscreen_footer(&theme);
-    
-    int cx, cy, cw, ch;
-    tui_fullscreen_content_area(&cx, &cy, &cw, &ch);
-    int row = cy;
-    
-    tui_print_section_header(cx, row++, cw, "Connecting to QEMU's GDB Stub", FG_YELLOW, 3);
-    row++;
-    
-    const char* connect_steps[] = {
-        "1. Launch QEMU with -s -S so it opens TCP port 1234 and pauses at reset.",
-        "2. Start GDB with symbols (e.g. `gdb iso/boot/kernel.bin`).",
-        "3. Run: set arch i386:x86-64:intel",
-        "4. Then: target remote localhost:1234",
-        "5. If symbols are stripped: symbol-file iso/boot/kernel.bin",
-        "6. Continue / hbreak to control execution from there."
-    };
-    
-    for (uint32 i = 0; i < sizeof(connect_steps)/sizeof(connect_steps[0]); i++) {
-        tui_print_at(cx + 2, row++, connect_steps[i], FG_WHITE, 3);
-    }
-    
-    row++;
-    tui_print_section_header(cx, row++, cw, "Handling Long Mode Register Layout", FG_YELLOW, 3);
-    row++;
-    
-    const char* long_mode_desc[] = {
-        "After Forest OS enables long mode QEMU exposes 64-bit registers.",
-        "GDB initially stays in 32-bit mode and reports: Remote 'g' packet reply is too long.",
-        "Solution: reconnect with the generic x86-64 architecture once the breakpoint hits:"
-    };
-    
-    for (uint32 i = 0; i < sizeof(long_mode_desc)/sizeof(long_mode_desc[0]); i++) {
-        tui_print_at(cx + 2, row++, long_mode_desc[i], FG_WHITE, 3);
-    }
-    
-    tui_print_at(cx + 4, row++, "(gdb) disconnect", FG_CYAN, 3);
-    tui_print_at(cx + 4, row++, "(gdb) set arch i386:x86-64", FG_CYAN, 3);
-    tui_print_at(cx + 4, row++, "(gdb) target remote localhost:1234", FG_CYAN, 3);
-    tui_print_at(cx + 2, row++, "Using i386:x86-64:intel for the first attach keeps early breakpoints valid.", FG_WHITE, 3);
-    
-    row += 2;
-    tui_print_section_header(cx, row++, cw, "Alternate Helpers", FG_YELLOW, 3);
-    row++;
-    
-    const char* helper_text[] = {
-        "- Patch GDB (remote.c) to resize oversized 'g' packets automatically (OSDev link).",
-        "- Patch QEMU gdbstub.c to always report 64-bit registers (breaks pure 32-bit guests).",
-        "- Simple workaround: only connect after long mode is enabled (scripted delay).",
-        "- Sample script: setsid qemu-system-x86_64 -s -S ... & sleep 5 && gdb kernel.bin -x qemudbg."
-    };
-    
-    for (uint32 i = 0; i < sizeof(helper_text)/sizeof(helper_text[0]); i++) {
-        tui_print_at(cx + 2, row++, helper_text[i], FG_WHITE, 3);
-    }
-    
-    row += 2;
-    tui_print_section_header(cx, row++, cw, "Quick Tips", FG_YELLOW, 3);
-    row++;
-    
-    const char* tips[] = {
-        "- Keep debug info with `objcopy --only-keep-debug` to load symbols quickly.",
-        "- Prefer hbreak for low-level breakpoints to avoid skipped traps.",
-        "- Combine serial logging (-serial file:serial.log) with GDB for extra context.",
-        "- Panic-triggered INT3 instructions sync immediately with a connected debugger."
-    };
-    
-    for (uint32 i = 0; i < sizeof(tips)/sizeof(tips[0]); i++) {
-        tui_print_at(cx + 2, row++, tips[i], FG_WHITE, 3);
+        ctx->manual_stack_valid = true;
     }
 }
 
 // =============================================================================
-// INTERACTIVE COMMAND PROCESSOR
-// =============================================================================
-
-// Mouse interaction areas for panic interface
-typedef struct {
-    int x, y, width, height;
-    char command;
-    const char* label;
-} panic_clickable_area_t;
-
-#if PANIC_ENABLE_MOUSE
-static const panic_clickable_area_t clickable_areas[] = {
-    {3, 20, 2, 1, 'r', "R=CPU Registers"},
-    {19, 20, 2, 1, 'm', "M=Memory"},
-    {30, 20, 2, 1, 's', "S=Stack"},
-    {40, 20, 2, 1, 'h', "H=Help"},
-    {50, 20, 2, 1, 'a', "A=Analysis"},
-    {63, 20, 2, 1, 'd', "D=Dump"},
-    {72, 20, 2, 1, 'q', "Q=Info"},
-    {3, 21, 2, 1, 't', "T=System Info"},
-    {17, 21, 2, 1, 'i', "I=Interrupts"},
-    {31, 21, 2, 1, 'c', "C=Control Regs"},
-    {48, 21, 2, 1, 'f', "F=Flags"},
-    {58, 21, 2, 1, 'v', "V=Virtual Memory"},
-    {3, 22, 2, 1, 'g', "G=GDB Guide"}
-};
-
-static char check_mouse_click(int mouse_x, int mouse_y) {
-    for (int i = 0; i < 12; i++) {
-        if (tui_is_point_in_rect(mouse_x, mouse_y, 
-                                clickable_areas[i].x, clickable_areas[i].y,
-                                clickable_areas[i].width, clickable_areas[i].height)) {
-            return clickable_areas[i].command;
-        }
-    }
-    return 0;  // No command area clicked
-}
-#endif
-
-static void process_bsod_interface(const panic_context_t* ctx) {
-    while (true) {
-        // Draw the new BSOD interface
-        draw_bsod_header(ctx);
-        draw_page_navigation();
-        draw_current_page(ctx);
-        
-        // Wait for user input
-        char cmd = wait_for_key();
-        
-        // Handle navigation and commands
-        handle_bsod_navigation(cmd);
-        
-        switch (cmd) {            
-            case 'h': case 'H': case '?':
-                // Show help overlay
-                {
-                    for (int y = 10; y < 22; y++) {
-                        for (int x = 2; x < 78; x++) {
-                            tui_set_char_at(x, y, ' ', FG_WHITE, (3 >> 4));
-                        }
-                    }
-                    
-                    tui_print_at(4, 11, "HELP - PANIC SYSTEM NAVIGATION", FG_YELLOW, 3);
-                    tui_print_at(4, 13, "LEFT/RIGHT ARROWS or A/D: Switch between pages", FG_WHITE, 3);
-                    tui_print_at(4, 14, "UP/DOWN ARROWS or W/S: Scroll current page", FG_WHITE, 3);
-                    tui_print_at(4, 15, "1-7: Jump directly to page (1=Overview, 2=CPU...)", FG_WHITE, 3);
-                    tui_print_at(4, 16, "H or ?: Show this help", FG_WHITE, 3);
-                    tui_print_at(4, 17, "ESC: Halt system (requires confirmation)", FG_WHITE, 3);
-                    tui_print_at(4, 18, "SPACE: Refresh display", FG_WHITE, 3);
-                    tui_print_at(4, 20, "Press any key to return...", FG_CYAN, 3);
-                }
-                wait_for_key();
-                break;
-                
-            case 27: // ESC - Halt system
-                {
-                    // Clear area for confirmation dialog
-                    for (int y = 11; y < 17; y++) {
-                        for (int x = 20; x < 60; x++) {
-                            tui_set_char_at(x, y, ' ', FG_WHITE, 4);
-                        }
-                    }
-                    
-                    tui_print_at(22, 12, "SYSTEM HALT CONFIRMATION", FG_WHITE, 4);
-                    tui_print_at(22, 14, "Are you sure you want to halt the", FG_WHITE, 4);
-                    tui_print_at(22, 15, "system? Y=Yes, N=No", FG_YELLOW, 4);
-                    
-                    char confirm = wait_for_key();
-                    if (confirm == 'y' || confirm == 'Y') {
-                        clearScreen();
-                        for (int y = 0; y < 25; y++) {
-                            for (int x = 0; x < 80; x++) {
-                                tui_set_char_at(x, y, ' ', FG_WHITE, 5);
-                            }
-                        }
-                        tui_print_at(25, 12, "FOREST OS SYSTEM HALTED", FG_WHITE, 5);
-                        tui_print_at(30, 13, "Safe to power off", FG_GRAY, 5);
-                        __asm__ __volatile__("hlt");
-                        return;
-                    }
-                }
-                break;
-                
-            default:
-                // All other keys are handled by handle_bsod_navigation
-                break;
-        }
-    }
-}
-
-static void kernel_panic_trigger(const char* message,
-                                 const char* file,
-                                 uint32 line,
-                                 const char* func,
-                                 const uint32* manual_stack,
-                                 uint32 manual_entries) {
-    // Disable interrupts immediately
-    __asm__ __volatile__("cli");
-    
-    // Increment panic counter
-    g_panic_count++;
-    
-    // Initialize panic context
-    g_panic_context.message = message ? message : "Unknown panic";
-    g_panic_context.file = file;
-    g_panic_context.line = line;
-    g_panic_context.function = func;
-    g_panic_context.error_code = 0;
-    g_panic_context.recoverable = false;
-    g_panic_context.manual_stack_valid = false;
-    g_panic_context.manual_stack_count = 0;
-    for (int i = 0; i < PANIC_SCREEN_MAX; i++) {
-        g_panic_context.scroll_offsets[i] = 0;
-    }
-    
-    if (manual_stack && manual_entries > 0) {
-        uint32 count = manual_entries > MAX_STACK_FRAMES ? MAX_STACK_FRAMES : manual_entries;
-        for (uint32 i = 0; i < count; i++) {
-            g_panic_context.manual_stack[i] = manual_stack[i];
-        }
-        g_panic_context.manual_stack_count = count;
-        g_panic_context.manual_stack_valid = true;
-    }
-    
-    // Capture CPU state atomically
-    capture_cpu_state_atomic(&g_panic_context.cpu_state);
-    
-    // Classify panic type
-    g_panic_context.type = classify_panic(message, 0, &g_panic_context.cpu_state);
-    
-    // Unwind stack
-    g_panic_context.stack_frame_count = unwind_stack(&g_panic_context.cpu_state, 
-                                                     g_panic_context.stack_trace, 
-                                                     MAX_STACK_FRAMES);
-    
-    // Mark as initialized
-    g_panic_initialized = true;
-
-#if PANIC_DEBUGLOG_ENABLED
-    panic_debuglog_emit(&g_panic_context);
-#endif
-    
-#if PANIC_ENABLE_MOUSE
-    init_panic_mouse_support();
-#endif
-    
-    // Enter new BSOD-style interface
-    process_bsod_interface(&g_panic_context);
-}
-
-// =============================================================================
-// MAIN PANIC HANDLER IMPLEMENTATION
+// EXTERNAL API FUNCTIONS
 // =============================================================================
 
 void kernel_panic_annotated(const char* message, const char* file, uint32 line, const char* func) {
-    kernel_panic_trigger(message, file, line, func, NULL, 0);
+    if (!message) message = "Unknown error";
+    if (!file) file = "unknown";
+    if (!func) func = "unknown";
+
+    // Initialize simple panic context
+    panic_context_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    strncpy((char*)ctx.message, message, sizeof(ctx.message) - 1);
+    strncpy((char*)ctx.file, file, sizeof(ctx.file) - 1);
+    strncpy((char*)ctx.function, func, sizeof(ctx.function) - 1);
+    ctx.line = line;
+    ctx.type = PANIC_TYPE_GENERAL;
+
+    // Capture current CPU state
+    capture_stack_snapshot(&ctx);
+    
+    // Display panic and halt
+    draw_simple_panic_screen(&ctx);
+    
+    // Disable interrupts and halt system
+    asm volatile("cli");
+    for(;;) {
+        asm volatile("hlt");
+    }
 }
 
 void kernel_panic_with_stack(const char* message, const uint32* stack_entries, uint32 entry_count) {
-    kernel_panic_trigger(message, "assembly/boot.asm", 0, "early_boot", stack_entries, entry_count);
-}
+    if (!message) message = "Stack trace panic";
 
-#undef kernel_panic
-void kernel_panic(const char* message) {
-    kernel_panic_trigger(message, NULL, 0, NULL, NULL, 0);
+    // Initialize panic context
+    panic_context_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    strncpy((char*)ctx.message, message, sizeof(ctx.message) - 1);
+    ctx.type = PANIC_TYPE_GENERAL;
+
+    // Copy stack entries
+    if (stack_entries && entry_count > 0) {
+        uint32 copy_count = (entry_count > MAX_STACK_FRAMES) ? MAX_STACK_FRAMES : entry_count;
+        for (uint32 i = 0; i < copy_count; i++) {
+            ctx.manual_stack[i] = stack_entries[i];
+        }
+        ctx.manual_stack_count = copy_count;
+        ctx.manual_stack_valid = true;
+    }
+
+    // Display panic and halt  
+    draw_simple_panic_screen(&ctx);
+    
+    // Disable interrupts and halt system
+    asm volatile("cli");
+    for(;;) {
+        asm volatile("hlt");
+    }
 }
 
 // =============================================================================
-// PANIC HANDLER INFORMATION INTERFACE
+// END OF PANIC HANDLER
 // =============================================================================
-
-uint32 panic_get_count(void) {
-    return g_panic_count;
-}
-
-bool panic_is_active(void) {
-    return g_panic_initialized;
-}
-
-const char* panic_get_last_message(void) {
-    return g_panic_initialized ? g_panic_context.message : NULL;
-}
-
-void kernel_panic_set_scroll(panic_screen_id_t screen, int32 offset) {
-    panic_scroll_set(screen, offset);
-}

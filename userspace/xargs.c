@@ -1,16 +1,17 @@
 #include "tool_runtime.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     char cmd[128];
     char args[256];
     if (tr_read_line("xargs: base command: ", cmd, sizeof(cmd)) < 0) {
         printf("xargs: no command provided\n");
-        exit(1);
+        return 1;
     }
     if (tr_read_line("xargs: arguments to append: ", args, sizeof(args)) < 0) {
         printf("xargs: no arguments provided\n");
-        exit(1);
+        return 1;
     }
     printf("constructed: %s %s\n", cmd, args);
-    exit(0);
+    return 0;
 }

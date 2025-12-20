@@ -17,8 +17,9 @@ static void cat_file(const char* path) {
     close(fd);
 }
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     printf("=== /README.txt ===\n");
     cat_file("/README.txt");
-    exit(0);
+    return 0;
 }

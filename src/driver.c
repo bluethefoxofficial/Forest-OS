@@ -137,3 +137,24 @@ bool driver_event_pop(driver_event_t* out_event) {
     g_event_count--;
     return true;
 }
+
+void driver_shutdown_all(void) {
+    if (!g_driver_manager_ready) {
+        return;
+    }
+
+    for (uint32 i = 0; i < DRIVER_MAX_COUNT; i++) {
+        driver_t* driver = g_drivers[i];
+        if (!driver) {
+            continue;
+        }
+        if (driver->shutdown && driver->initialized) {
+            driver->shutdown(driver);
+        }
+        driver_clear(driver);
+        g_drivers[i] = 0;
+    }
+
+    g_event_head = g_event_tail = g_event_count = 0;
+    g_driver_manager_ready = false;
+}

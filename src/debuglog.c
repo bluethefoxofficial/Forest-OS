@@ -2,6 +2,8 @@
 #include "include/io_ports.h"
 #include "include/types.h"
 #include "include/util.h"
+#include "include/string.h"
+#include <stdarg.h>
 
 #define DEBUGLOG_SERIAL_PORT 0x3F8
 #define DEBUGLOG_DEBUGCON_PORT 0xE9
@@ -100,4 +102,111 @@ void debuglog_write_dec(uint32 value) {
     while (pos > 0) {
         debuglog_write_char(buffer[--pos]);
     }
+}
+
+static void debuglog_write_uint_base(uint32 value, uint32 base, bool uppercase, bool prefix) {
+    char buffer[34];
+    static const char* hex_lower = "0123456789abcdef";
+    static const char* hex_upper = "0123456789ABCDEF";
+    const char* digits = uppercase ? hex_upper : hex_lower;
+
+    int pos = sizeof(buffer) - 1;
+    buffer[pos--] = '\0';
+    if (value == 0) {
+        buffer[pos--] = '0';
+    } else {
+        while (value > 0 && pos >= 0) {
+            buffer[pos--] = digits[value % base];
+            value /= base;
+        }
+    }
+
+    if (prefix && base == 16) {
+        buffer[pos--] = 'x';
+        buffer[pos--] = '0';
+    }
+
+    debuglog_write(&buffer[pos + 1]);
+}
+
+static void debuglog_vformat(const char* format, va_list args) {
+    while (format && *format) {
+        if (*format != '%') {
+            debuglog_write_char(*format++);
+            continue;
+        }
+
+        format++;
+        switch (*format) {
+            case '%':
+                debuglog_write_char('%');
+                break;
+            case 's': {
+                const char* str = va_arg(args, const char*);
+                debuglog_write(str ? str : "(null)");
+                break;
+            }
+            case 'c': {
+                int ch = va_arg(args, int);
+                debuglog_write_char((char)ch);
+                break;
+            }
+            case 'd':
+            case 'i': {
+                int32 value = va_arg(args, int32);
+                if (value < 0) {
+                    debuglog_write_char('-');
+                    value = -value;
+                }
+                debuglog_write_dec((uint32)value);
+                break;
+            }
+            case 'u': {
+                uint32 value = va_arg(args, uint32);
+                debuglog_write_dec(value);
+                break;
+            }
+            case 'x':
+            case 'X': {
+                uint32 value = va_arg(args, uint32);
+                bool uppercase = (*format == 'X');
+                debuglog_write_uint_base(value, 16, uppercase, false);
+                break;
+            }
+            case 'p': {
+                uintptr_t value = (uintptr_t)va_arg(args, void*);
+                debuglog_write_uint_base((uint32)value, 16, false, true);
+                break;
+            }
+            default:
+                debuglog_write_char('%');
+                debuglog_write_char(*format);
+                break;
+        }
+        format++;
+    }
+}
+
+void debuglog(debug_log_level_t level, const char* format, ...) {
+    if (!debuglog_initialized || !format) {
+        return;
+    }
+
+    static const char* level_prefix[] = {
+        "[INFO] ",
+        "[WARN] ",
+        "[ERROR]",
+        "[FATAL]"
+    };
+
+    int index = (int)level;
+    if (index < 0 || index >= (int)(sizeof(level_prefix) / sizeof(level_prefix[0]))) {
+        index = 0;
+    }
+
+    debuglog_write(level_prefix[index]);
+    va_list args;
+    va_start(args, format);
+    debuglog_vformat(format, args);
+    va_end(args);
 }

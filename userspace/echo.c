@@ -2,15 +2,25 @@
 #include "../src/include/libc/unistd.h"
 #include "../src/include/libc/stdlib.h"
 
-void _start(void) {
-    char buffer[128];
-    printf("echo: type a line and press enter\n> ");
-    ssize_t read_bytes = read(0, buffer, sizeof(buffer) - 1);
-    if (read_bytes > 0) {
-        buffer[read_bytes] = '\0';
-        printf("you said: %s\n", buffer);
-    } else {
-        printf("echo: no input available\n");
+int main(int argc, char **argv) {
+    int newline = 1;
+    int start_arg = 1;
+    
+    if (argc > 1 && argv[1][0] == '-' && argv[1][1] == 'n' && argv[1][2] == '\0') {
+        newline = 0;
+        start_arg = 2;
     }
-    exit(0);
+    
+    for (int i = start_arg; i < argc; i++) {
+        if (i > start_arg) {
+            printf(" ");
+        }
+        printf("%s", argv[i]);
+    }
+    
+    if (newline) {
+        printf("\n");
+    }
+    
+    return 0;
 }

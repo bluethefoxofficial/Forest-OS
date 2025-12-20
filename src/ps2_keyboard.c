@@ -19,6 +19,16 @@ static void kbd_memcpy(void *dest, const void *src, size_t num) {
     memory_copy((char*)src, (char*)dest, (int)num);
 }
 
+// Helper function for hex printing
+static void print_hex8(uint8 value) {
+    char hex_chars[] = "0123456789ABCDEF";
+    char hex_str[3];
+    hex_str[0] = hex_chars[(value >> 4) & 0xF];
+    hex_str[1] = hex_chars[value & 0xF];
+    hex_str[2] = '\0';
+    print(hex_str);
+}
+
 static keyboard_driver_state_t kbd_state;
 static keyboard_event_callback_t event_callback = NULL;
 
@@ -179,15 +189,37 @@ int ps2_keyboard_init(void) {
         return -1;
     }
     
-    bool translation_enabled = ps2_controller_is_translation_enabled();
-    if (translation_enabled) {
-        kbd_state.current_scancode_set = KB_SCANCODE_SET_1;  // controller converts to set 1
-    } else {
-        // Use native scan code set 2 when no translation is applied
-        if (!ps2_keyboard_set_scancode_set(KB_SCANCODE_SET_2)) {
-            print("[KB] Failed to set scan code set 2\n");
+    // Since we disabled translation in controller init, always use scan code set 2
+    if (!ps2_keyboard_set_scancode_set(KB_SCANCODE_SET_2)) {
+        print("[KB] Warning: Failed to set scan code set 2, trying default\n");
+        // Try to get current scan code set
+        if (!ps2_send_keyboard_command(KB_CMD_GET_SET_SCANCODE_SET)) {
+            print("[KB] Failed to query scan code set\n");
             return -1;
         }
+        if (!ps2_send_keyboard_data(0)) {
+            print("[KB] Failed to send scan code set query\n");
+            return -1;
+        }
+        
+        // Wait for response
+        if (!ps2_controller_wait_output_ready()) {
+            print("[KB] Timeout waiting for scan code set response\n");
+            return -1;
+        }
+        
+        uint8 current_set = ps2_controller_read_data();
+        print("[KB] Current scan code set: ");
+        print_hex8(current_set);
+        print("\n");
+        
+        // Use whatever set is currently active
+        if (current_set == 1 || current_set == 0x43) {
+            kbd_state.current_scancode_set = KB_SCANCODE_SET_1;
+        } else {
+            kbd_state.current_scancode_set = KB_SCANCODE_SET_2;
+        }
+    } else {
         kbd_state.current_scancode_set = KB_SCANCODE_SET_2;
     }
     
@@ -531,17 +563,39 @@ bool ps2_keyboard_disable_scanning(void) {
 }
 
 bool ps2_keyboard_reset(void) {
+    print("[KB] Attempting keyboard reset...\n");
+    
+    // First try to send reset command
     if (!ps2_send_keyboard_command(KB_CMD_RESET)) {
+        print("[KB] Failed to send reset command\n");
         return false;
     }
     
-    // Wait for self-test response
-    if (!ps2_controller_wait_output_ready()) {
-        return false;
+    // Wait longer for self-test response (keyboards can be slow)
+    uint32 timeout_count = 0;
+    const uint32 max_timeout = 5000000;  // Longer timeout for reset
+    
+    while (timeout_count < max_timeout) {
+        if (ps2_keyboard_data_available()) {
+            uint8 response = ps2_controller_read_data();
+            print("[KB] Reset response: 0x");
+            print_hex8(response);
+            print("\n");
+            
+            if (response == PS2_RESPONSE_KEYBOARD_SELF_TEST_PASSED) {
+                print("[KB] Keyboard reset successful\n");
+                return true;
+            } else if (response == PS2_RESPONSE_ERROR1 || response == PS2_RESPONSE_ERROR2) {
+                print("[KB] Keyboard self-test failed\n");
+                return false;
+            }
+            // Otherwise, might get ACK first, continue waiting
+        }
+        timeout_count++;
     }
     
-    uint8 response = ps2_controller_read_data();
-    return (response == PS2_RESPONSE_KEYBOARD_SELF_TEST_PASSED);
+    print("[KB] Keyboard reset timeout\n");
+    return false;
 }
 
 void ps2_keyboard_register_event_callback(keyboard_event_callback_t callback) {

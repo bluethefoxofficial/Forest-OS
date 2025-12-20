@@ -33,3 +33,8 @@ cpu_read_ds:
     mov ax, ds
     movzx eax, ax
     ret
+
+global cpu_read_cr2
+cpu_read_cr2:
+    mov eax, cr2
+    ret

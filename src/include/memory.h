@@ -83,13 +83,32 @@ typedef struct {
 typedef page_entry_t page_table_t[1024];
 typedef page_entry_t page_directory_t[1024];
 
+// Memory region types (multiboot/e820 compatible)
+#ifndef MEMORY_REGION_TYPE_T_DEFINED
+typedef enum {
+    MEMORY_REGION_INVALID = 0,
+    MEMORY_REGION_AVAILABLE = 1,
+    MEMORY_REGION_RESERVED = 2,
+    MEMORY_REGION_ACPI_RECLAIM = 3,
+    MEMORY_REGION_ACPI_NVS = 4,
+    MEMORY_REGION_BADRAM = 5,
+    MEMORY_REGION_KERNEL = 6,
+    MEMORY_REGION_INITRD = 7
+} memory_region_type_t;
+#define MEMORY_REGION_TYPE_T_DEFINED 1
+#endif
+
 // Memory region information from bootloader
 typedef struct {
-    uint64_t base_address;   // Base physical address
+    union {
+        uint64_t base_address;   // Base physical address
+        uint64_t base_addr;      // Alternate name for compatibility
+    };
     uint64_t length;         // Length in bytes
-    uint32_t type;           // Type (1=available, 2=reserved, etc.)
+    memory_region_type_t type;   // Region type
     bool validated;          // True when region has been validated
     bool usable;             // True when safe for allocations
+    const char* description; // Optional human-readable description
 } memory_region_t;
 #define MEMORY_REGION_T_DEFINED 1
 
@@ -252,6 +271,7 @@ void memory_dump_info(void);
 
 // Dump page table information
 void memory_dump_page_tables(page_directory_t* dir);
+void memory_debug_report_fault(uint32_t fault_addr, uint32_t error_code);
 
 // Check memory subsystem integrity
 bool memory_check_integrity(void);

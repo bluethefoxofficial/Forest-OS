@@ -48,3 +48,8 @@ bool timer_init(uint32 frequency) {
 uint32 timer_get_ticks(void) {
     return timer_ticks;
 }
+
+void timer_shutdown(void) {
+    pic_mask_irq(0);
+    interrupt_clear_handler(IRQ_TIMER);
+}

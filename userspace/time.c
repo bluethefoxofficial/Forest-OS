@@ -3,8 +3,9 @@
 #include "../src/include/libc/time.h"
 #include "../src/include/libc/unistd.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     int now = time(NULL);
     printf("epoch seconds: %d\n", now);
-    exit(0);
+    return 0;
 }

@@ -3,7 +3,8 @@
 #include "../src/include/libc/unistd.h"
 #include "../src/include/libc/stdlib.h"
 
-void _start(void) {
+int main(int argc, char **argv) {
+    (void)argc;    (void)argv;
     char buffer[512];
     int received = forest_http_get("/", buffer, sizeof(buffer) - 1);
     if (received > 0) {
@@ -12,5 +13,5 @@ void _start(void) {
     } else {
         printf("curl: failed to fetch loopback HTTP\n");
     }
-    exit(0);
+    return 0;
 }

@@ -83,9 +83,9 @@ memory_validation_result_t memory_validation_init(void) {
     // Initialize validation state
     validation_state.magic = VALIDATION_MAGIC;
     validation_state.min_valid_address = MEMORY_KERNEL_START;
-    validation_state.max_valid_address = MEMORY_MAX_USABLE_BYTES - 1;
+    validation_state.max_valid_address = 0xFFFFFFFFU;
     validation_state.min_kernel_address = MEMORY_KERNEL_START;
-    validation_state.max_kernel_address = MEMORY_USER_SPACE_START - 1;
+    validation_state.max_kernel_address = 0xFFFFFFFFU;
     validation_state.min_user_address = MEMORY_USER_SPACE_START;
     validation_state.max_user_address = MEMORY_USER_STACK_TOP - 1;
     validation_state.validation_count = 0;

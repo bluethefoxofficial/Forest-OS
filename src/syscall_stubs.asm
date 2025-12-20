@@ -24,19 +24,30 @@ isr128:
     mov fs, ax
     mov gs, ax
     
-    ; Create syscall frame structure on stack
-    ; The stack now contains (from top to bottom):
-    ; - Data segment (DS)
-    ; - General purpose registers (pusha)
+    ; Create syscall frame structure on stack matching the syscall_frame_t structure
+    ; After pusha, the stack contains (from top to bottom after DS push):
+    ; - DS (saved data segment)
+    ; - EDI (from pusha)
+    ; - ESI (from pusha) 
+    ; - EBP (from pusha)
+    ; - ESP (from pusha - original ESP)
+    ; - EBX (from pusha)
+    ; - EDX (from pusha)
+    ; - ECX (from pusha)
+    ; - EAX (from pusha)
     ; - Interrupt number (128)
     ; - Dummy error code (0)
     ; - Return address (EIP)
     ; - Code segment (CS)
     ; - Flags (EFLAGS)
     
-    push esp               ; Pass pointer to register frame
+    ; ESP now points to the syscall frame (after the DS push)
+    ; Adjust ESP to point to EAX (which is the first field in syscall_frame_t)
+    add esp, 4             ; Skip the DS we pushed
+    push esp               ; Pass pointer to syscall frame (starting at EAX)
     call syscall_handle    ; Call C handler
     add esp, 4             ; Remove frame pointer from stack
+    sub esp, 4             ; Restore ESP to point to DS
     
     pop eax                ; Restore data segment
     mov ds, ax

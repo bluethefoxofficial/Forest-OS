@@ -8,6 +8,7 @@
 #include "include/gdt.h"
 #include "include/spinlock.h"
 #include "include/string.h"
+#include "include/timer.h"
 
 // Explicit forward declaration to help compiler resolve implicit declaration
 extern page_directory_t* vmm_get_current_page_directory(void);
@@ -40,6 +41,9 @@ static void idle_task_function(void) {
 // This function prepares the kernel stack for the new task such that
 // when context_switch_asm loads this task, it finds a valid stack frame
 // for popa/popf/iret to jump to user mode.
+// Forward declaration for assembly function
+extern void task_start_usermode_asm(void);
+
 static void setup_initial_cpu_state(task_t* task, uint32 entry_point, uint32 user_stack_top, uint32 kernel_stack_top) {
     // The kernel stack for the new task will look like this (from high address to low):
     // ...
@@ -70,6 +74,13 @@ static void setup_initial_cpu_state(task_t* task, uint32 entry_point, uint32 use
     *(--stack_ptr) = 0; // EDX
     *(--stack_ptr) = 0; // ECX
     *(--stack_ptr) = 0; // EAX
+
+    // Add a fake EFLAGS and return address for the context switch
+    // When task_switch_asm does popf, it will restore these flags
+    *(--stack_ptr) = 0x202; // EFLAGS (interrupts enabled)
+    
+    // This return address is where task_switch_asm will jump to after popa/popf/ret
+    *(--stack_ptr) = (uint32)task_start_usermode_asm;
 
     // The task->kernel_stack should now point to this location
     // which is the top of the simulated stack frame for context switching.
@@ -309,6 +320,7 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
 
 // Defined in assembly (src/context_switch.asm)
 extern void task_switch_asm(uint32* old_esp_ptr, uint32 new_esp_val, uint32 new_page_directory_phys);
+extern void task_start_usermode_asm(void);
 
 void task_switch(task_t* next_task) {
     if (!next_task) {
@@ -434,7 +446,20 @@ void debug_print_ready_queue(void) {
 }
 
 void task_schedule(void) {
+    uint32 current_ticks = timer_get_ticks();
     spinlock_acquire(&task_scheduler_lock);
+
+    // Wake up sleeping tasks
+    task_t* t = ready_queue_head;
+    if (t) {
+        do {
+            if (t->state == TASK_STATE_WAITING && t->sleep_until_tick > 0 && current_ticks >= t->sleep_until_tick) {
+                t->state = TASK_STATE_READY;
+                t->sleep_until_tick = 0;
+            }
+            t = t->next;
+        } while (t != ready_queue_head);
+    }
     
     // Validate queue integrity first
     if (!validate_ready_queue()) {
@@ -632,5 +657,73 @@ void task_kill(uint32 pid) {
         print("[TASK] No task found with ID: ");
         print(int_to_string(pid));
         print(" to kill.\n");
+    }
+}
+
+void sleep_busy(uint32 microseconds) {
+    uint32 start_ticks = timer_get_ticks();
+    // Assuming 100Hz timer, so 1 tick = 10ms = 10000us
+    uint32 ticks_to_wait = microseconds / 10000;
+    if (microseconds % 10000 != 0) {
+        ticks_to_wait++;
+    }
+
+    uint32 end_ticks = start_ticks + ticks_to_wait;
+    while (timer_get_ticks() < end_ticks) {
+        // Busy wait
+        asm volatile("pause");
+    }
+}
+
+void sleep_interruptible(uint32 milliseconds) {
+    if (!current_task || milliseconds == 0) {
+        return;
+    }
+
+    // Assuming 100Hz timer, so 1 tick = 10ms
+    uint32 ticks_to_sleep = milliseconds / 10;
+    if (ticks_to_sleep == 0) {
+        ticks_to_sleep = 1;
+    }
+
+    uint32 current_ticks = timer_get_ticks();
+    current_task->sleep_until_tick = current_ticks + ticks_to_sleep;
+    current_task->state = TASK_STATE_WAITING;
+
+    task_schedule();
+}
+
+void task_shutdown_all(void) {
+    if (!ready_queue_head) {
+        return;
+    }
+
+    while (true) {
+        task_t* victim = 0;
+        task_t* iter = ready_queue_head;
+        if (!iter) {
+            break;
+        }
+
+        do {
+            if (iter->elf_info.entry_point != 0) {
+                victim = iter;
+                break;
+            }
+            iter = iter->next;
+        } while (iter && iter != ready_queue_head);
+
+        if (!victim) {
+            break;
+        }
+
+        if (victim == current_task) {
+            current_task = (victim->next != victim) ? victim->next : 0;
+        }
+
+        task_destroy(victim);
+        if (!ready_queue_head) {
+            break;
+        }
     }
 }

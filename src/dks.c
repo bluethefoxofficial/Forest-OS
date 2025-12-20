@@ -6,6 +6,7 @@
 #include "include/memory.h"
 #include "include/panic.h"
 #include "include/hardware.h"
+#include "include/power.h"
 
 static void dks_print_help(void) {
     print("Commands:\n");
@@ -17,6 +18,8 @@ static void dks_print_help(void) {
     print("  panic   - Trigger panic to demo debugging tools\n");
     print("  shell   - Retry launching the userspace shell\n");
     print("  halt    - Halt the CPU (requires reset/power cycle)\n");
+    print("  shutdown- Power off via ACPI\n");
+    print("  reboot  - Reboot the system via ACPI\n");
 }
 
 static void dks_format_uint(char* buffer, uint32 value) {
@@ -192,6 +195,16 @@ void dks_run(void) {
         } else if (strcmp(input, "halt") == 0) {
             print("[DKS] Halting CPU. Reset or power cycle required.\n");
             __asm__ __volatile__("cli; hlt");
+        } else if (strcmp(input, "shutdown") == 0) {
+            print("[DKS] Initiating ACPI shutdown...\n");
+            if (!power_shutdown()) {
+                print("[DKS] Shutdown failed; system halted.\n");
+            }
+        } else if (strcmp(input, "reboot") == 0) {
+            print("[DKS] Initiating ACPI reboot...\n");
+            if (!power_reboot()) {
+                print("[DKS] Reboot failed; system halted.\n");
+            }
         } else {
             print("[DKS] Unknown command '");
             print(input);
