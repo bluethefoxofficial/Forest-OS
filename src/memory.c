@@ -42,8 +42,7 @@ extern memory_result_t heap_init(uint32 start_addr, uint32 initial_size);
 extern memory_result_t vmm_identity_map_range(page_directory_t* dir, uint32 start, uint32 end, uint32 flags);
 extern page_directory_t* vmm_get_current_page_directory(void);
 extern void vmm_enable_paging(void);
-extern void page_fault_handler(uint32_t fault_addr, uint32_t error_code,
-                                uint32_t fault_eip, uint32_t fault_cs, uint32_t fault_eflags);
+extern void page_fault_handler(struct interrupt_frame* frame, uint32_t error_code);
 
 static memory_result_t parse_multiboot1_info(multiboot_info_t* mbi);
 static memory_result_t parse_multiboot2_info(uint32 info_addr);
@@ -326,12 +325,8 @@ extern char kernel_end;
 
 // Wrapper function to bridge interrupt handler interface to page fault handler
 static void memory_page_fault_wrapper(struct interrupt_frame* frame, uint32 error_code) {
-    // Get the fault address from CR2 register
-    uint32 fault_addr;
-    __asm__ __volatile__("mov %%cr2, %0" : "=r"(fault_addr));
-    
     // Call the actual page fault handler
-    page_fault_handler(fault_addr, error_code, 0, 0, 0);
+    page_fault_handler(frame, error_code);
 }
 
 memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {

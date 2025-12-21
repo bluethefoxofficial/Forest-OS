@@ -52,7 +52,7 @@ static void panic_format_hex(uint32_t value, char* out) {
 }
 
 // Minimal page fault handler that avoids recursion
-void page_fault_handler_minimal(uint32 fault_addr, uint32 error_code) {
+void page_fault_handler_minimal(uint32 fault_addr, uint32 error_code, struct interrupt_frame* frame) {
     // Use minimal stack protection for IRQ handlers
     STACK_PROTECT_IRQ();
     
@@ -150,14 +150,13 @@ void page_fault_handler_minimal(uint32 fault_addr, uint32 error_code) {
     for (int i = 0; middle[i] != '\0'; i++) *p++ = middle[i];
     for (int i = 0; err_buf[i] != '\0'; i++) *p++ = err_buf[i];
     *p = '\0';
-    panic_preload_fault_info(fault_addr, error_code, 0, 0, 0);
+    panic_preload_fault_info(fault_addr, error_code, frame->eip, frame->cs, frame->eflags);
     kernel_panic(panic_msg);
 }
 
 // External interface that matches the expected signature
-void page_fault_handler(uint32 fault_addr, uint32 error_code, uint32 fault_eip, uint32 fault_cs, uint32 fault_eflags) {
-    (void)fault_eip;
-    (void)fault_cs; 
-    (void)fault_eflags;
-    page_fault_handler_minimal(fault_addr, error_code);
+void page_fault_handler(struct interrupt_frame* frame, uint32 error_code) {
+    uint32 fault_addr;
+    __asm__ __volatile__("mov %%cr2, %0" : "=r"(fault_addr));
+    page_fault_handler_minimal(fault_addr, error_code, frame);
 }

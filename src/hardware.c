@@ -332,3 +332,11 @@ const char* hardware_get_feature_summary(void) {
 bool hardware_cpuid_supported(void) {
     return hardware_get_cpuid_info()->cpuid_supported;
 }
+
+bool hardware_cpu_has_tsc(void) {
+    const cpuid_info_t* info = hardware_get_cpuid_info();
+    if (!info->cpuid_supported) {
+        return false;
+    }
+    return (info->features.basic_edx & CPUID_FEAT_EDX_TSC) != 0;
+}

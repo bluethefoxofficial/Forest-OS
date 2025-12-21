@@ -644,6 +644,7 @@ static void panic_print_section_header(int x, int y, int width, const char* titl
 static panic_context_t g_panic_context;
 static bool g_panic_initialized = false;
 static uint32 g_panic_count = 0;
+static volatile bool g_panic_in_progress = false;
 // BSOD-style page system globals
 static bsod_page_t g_current_page = BSOD_PAGE_OVERVIEW;
 static int32 g_page_scroll_offset = 0;
@@ -751,6 +752,11 @@ static const panic_memory_region_t g_memory_regions[MAX_MEMORY_REGIONS] = {
 // =============================================================================
 
 static void capture_cpu_state_atomic(cpu_state_t* state) {
+    // Safety check - prevent accessing NULL or invalid pointers
+    if (!state) {
+        return;
+    }
+    
     uint32 temp_esp, temp_ebp;
     
     // Capture registers with minimal interference
@@ -2173,7 +2179,7 @@ static int get_panic_type_color(panic_type_t type) {
 #if PANIC_ENABLE_MOUSE
 
 
-static void panic_ps2_mouse_callback(ps2_mouse_event_t* ps2_event) {
+static void panic_ps2_mouse_callback(const ps2_mouse_event_t* ps2_event) {
     if (!ps2_event) return;
     
     // Update local PS/2 mouse state
@@ -2855,15 +2861,29 @@ static void draw_simple_panic_screen(const panic_context_t* ctx) {
     
 tty_display:
 
-    // Build a more expressive ANSI interface with a pinned background so the
-    // panic view stays readable even when the graphics stack fails back to
-    // legacy text mode.
+    // Create beautiful ANSI interface using only ASCII characters with rich colors
     const char* subsystem = panic_identify_subsystem(ctx);
-    tty_write_ansi("\x1b[0m\x1b[?25l\x1b[45m\x1b[97m\x1b[2J\x1b[H");
-    tty_write_ansi("\x1b[1;97;45m   FOREST OS KERNEL PANIC   \x1b[0m\x1b[45m\x1b[97m\n");
+    
+    // Initialize full-screen panic display with dark blue background
+    tty_write_ansi("\x1b[0m\x1b[?25l\x1b[2J\x1b[H");  // Reset, hide cursor, clear screen, home
+    tty_write_ansi("\x1b[44m\x1b[2J\x1b[H");  // Fill screen with blue background
+    
+    // Create dramatic header with ASCII art and gradients
+    tty_write_ansi("\x1b[1;41;97m");  // Bold white on red background
+    tty_write_ansi("################################################################################\n");
+    tty_write_ansi("#                                                                              #\n");
+    tty_write_ansi("#                        *** FOREST OS KERNEL PANIC ***                       #\n");
+    tty_write_ansi("#                           SYSTEM FAILURE DETECTED                           #\n");
+    tty_write_ansi("#                                                                              #\n");
+    tty_write_ansi("################################################################################\n");
+    tty_write_ansi("\x1b[0m\n");
 
-    tty_write_ansi("\x1b[95m==============================================================================\x1b[0m\x1b[45m\x1b[97m\n");
-    tty_write_ansi("\x1b[1;95mContext\x1b[0m\x1b[45m\x1b[97m\n");
+    // Beautiful section headers with ASCII art
+    tty_write_ansi("\x1b[1;46;30m");  // Bold black on cyan background
+    tty_write_ansi("================================================================================\n");
+    tty_write_ansi("                         [ CRASH CONTEXT ANALYSIS ]                           \n");
+    tty_write_ansi("================================================================================\n");
+    tty_write_ansi("\x1b[0m");
 
     if (ctx->message[0]) {
         char message_copy[sizeof(ctx->message)];
@@ -2878,10 +2898,10 @@ tty_display:
                 next++;
             }
             if (first_line) {
-                tty_write_ansi("  \x1b[1;31m• Message:\x1b[0m ");
+                tty_write_ansi("  \x1b[1;91m>> ERROR MESSAGE:\x1b[0;97m ");  // Bright red label, white text
                 first_line = false;
             } else {
-                tty_write_ansi("    \x1b[0;35m↳\x1b[0m ");
+                tty_write_ansi("     \x1b[95m-->\x1b[0;97m ");  // Purple continuation arrow
             }
             tty_write_ansi(token);
             tty_write_ansi("\n");
@@ -2889,132 +2909,158 @@ tty_display:
         }
     }
 
-    tty_write_ansi("  \x1b[1;34m• Classification:\x1b[0m ");
+    tty_write_ansi("  \x1b[1;94m>> CLASSIFICATION:\x1b[0;97m \x1b[1;93m");
     tty_write_ansi(get_panic_type_name(ctx->type));
-    tty_write_ansi("\n");
+    tty_write_ansi("\x1b[0m\n");
 
-    tty_write_ansi("  \x1b[1;92m• Subsystem Source:\x1b[0m ");
+    tty_write_ansi("  \x1b[1;92m>> SUBSYSTEM SOURCE:\x1b[0;97m \x1b[1;96m");
     tty_write_ansi(subsystem);
+    tty_write_ansi("\x1b[0m\n");
+
+    tty_write_ansi("  \x1b[1;93m>> RECOVERY STATUS:\x1b[0;97m ");
+    tty_write_ansi(ctx->recoverable ? "\x1b[1;92m[OK] Partial recovery possible\x1b[0m" : "\x1b[1;91m[CRITICAL] Manual intervention required\x1b[0m");
     tty_write_ansi("\n");
 
-    tty_write_ansi("  \x1b[1;33m• Recovery Window:\x1b[0m ");
-    tty_write_ansi(ctx->recoverable ? "Partial recovery possible" : "Manual intervention required");
-    tty_write_ansi("\n");
-
-    const char* backend = tty_uses_graphics_backend() ? "graphics text framebuffer" : "legacy text framebuffer";
-    tty_write_ansi("  \x1b[1;36m• TTY surface:\x1b[0m ");
+    const char* backend = tty_uses_graphics_backend() ? "graphics framebuffer" : "legacy text mode";
+    tty_write_ansi("  \x1b[1;96m>> TTY BACKEND:\x1b[0;97m ");
     tty_write_ansi(backend);
-    tty_write_ansi(" (ANSI renderer active)\n");
+    tty_write_ansi(" \x1b[1;95m[ANSI Enhanced]\x1b[0m\n");
 
     if (ctx->file[0]) {
-        tty_write_ansi("  \x1b[1;96m• Location:\x1b[0m ");
+        tty_write_ansi("  \x1b[1;95m>> SOURCE LOCATION:\x1b[0;97m \x1b[93m");
         tty_write_ansi(ctx->file);
         if (ctx->line > 0) {
             char line_str[16];
             format_decimal(ctx->line, line_str);
-            tty_write_ansi(" : ");
+            tty_write_ansi("\x1b[90m:");
             tty_write_ansi(line_str);
         }
         if (ctx->function[0]) {
-            tty_write_ansi(" (");
+            tty_write_ansi(" \x1b[36min \x1b[1;94m");
             tty_write_ansi(ctx->function);
-            tty_write_ansi(")");
+            tty_write_ansi("()");
         }
-        tty_write_ansi("\n");
+        tty_write_ansi("\x1b[0m\n");
     }
 
-    tty_write_ansi("\x1b[95m------------------------------------------------------------------------------\x1b[0m\x1b[45m\x1b[97m\n");
-    tty_write_ansi("\x1b[1;95mCPU Snapshot\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("\n\x1b[1;45;97m");  // Bold white on magenta background  
+    tty_write_ansi("================================================================================\n");
+    tty_write_ansi("                         [ CPU REGISTER SNAPSHOT ]                            \n");
+    tty_write_ansi("================================================================================\n");
+    tty_write_ansi("\x1b[0m");
     char hex_str[12];
     char reg_str[12];
     char dec_str[12];
     format_hex32(ctx->cpu_state.eip, hex_str);
-    tty_write_ansi("  \x1b[0;35mEIP\x1b[0m    : \x1b[1;97m");
+    tty_write_ansi("  \x1b[1;93m[*] EIP\x1b[0;97m    : \x1b[1;42;30m ");
     tty_write_ansi(hex_str);
-    tty_write_ansi("\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi(" \x1b[0m\n");
 
     format_hex32(ctx->cpu_state.esp, hex_str);
-    tty_write_ansi("  \x1b[0;35mESP\x1b[0m    : \x1b[1;97m");
+    tty_write_ansi("  \x1b[1;93m[*] ESP\x1b[0;97m    : \x1b[1;42;30m ");
     tty_write_ansi(hex_str);
-    tty_write_ansi("\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi(" \x1b[0m\n");
 
     format_hex32(ctx->cpu_state.eflags, hex_str);
-    tty_write_ansi("  \x1b[0;35mEFLAGS\x1b[0m : \x1b[1;97m");
+    tty_write_ansi("  \x1b[1;93m[*] EFLAGS\x1b[0;97m : \x1b[1;42;30m ");
     tty_write_ansi(hex_str);
-    tty_write_ansi("\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi(" \x1b[0m\n");
 
-    tty_write_ansi("  \x1b[0;95mGeneral registers:\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("  \x1b[1;94m[-] General Purpose Registers:\x1b[0m\n");
+    
+    // Display registers in a formatted table with beautiful colors
+    tty_write_ansi("    \x1b[1;44;97m EAX \x1b[0;97m ");
     format_hex32(ctx->cpu_state.eax, reg_str);
-    tty_write_ansi("    \x1b[0;36mEAX\x1b[0m ");
+    tty_write_ansi("\x1b[1;93m");
     tty_write_ansi(reg_str);
-    tty_write_ansi("    ");
+    tty_write_ansi("\x1b[0m   ");
+    tty_write_ansi("\x1b[1;44;97m EBX \x1b[0;97m ");
     format_hex32(ctx->cpu_state.ebx, reg_str);
-    tty_write_ansi("\x1b[0;36mEBX\x1b[0m ");
+    tty_write_ansi("\x1b[1;93m");
     tty_write_ansi(reg_str);
-    tty_write_ansi("\n");
+    tty_write_ansi("\x1b[0m\n");
+    
+    tty_write_ansi("    \x1b[1;44;97m ECX \x1b[0;97m ");
     format_hex32(ctx->cpu_state.ecx, reg_str);
-    tty_write_ansi("    \x1b[0;36mECX\x1b[0m ");
+    tty_write_ansi("\x1b[1;93m");
     tty_write_ansi(reg_str);
-    tty_write_ansi("    ");
+    tty_write_ansi("\x1b[0m   ");
+    tty_write_ansi("\x1b[1;44;97m EDX \x1b[0;97m ");
     format_hex32(ctx->cpu_state.edx, reg_str);
-    tty_write_ansi("\x1b[0;36mEDX\x1b[0m ");
+    tty_write_ansi("\x1b[1;93m");
     tty_write_ansi(reg_str);
-    tty_write_ansi("\n");
+    tty_write_ansi("\x1b[0m\n");
+    
+    tty_write_ansi("    \x1b[1;44;97m ESI \x1b[0;97m ");
     format_hex32(ctx->cpu_state.esi, reg_str);
-    tty_write_ansi("    \x1b[0;36mESI\x1b[0m ");
+    tty_write_ansi("\x1b[1;93m");
     tty_write_ansi(reg_str);
-    tty_write_ansi("    ");
+    tty_write_ansi("\x1b[0m   ");
+    tty_write_ansi("\x1b[1;44;97m EDI \x1b[0;97m ");
     format_hex32(ctx->cpu_state.edi, reg_str);
-    tty_write_ansi("\x1b[0;36mEDI\x1b[0m ");
+    tty_write_ansi("\x1b[1;93m");
     tty_write_ansi(reg_str);
-    tty_write_ansi("\n\n");
+    tty_write_ansi("\x1b[0m\n\n");
 
-    tty_write_ansi("\x1b[95m------------------------------------------------------------------------------\x1b[0m\x1b[45m\x1b[97m\n");
-    tty_write_ansi("\x1b[1;95mError Details\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("\x1b[48;2;64;0;128;38;2;255;192;255m");
+    tty_write_ansi("\x1b[1m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\x1b[0m\n");
+    tty_write_ansi("\x1b[48;2;64;0;128;38;2;255;255;255m");
+    tty_write_ansi("\x1b[1m🔴 ERROR FAULT ANALYSIS\x1b[0m\n");
     if (ctx->error_code) {
         format_hex32(ctx->error_code, hex_str);
         format_decimal(ctx->error_code, dec_str);
-        tty_write_ansi("  \x1b[1;31m• Error Code:\x1b[0m ");
+        tty_write_ansi("  \x1b[38;2;255;64;64m☠️  \x1b[1;31mError Code:\x1b[0m \x1b[48;2;64;0;0;38;2;255;255;255m ");
         tty_write_ansi(hex_str);
-        tty_write_ansi(" (");
+        tty_write_ansi(" \x1b[0m \x1b[2m(");
         tty_write_ansi(dec_str);
-        tty_write_ansi(")\n");
+        tty_write_ansi(" decimal)\x1b[0m\n");
     } else {
-        tty_write_ansi("  \x1b[1;31m• Error Code:\x1b[0m Not supplied/CPU generated\n");
+        tty_write_ansi("  \x1b[38;2;128;128;128mℹ️  \x1b[1;31mError Code:\x1b[0m \x1b[3mNot supplied/CPU generated\x1b[0m\n");
     }
-    tty_write_ansi("  \x1b[1;36m• Fault Address (CR2):\x1b[0m ");
+    tty_write_ansi("  \x1b[38;2;64;192;255m🎯 \x1b[1;36mFault Address (CR2):\x1b[0m ");
     if (ctx->cpu_state.cr2) {
         format_hex32(ctx->cpu_state.cr2, hex_str);
+        tty_write_ansi("\x1b[48;2;0;64;64;38;2;255;255;128m ");
         tty_write_ansi(hex_str);
-        tty_write_ansi("\n");
+        tty_write_ansi(" \x1b[0m\n");
     } else {
-        tty_write_ansi("No address captured\n");
+        tty_write_ansi("\x1b[3mNo address captured\x1b[0m\n");
     }
     format_hex32(ctx->cpu_state.eip, hex_str);
     format_hex32(ctx->cpu_state.cs, reg_str);
-    tty_write_ansi("  \x1b[1;94m• Instruction Source:\x1b[0m CS=");
+    tty_write_ansi("  \x1b[38;2;64;128;255m📦 \x1b[1;94mInstruction Source:\x1b[0m CS=\x1b[38;2;255;255;128m");
     tty_write_ansi(reg_str);
-    tty_write_ansi(" EIP=");
+    tty_write_ansi("\x1b[0m EIP=\x1b[38;2;255;255;128m");
     tty_write_ansi(hex_str);
-    tty_write_ansi("\n");
+    tty_write_ansi("\x1b[0m\n");
 
-    tty_write_ansi("\x1b[95m------------------------------------------------------------------------------\x1b[0m\x1b[45m\x1b[97m\n");
-    tty_write_ansi("\x1b[1;95mActions\x1b[0m\x1b[45m\x1b[97m\n");
-    tty_write_ansi("  \x1b[1;31m!\x1b[0;45;97m Safely power cycle the machine.\n");
-    tty_write_ansi("  \x1b[1;36m!\x1b[0;45;97m Capture this screen for debugging.\n");
-    tty_write_ansi("  \x1b[1;33m!\x1b[0;45;97m Review recent logs for hardware or memory faults.\n");
-    tty_write_ansi("  \x1b[1;35m!\x1b[0;45;97m Inspect recent drivers or kernel modules for regressions.\n\n");
+    tty_write_ansi("\x1b[48;2;64;0;128;38;2;255;192;255m");
+    tty_write_ansi("\x1b[1m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\x1b[0m\n");
+    tty_write_ansi("\x1b[48;2;64;0;128;38;2;255;255;255m");
+    tty_write_ansi("\x1b[1m🛠️  EMERGENCY RECOVERY ACTIONS\x1b[0m\n");
+    
+    tty_write_ansi("  \x1b[38;2;255;64;64m🔆 \x1b[1;5;31mCRITICAL:\x1b[0m \x1b[4mSafely power cycle the machine\x1b[0m\n");
+    tty_write_ansi("  \x1b[38;2;64;192;255m📷 \x1b[1;36mIMPORTANT:\x1b[0m Capture this screen for debugging\n");
+    tty_write_ansi("  \x1b[38;2;255;192;64m📈 \x1b[1;33mADVISED:\x1b[0m Review recent logs for hardware or memory faults\n");
+    tty_write_ansi("  \x1b[38;2;192;64;255m🔌 \x1b[1;35mOPTIONAL:\x1b[0m Inspect recent drivers or kernel modules for regressions\n\n");
 
-    tty_write_ansi("\x1b[95m------------------------------------------------------------------------------\x1b[0m\x1b[45m\x1b[97m\n");
-    tty_write_ansi("\x1b[1;95mANSI Diagnostic Palette\x1b[0m\x1b[45m\x1b[97m\n");
-    tty_write_ansi("  ");
-    tty_write_ansi("\x1b[40m  0  \x1b[41m  1  \x1b[42m  2  \x1b[43m  3  \x1b[44m  4  \x1b[45m  5  \x1b[46m  6  \x1b[47m  7  \x1b[0m\n");
-    tty_write_ansi("  ");
-    tty_write_ansi("\x1b[100m  8  \x1b[101m  9  \x1b[102m 10  \x1b[103m 11  \x1b[104m 12  \x1b[105m 13  \x1b[106m 14  \x1b[107m 15  \x1b[0m\x1b[45m\x1b[97m\n");
-    tty_write_ansi("  \x1b[0mForeground sweep:\x1b[30m 30\x1b[31m 31\x1b[32m 32\x1b[33m 33\x1b[34m 34\x1b[35m 35\x1b[36m 36\x1b[37m 37\x1b[0m\x1b[45m\x1b[97m\n");
-    tty_write_ansi("  \x1b[0mBright sweep:\x1b[90m 90\x1b[91m 91\x1b[92m 92\x1b[93m 93\x1b[94m 94\x1b[95m 95\x1b[96m 96\x1b[97m 97\x1b[0m\x1b[45m\x1b[97m\n\n");
+    tty_write_ansi("\x1b[48;2;64;0;128;38;2;255;192;255m");
+    tty_write_ansi("\x1b[1m▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\x1b[0m\n");
+    tty_write_ansi("\x1b[48;2;64;0;128;38;2;255;255;255m");
+    tty_write_ansi("\x1b[1m🎨 ENHANCED ANSI COLOR DIAGNOSTICS\x1b[0m\n");
+    
+    tty_write_ansi("  \x1b[1m[-] Standard 4-bit Colors:\x1b[0m\n  ");
+    tty_write_ansi("\x1b[40m\x1b[97m 0 \x1b[41m\x1b[97m 1 \x1b[42m\x1b[30m 2 \x1b[43m\x1b[30m 3 \x1b[44m\x1b[97m 4 \x1b[45m\x1b[97m 5 \x1b[46m\x1b[30m 6 \x1b[47m\x1b[30m 7 \x1b[0m\n  ");
+    tty_write_ansi("\x1b[100m\x1b[97m 8 \x1b[101m\x1b[97m 9 \x1b[102m\x1b[30m10 \x1b[103m\x1b[30m11 \x1b[104m\x1b[97m12 \x1b[105m\x1b[97m13 \x1b[106m\x1b[30m14 \x1b[107m\x1b[30m15 \x1b[0m\n");
+    
+    tty_write_ansi("  \x1b[1m[-] 24-bit Truecolor Sample:\x1b[0m\n  ");
+    tty_write_ansi("\x1b[48;2;255;0;0m   \x1b[48;2;255;128;0m   \x1b[48;2;255;255;0m   \x1b[48;2;128;255;0m   \x1b[48;2;0;255;0m   \x1b[48;2;0;255;128m   \x1b[48;2;0;255;255m   \x1b[48;2;0;128;255m   \x1b[48;2;0;0;255m   \x1b[48;2;128;0;255m   \x1b[48;2;255;0;255m   \x1b[48;2;255;0;128m   \x1b[0m\n");
+    
+    tty_write_ansi("  \x1b[1m[-] Text Style Effects:\x1b[0m \x1b[1mBOLD\x1b[0m \x1b[3mITALIC\x1b[0m \x1b[4mUNDERLINE\x1b[0m \x1b[9mSTRIKE\x1b[0m \x1b[7mINVERT\x1b[0m\n\n");
 
-    tty_write_ansi("\x1b[0;90mSystem halted. Press reset or power off.\x1b[0m\n");
+    tty_write_ansi("\x1b[48;2;128;0;0;38;2;255;255;255m");
+    tty_write_ansi("\x1b[1m    *** SYSTEM HALTED - MANUAL INTERVENTION REQUIRED ***     \x1b[0m\n");
+    tty_write_ansi("\x1b[5;31m\x1b[1m         >>> Press reset or power off to proceed <<<         \x1b[0m\n");
 }
 
 // =============================================================================
@@ -3024,11 +3070,12 @@ tty_display:
 static void capture_stack_snapshot(panic_context_t* ctx) {
     if (!ctx) return;
     
-    // Simple implementation - just capture basic CPU state
-    // In a full implementation, this would walk the stack
+    // Initialize stack trace data
     ctx->manual_stack_count = 0;
     ctx->manual_stack_valid = false;
-    ctx->stack_frame_count = 0;
+    
+    // Capture full stack trace using unwind_stack function
+    ctx->stack_frame_count = unwind_stack(&ctx->cpu_state, ctx->stack_trace, MAX_STACK_FRAMES);
     
     // Try to capture some basic stack information
     uint32 esp;
@@ -3050,6 +3097,14 @@ static void capture_stack_snapshot(panic_context_t* ctx) {
 // =============================================================================
 
 void kernel_panic_annotated(const char* message, const char* file, uint32 line, const char* func) {
+    // Prevent recursive panics
+    if (g_panic_in_progress) {
+        // Emergency halt - we're already panicking
+        __asm__ volatile("cli; hlt");
+        while(1) { __asm__ volatile("hlt"); }
+    }
+    g_panic_in_progress = true;
+    
     if (!message) message = "Unknown error";
     if (!file) file = "unknown";
     if (!func) func = "unknown";
@@ -3057,6 +3112,20 @@ void kernel_panic_annotated(const char* message, const char* file, uint32 line, 
     // Initialize simple panic context
     panic_context_t ctx;
     memset(&ctx, 0, sizeof(ctx));
+    
+    // Add debug logging about what was happening when panic occurred
+    if (debuglog_is_ready()) {
+        debuglog_write("[PANIC-DEBUG] Starting panic capture in: ");
+        debuglog_write(func ? func : "unknown");
+        debuglog_write(" at ");
+        debuglog_write(file ? file : "unknown");
+        debuglog_write(" line ");
+        debuglog_write_dec(line);
+        debuglog_write(" message: ");
+        debuglog_write(message ? message : "no message");
+        debuglog_write("\n");
+    }
+    
     capture_cpu_state_atomic(&ctx.cpu_state);
     strncpy((char*)ctx.message, message, sizeof(ctx.message) - 1);
     strncpy((char*)ctx.file, file, sizeof(ctx.file) - 1);
@@ -3081,6 +3150,24 @@ void kernel_panic_annotated(const char* message, const char* file, uint32 line, 
 
     // Capture current CPU state
     capture_stack_snapshot(&ctx);
+    
+    // Immediately log stack trace to debug output for diagnosis
+    if (debuglog_is_ready() && ctx.stack_frame_count > 0) {
+        debuglog_write("[PANIC-STACK] FULL CALL STACK TRACE:\n");
+        for (uint32 i = 0; i < ctx.stack_frame_count; i++) {
+            if (ctx.stack_trace[i].valid) {
+                debuglog_write("[PANIC-STACK] Frame #");
+                debuglog_write_dec(i);
+                debuglog_write(": 0x");
+                debuglog_write_hex(ctx.stack_trace[i].address);
+                debuglog_write(" called from 0x");
+                debuglog_write_hex(ctx.stack_trace[i].caller);
+                debuglog_write("\n");
+            }
+        }
+        debuglog_write("[PANIC-STACK] END OF STACK TRACE\n");
+    }
+    
     panic_store_context(&ctx);
     panic_debuglog_emit(&ctx);
     
@@ -3095,6 +3182,14 @@ void kernel_panic_annotated(const char* message, const char* file, uint32 line, 
 }
 
 void kernel_panic_with_stack(const char* message, const uint32* stack_entries, uint32 entry_count) {
+    // Prevent recursive panics
+    if (g_panic_in_progress) {
+        // Emergency halt - we're already panicking
+        __asm__ volatile("cli; hlt");
+        while(1) { __asm__ volatile("hlt"); }
+    }
+    g_panic_in_progress = true;
+    
     if (!message) message = "Stack trace panic";
 
     // Initialize panic context

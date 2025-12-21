@@ -5,6 +5,7 @@
 #include "include/timer.h"
 #include "include/util.h"
 #include "include/debuglog.h"
+#include <stdint.h>
 
 // =============================================================================
 // GLOBAL STATE
@@ -176,6 +177,36 @@ interrupt_handler_t interrupt_get_handler(uint8 int_num) {
 
 // Forward declaration
 static bool handle_invalid_opcode(struct interrupt_frame* frame);
+static bool handle_debug_exception(struct interrupt_frame* frame);
+
+// Debug Exception Handler (Vector 1)
+// Handle debug exceptions caused by debug registers, single stepping, etc.
+static bool handle_debug_exception(struct interrupt_frame* frame) {
+    static int exception_count = 0;
+    uint32_t dr6;
+    __asm__ volatile("mov %%dr6, %0" : "=r"(dr6));
+    
+    // Prevent infinite loops by limiting exception handling
+    exception_count++;
+    if (exception_count > 5) {
+        print_colored("[CRITICAL] Too many debug exceptions, disabling handler\n", 0x0C, 0x00);
+        return false; // Let it panic instead of infinite loop
+    }
+    
+    // Clear all debug status and control registers to stop the cascade
+    __asm__ volatile("mov %0, %%dr6" : : "r"(0));
+    __asm__ volatile("mov %0, %%dr7" : : "r"(0));
+    
+    // Clear the Trap Flag (TF) in EFLAGS to stop single stepping
+    frame->eflags &= ~0x100; // Clear TF bit
+    
+    // Also clear Resume Flag (RF) and other debug-related flags
+    frame->eflags &= ~0x10000; // Clear RF bit
+    
+    print_colored("[DEBUG] Debug exception handled and debug state cleared\n", 0x0A, 0x00);
+    
+    return true; // Indicate we handled it
+}
 
 // Linux-style Invalid Opcode Handler
 // Like Linux, we only handle actual exceptions - let CPU execute valid opcodes naturally
@@ -229,6 +260,11 @@ static void default_exception_handler(int int_no, struct interrupt_frame* frame,
     }
 
     switch (int_no) {
+        case 1: // EXCEPTION_DEBUG
+            if (handle_debug_exception(frame)) {
+                return; // Successfully handled
+            }
+            break;
         case EXCEPTION_INVALID_OPCODE:
             if (handle_invalid_opcode(frame)) {
                 return; // Successfully handled
@@ -301,6 +337,15 @@ void interrupt_early_init(void) {
     }
     
     print_colored("[INIT] Setting up interrupt descriptor table...\n", 0x0A, 0x00);
+    
+    // Clear debug registers to prevent spurious debug exceptions
+    uint32 zero = 0;
+    __asm__ volatile("mov %0, %%dr0" : : "r"(zero) : "memory");
+    __asm__ volatile("mov %0, %%dr1" : : "r"(zero) : "memory");
+    __asm__ volatile("mov %0, %%dr2" : : "r"(zero) : "memory");
+    __asm__ volatile("mov %0, %%dr3" : : "r"(zero) : "memory");
+    __asm__ volatile("mov %0, %%dr6" : : "r"(zero) : "memory");
+    __asm__ volatile("mov %0, %%dr7" : : "r"(zero) : "memory");
     
     // Initialize IDT descriptor
     idtr.limit = sizeof(idt) - 1;

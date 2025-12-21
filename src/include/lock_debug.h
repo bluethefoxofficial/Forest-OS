@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "spinlock.h"
+#include "system.h"
 
 #ifndef NULL
 #define NULL ((void*)0)
@@ -40,9 +41,7 @@ void lock_debug_detect_deadlocks(void);
 #define LOCK_DEBUG_CONTENTION(name) lock_debug_record_contention(name)
 
 static inline uint32 get_timestamp(void) {
-    uint32 low, high;
-    __asm__ volatile ("rdtsc" : "=a"(low), "=d"(high));
-    return low;
+    return (uint32)cpu_read_tsc();
 }
 
 typedef struct debug_spinlock {

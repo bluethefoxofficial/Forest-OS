@@ -54,11 +54,14 @@ extern uint32_t __stack_chk_guard;
 #define SSP_FUNCTION_EXIT() \
     ssp_function_exit(__ssp_canary)
 
-// Return address protection macro
+// Return address protection macro - safer version
 #define SSP_PROTECT_RETURN() do { \
-    uint32_t *__ret_addr; \
-    __asm__ volatile("lea 4(%%ebp), %0" : "=r"(__ret_addr)); \
-    ssp_protect_return_address(__ret_addr); \
+    uint32_t __current_ebp; \
+    __asm__ volatile("mov %%ebp, %0" : "=r"(__current_ebp)); \
+    if (__current_ebp != 0) { \
+        uint32_t *__ret_addr = (uint32_t*)(__current_ebp + 4); \
+        ssp_protect_return_address(__ret_addr); \
+    } \
 } while(0)
 
 // Enhanced stack validation macro

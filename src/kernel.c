@@ -9,13 +9,12 @@
 #include "include/screen.h"
 
 #include "include/memory_safe.h"
+#include "include/memory.h"
 #include "include/memory_region_manager.h"
 #include "include/page_fault_recovery.h"
 #include "include/acpi.h"
 #include "include/multiboot.h"
 #include "include/panic.h"
-#include "include/shell_loader.h"
-#include "include/dks.h"
 #include "include/ramdisk.h"
 #include "include/vfs.h"
 #include "include/task.h" // Added for task management
@@ -23,13 +22,11 @@
 #include "include/hardware.h"
 #include "include/string.h"
 #include "include/pci.h"
-#include "include/sound.h"
 #include "include/driver.h"
 #include "include/net.h"
 #include "include/debuglog.h"
 #include "include/gdt.h"
 #include "include/libc/stdio.h"
-#include "include/sync_test.h"
 #include "include/lock_debug.h"
 #include "include/graphics_init.h"
 #include "include/graphics/graphics_manager.h"
@@ -60,8 +57,8 @@ extern int enhanced_heap_run_tests(void);
 extern int bitmap_pmm_run_tests(void);
 
 void kmain(uint32 magic, uint32 mbi_addr);
-void keyboard_event_handler(keyboard_event_t* event);
-void mouse_event_handler(ps2_mouse_event_t* event);
+void keyboard_event_handler(const keyboard_event_t* event);
+void mouse_event_handler(const ps2_mouse_event_t* event);
 
 extern uint8 _stack_top;
 
@@ -85,6 +82,51 @@ static void kernel_panic_memory_error(const char* stage, const char* reason) {
 
 static bool g_graphics_ready = false;
 static bool g_framebuffer_tty_ready = false;
+static bool g_boot_failed = false;
+
+#ifndef CONFIG_DEBUG_BOOT
+#define CONFIG_DEBUG_BOOT 0
+#endif
+
+#define MOUSE_BUTTON_LEFT   0x01
+#define MOUSE_BUTTON_RIGHT  0x02
+#define MOUSE_BUTTON_MIDDLE 0x04
+#define MOUSE_LOG_CAPACITY  32
+
+typedef struct {
+    uint8 buttons;
+} mouse_log_entry_t;
+
+static struct {
+    mouse_log_entry_t entries[MOUSE_LOG_CAPACITY];
+    uint8 head;
+    uint8 tail;
+} g_mouse_log_buffer;
+
+static uint8 g_mouse_button_state = 0;
+
+#if CONFIG_DEBUG_BOOT
+static void kernel_debug_printf(const char* fmt, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    if (g_framebuffer_tty_ready) {
+        tty_write_ansi(buffer);
+    } else {
+        print(buffer);
+    }
+}
+#define KBOOT_DEBUG(...) kernel_debug_printf(__VA_ARGS__)
+#else
+#define KBOOT_DEBUG(...) ((void)0)
+#endif
+
+static void process_deferred_mouse_logs(void);
+static void mouse_log_enqueue(uint8 buttons);
+static bool mouse_log_pop(mouse_log_entry_t* entry);
 
 static void boot_banner(void) {
     // Display appropriate banner based on available console mode
@@ -124,6 +166,9 @@ static void boot_log_event(const char* label, bool ok) {
 static void boot_status(const char* label, bool ok) {
     static uint32 timestamp_counter = 3000;  // Start after initial messages
     boot_log_event(label, ok);
+    if (!ok) {
+        g_boot_failed = true;
+    }
     if (debuglog_is_ready()) {
         debuglog_write(ok ? "[BOOT][ OK ] " : "[BOOT][FAIL] ");
         debuglog_write(label);
@@ -282,7 +327,7 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     ssp_init();
     boot_status("Stack smashing protection", true);
     
-    // Run SSP functionality tests
+    // Run SSP functionality tests (safe mode)
     int ssp_test_result = ssp_run_tests();
     boot_status("SSP functionality tests", ssp_test_result == 0);
     
@@ -308,7 +353,9 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     
     // Run memory corruption detection tests
     int corruption_test_result = memory_corruption_run_tests();
-    boot_status("Memory corruption tests", corruption_test_result == 0);
+    boot_require("Memory corruption tests",
+                 corruption_test_result == 0,
+                 "Memory corruption self-test failed");
     
     // Initialize enhanced heap allocator
     enhanced_heap_config_t heap_config = {
@@ -326,7 +373,9 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     
     // Run enhanced heap tests
     int enhanced_heap_test_result = enhanced_heap_run_tests();
-    boot_status("Enhanced heap tests", enhanced_heap_test_result == 0);
+    boot_require("Enhanced heap tests",
+                 enhanced_heap_test_result == 0,
+                 "Enhanced heap self-test failed");
     
     tasks_init(); // Initialize task management
 
@@ -390,22 +439,44 @@ void kmain(uint32 magic, uint32 mbi_addr) {
         boot_status("Timer and task scheduling", true);
     }
     
-    if (!sound_system_init()) {
-        boot_status("Sound subsystem", false);
-    } else {
-        boot_status("Sound subsystem", true);
-    }
+    // Temporarily disable sound system to isolate crash
+#if CONFIG_DEBUG_BOOT
+    KBOOT_DEBUG("[KERNEL] Skipping sound system initialization (debugging crash)\n");
+#endif
+    boot_status("Sound subsystem", false);
 
+#if CONFIG_DEBUG_BOOT
+    KBOOT_DEBUG("[KERNEL] About to initialize lock debugging...\n");
+#endif
     // Initialize lock debugging
     lock_debug_init();
+#if CONFIG_DEBUG_BOOT
+    KBOOT_DEBUG("[KERNEL] Lock debugging initialized successfully\n");
+#endif
     
     // TODO: Run synchronization tests after task system is fully initialized
     // sync_test_run_all();
 
+#if CONFIG_DEBUG_BOOT
+    KBOOT_DEBUG("[KERNEL] About to enable interrupts...\n");
+#endif
     // Enable interrupts
     irq_enable_safe();
+#if CONFIG_DEBUG_BOOT
+    KBOOT_DEBUG("[KERNEL] Interrupts enabled successfully\n");
+#endif
 
-    // Demonstrate enhanced TTY capabilities
+    // Add a brief delay after enabling interrupts to stabilize
+    for (volatile int i = 0; i < 1000000; i++) { /* delay */ }
+
+    process_deferred_mouse_logs();
+
+#if CONFIG_DEBUG_BOOT
+    KBOOT_DEBUG("[INFO] Interrupts enabled successfully\n");
+
+    // Re-enabled TTY demonstration to capture stack trace of original panic
+    KBOOT_DEBUG("[INFO] Re-enabling TTY demonstration to debug original issue...\n");
+    
     tty_write_ansi("\x1b[36m[INFO]\x1b[0m Demonstrating enhanced TTY with full ANSI support:\n\n");
     
     // Test basic 16 colors
@@ -458,38 +529,83 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     
     tty_write_ansi("\n\x1b[32mEnhanced TTY demonstration complete!\x1b[0m\n");
     tty_write_ansi("\x1b[36m[INFO]\x1b[0m System ready with enhanced terminal capabilities.\n");
-    tty_write_ansi("\x1b[36m[INFO]\x1b[0m CPU will halt to preserve power.\n");
+#endif
+    if (g_boot_failed) {
+        print("[WARN] Boot reported failures; invoking kernel panic instead of halting silently.\n");
+        kernel_panic("Boot encountered unrecoverable failures. See boot log for details.");
+    }
+
+    tty_write_ansi("\x1b[36m[INFO]\x1b[0m CPU entering idle loop.\n");
     
-    // Just halt - this tests that our exception handling works when no errors occur
+    // Idle forever to keep interrupts and scheduled work running without hiding failures
     while (1) {
+        process_deferred_mouse_logs();
         __asm__ __volatile__("hlt");
     }
 }
 
-void keyboard_event_handler(keyboard_event_t* event) {
+static void mouse_log_enqueue(uint8 buttons) {
+    uint8 next_head = (g_mouse_log_buffer.head + 1) % MOUSE_LOG_CAPACITY;
+    g_mouse_log_buffer.entries[g_mouse_log_buffer.head].buttons = buttons;
+    g_mouse_log_buffer.head = next_head;
+
+    if (next_head == g_mouse_log_buffer.tail) {
+        g_mouse_log_buffer.tail = (g_mouse_log_buffer.tail + 1) % MOUSE_LOG_CAPACITY;
+    }
+}
+
+static bool mouse_log_pop(mouse_log_entry_t* entry) {
+    bool has_entry = false;
+    bool interrupts_enabled = irq_save_and_disable_safe();
+
+    if (g_mouse_log_buffer.head != g_mouse_log_buffer.tail) {
+        *entry = g_mouse_log_buffer.entries[g_mouse_log_buffer.tail];
+        g_mouse_log_buffer.tail = (g_mouse_log_buffer.tail + 1) % MOUSE_LOG_CAPACITY;
+        has_entry = true;
+    }
+
+    irq_restore_safe(interrupts_enabled);
+    return has_entry;
+}
+
+static void process_deferred_mouse_logs(void) {
+    mouse_log_entry_t entry;
+
+    while (mouse_log_pop(&entry)) {
+        char line[64];
+        snprintf(line, sizeof(line),
+                 "[MOUSE] Buttons L:%u R:%u M:%u\n",
+                 (entry.buttons & MOUSE_BUTTON_LEFT) ? 1 : 0,
+                 (entry.buttons & MOUSE_BUTTON_RIGHT) ? 1 : 0,
+                 (entry.buttons & MOUSE_BUTTON_MIDDLE) ? 1 : 0);
+
+        if (g_framebuffer_tty_ready) {
+            tty_write_ansi(line);
+        } else {
+            print(line);
+        }
+    }
+}
+
+void keyboard_event_handler(const keyboard_event_t* event) {
     (void)event;
     // Event hook kept for future extensions; input is handled via readStr().
 }
 
-void mouse_event_handler(ps2_mouse_event_t* event) {
-    static bool prev_left = false;
-    static bool prev_right = false;
-    static bool prev_middle = false;
+void mouse_event_handler(const ps2_mouse_event_t* event) {
+    uint8 buttons = 0;
+    if (event->left_button) {
+        buttons |= MOUSE_BUTTON_LEFT;
+    }
+    if (event->right_button) {
+        buttons |= MOUSE_BUTTON_RIGHT;
+    }
+    if (event->middle_button) {
+        buttons |= MOUSE_BUTTON_MIDDLE;
+    }
 
-    bool changed = (event->left_button != prev_left) ||
-                   (event->right_button != prev_right) ||
-                   (event->middle_button != prev_middle);
-
-    if (changed) {
-        tty_write_ansi("[MOUSE] Buttons L:");
-        tty_write_ansi(event->left_button ? "1" : "0");
-        tty_write_ansi(" R:");
-        tty_write_ansi(event->right_button ? "1" : "0");
-        tty_write_ansi(" M:");
-        tty_write_ansi(event->middle_button ? "1" : "0");
-        tty_write_ansi("\n");
-        prev_left = event->left_button;
-        prev_right = event->right_button;
-        prev_middle = event->middle_button;
+    if (buttons != g_mouse_button_state) {
+        g_mouse_button_state = buttons;
+        mouse_log_enqueue(buttons);
     }
 }

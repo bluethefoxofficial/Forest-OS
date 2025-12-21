@@ -124,13 +124,43 @@ bool sound_system_init(void) {
     const uint32 factory_count = sizeof(factories) / sizeof(factories[0]);
 
     for (uint32 i = 0; i < factory_count; i++) {
-        SoundDriver* driver = factories[i] ? factories[i]() : 0;
+        // Safely call driver factory with error checking
+        SoundDriver* driver = 0;
+        if (factories[i]) {
+            print("[SOUND] Trying driver factory #");
+            print_dec(i);
+            print("...\n");
+            
+            // Call factory function with safety
+            driver = factories[i]();
+            
+            print("[SOUND] Factory #");
+            print_dec(i);
+            print(" returned: ");
+            print_hex((uint32)driver);
+            print("\n");
+        }
+        
         if (!driver) {
+            print("[SOUND] No driver from factory #");
+            print_dec(i);
+            print("\n");
             continue;
         }
         bool detected = true;
         if (driver->detect) {
+            print("[SOUND] Running detection for driver: ");
+            print(driver->name ? driver->name : "unknown");
+            print("\n");
+            
+            // Call detect with error handling
             detected = driver->detect(driver);
+            
+            print("[SOUND] Detection result for ");
+            print(driver->name ? driver->name : "unknown");
+            print(": ");
+            print(detected ? "SUCCESS" : "FAILED");
+            print("\n");
         }
         if (!detected) {
             continue;

@@ -243,7 +243,7 @@ void corruption_safe_free(void *ptr, const char *caller) {
     // Poison freed memory
     corruption_poison_memory(ptr, tracker->size, POISON_FREED_MEMORY);
     
-    // Update tracker
+    // Update tracker accounting before releasing the slot
     tracker->state = ALLOC_STATE_FREED;
     tracker->free_time = ++current_time_counter;
     tracker->free_function = caller;
@@ -260,8 +260,18 @@ void corruption_safe_free(void *ptr, const char *caller) {
     extern void kfree(void *ptr);
     kfree(raw_ptr);
     
-    // Clear tracker after some delay (simple approach: mark as freed but keep for detection)
-    // In a more sophisticated implementation, we'd use a delayed cleanup
+    // Release tracker slot so future allocations don't exhaust the table.
+    tracker->magic = CORRUPTION_MAGIC_FREE;
+    tracker->ptr = NULL;
+    tracker->size = 0;
+    tracker->state = ALLOC_STATE_FREE;
+    tracker->alloc_time = 0;
+    tracker->free_time = 0;
+    tracker->canary_start = 0;
+    tracker->canary_end = 0;
+    tracker->alloc_function = NULL;
+    tracker->free_function = NULL;
+    tracker->checksum = 0;
 }
 
 // Validate pointer integrity

@@ -151,5 +151,6 @@ const char* hardware_get_feature_summary(void);
 
 // Quick helper to check CPUID availability.
 bool hardware_cpuid_supported(void);
+bool hardware_cpu_has_tsc(void);
 
 #endif

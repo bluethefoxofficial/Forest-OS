@@ -17,11 +17,14 @@
 static struct {
     bool initialized;
     enhanced_heap_config_t config;
-    uint32_t heap_start;
-    uint32_t heap_end;
     uint32_t heap_size;
     uint32_t allocation_sequence;
     uint32_t time_counter;
+    struct {
+        uint32_t start;
+        uint32_t end;
+    } regions[8];
+    uint32_t region_count;
     
     // Size class management
     size_class_t size_classes[HEAP_SIZE_CLASSES];
@@ -33,6 +36,8 @@ static struct {
     enhanced_heap_block_t* large_block_list;
     
 } enhanced_heap_state = {0};
+
+static void add_to_free_list(enhanced_heap_block_t* block, int size_class);
 
 // Emergency reporting function
 static void enhanced_heap_emergency_report(const char* msg, void* ptr) {
@@ -58,6 +63,64 @@ static uint32_t calculate_block_checksum(enhanced_heap_block_t* block) {
     checksum ^= block->corruption_canary;
     checksum ^= (uint32_t)block->alloc_function;
     return checksum;
+}
+
+// Allocate a new heap region backed by the legacy kernel heap.
+static bool enhanced_heap_add_region(size_t min_size) {
+    if (enhanced_heap_state.region_count >= sizeof(enhanced_heap_state.regions) / sizeof(enhanced_heap_state.regions[0])) {
+        print("[ENHANCED_HEAP] Region limit reached\n");
+        return false;
+    }
+    
+    size_t region_size = enhanced_heap_state.config.expansion_increment;
+    size_t overhead = sizeof(enhanced_heap_block_t) + sizeof(uint32_t);
+    if (region_size < min_size + overhead) {
+        region_size = min_size + overhead;
+    }
+    region_size = memory_align_up(region_size, MEMORY_PAGE_SIZE);
+    
+    uint8_t* region = (uint8_t*)kmalloc_aligned(region_size, MEMORY_PAGE_SIZE);
+    if (!region) {
+        print("[ENHANCED_HEAP] Failed to allocate heap region of size ");
+        print_dec(region_size / 1024);
+        print(" KB\n");
+        return false;
+    }
+    
+    enhanced_heap_block_t* block = (enhanced_heap_block_t*)region;
+    block->header_magic = ENHANCED_BLOCK_MAGIC;
+    block->size = region_size;
+    block->state = EBLOCK_FREE;
+    block->checksum = 0;
+    block->next_free = NULL;
+    block->prev_free = NULL;
+    block->alloc_sequence = 0;
+    block->alloc_time = 0;
+    block->alloc_function = NULL;
+    block->corruption_canary = 0xCAFEBABE ^ (uint32_t)block;
+    block->footer_magic = ENHANCED_GUARD_MAGIC;
+    
+    uint32_t* footer = (uint32_t*)(region + region_size - sizeof(uint32_t));
+    *footer = block->footer_magic;
+    block->checksum = calculate_block_checksum(block);
+    
+    enhanced_heap_state.regions[enhanced_heap_state.region_count].start = (uint32_t)region;
+    enhanced_heap_state.regions[enhanced_heap_state.region_count].end = (uint32_t)region + region_size;
+    enhanced_heap_state.region_count++;
+    enhanced_heap_state.heap_size += region_size;
+    enhanced_heap_state.stats.bytes_free += region_size - overhead;
+    enhanced_heap_state.stats.heap_expansions++;
+    
+    int size_class = enhanced_heap_size_to_class(block->size);
+    add_to_free_list(block, size_class);
+    
+    print("[ENHANCED_HEAP] Added region @0x");
+    print_hex((uint32_t)region);
+    print(" size ");
+    print_dec(region_size / 1024);
+    print(" KB\n");
+    
+    return true;
 }
 
 // Initialize size classes
@@ -96,9 +159,7 @@ void enhanced_heap_init(const enhanced_heap_config_t* config) {
     }
     
     // Initialize heap boundaries (use same approach as original heap)
-    enhanced_heap_state.heap_start = 0x10000000;  // 256MB virtual address
-    enhanced_heap_state.heap_end = enhanced_heap_state.heap_start + 4096; // Start with one page
-    enhanced_heap_state.heap_size = 4096;
+    enhanced_heap_state.heap_size = 0;
     
     // Initialize counters
     enhanced_heap_state.allocation_sequence = 0;
@@ -115,6 +176,14 @@ void enhanced_heap_init(const enhanced_heap_config_t* config) {
     }
     
     enhanced_heap_state.large_block_list = NULL;
+    enhanced_heap_state.region_count = 0;
+    
+    // Provision the first heap region so allocations can succeed.
+    if (!enhanced_heap_add_region(enhanced_heap_state.config.expansion_increment)) {
+        print("[ENHANCED_HEAP] Failed to reserve initial region\n");
+        return;
+    }
+    
     enhanced_heap_state.initialized = true;
     
     print("[ENHANCED_HEAP] Initialized with ");
@@ -133,9 +202,16 @@ bool enhanced_heap_validate_block(enhanced_heap_block_t* block) {
         return false;
     }
     
-    // Check if block is within heap bounds
-    if ((uint32_t)block < enhanced_heap_state.heap_start || 
-        (uint32_t)block >= enhanced_heap_state.heap_end) {
+    // Check if block is within one of the managed regions
+    bool in_region = false;
+    for (uint32_t i = 0; i < enhanced_heap_state.region_count; i++) {
+        if ((uint32_t)block >= enhanced_heap_state.regions[i].start &&
+            (uint32_t)block < enhanced_heap_state.regions[i].end) {
+            in_region = true;
+            break;
+        }
+    }
+    if (!in_region) {
         return false;
     }
     
@@ -222,6 +298,7 @@ static void add_to_free_list(enhanced_heap_block_t* block, int size_class) {
     block->state = EBLOCK_FREE;
     block->next_free = enhanced_heap_state.size_classes[size_class].free_list;
     block->prev_free = NULL;
+    block->checksum = calculate_block_checksum(block);
     
     if (enhanced_heap_state.size_classes[size_class].free_list) {
         enhanced_heap_state.size_classes[size_class].free_list->prev_free = block;
@@ -266,6 +343,7 @@ static enhanced_heap_block_t* split_block(enhanced_heap_block_t* block, size_t r
     // Update original block footer
     footer = (uint32_t*)((uint8_t*)block + required_size - sizeof(uint32_t));
     *footer = block->footer_magic;
+    block->checksum = calculate_block_checksum(block);
     
     return new_block;
 }
@@ -302,12 +380,32 @@ void* enhanced_heap_alloc(size_t size, const char* caller) {
         }
     }
     
-    // If no suitable block found, need to expand heap or allocate from large block list
+    // If no suitable block found, attempt to grow the heap region and retry
     if (!block) {
-        // For simplicity, fall back to original allocator for now
-        // In a complete implementation, we'd expand the heap here
-        print("[ENHANCED_HEAP] No suitable block found, falling back\n");
-        return NULL;
+        if (!enhanced_heap_add_region(total_size)) {
+            print("[ENHANCED_HEAP] Unable to expand heap for allocation\n");
+            return NULL;
+        }
+        
+        for (int i = size_class; i < HEAP_SIZE_CLASSES && !block; i++) {
+            block = find_best_fit_in_class(i, total_size);
+            if (block) {
+                remove_from_free_list(block, i);
+                
+                enhanced_heap_block_t* split = split_block(block, total_size);
+                if (split) {
+                    int split_class = enhanced_heap_size_to_class(split->size);
+                    add_to_free_list(split, split_class);
+                    enhanced_heap_state.stats.coalesce_operations++;
+                }
+                break;
+            }
+        }
+        
+        if (!block) {
+            print("[ENHANCED_HEAP] Expansion succeeded but no block available\n");
+            return NULL;
+        }
     }
     
     // Configure allocated block
@@ -329,6 +427,11 @@ void* enhanced_heap_alloc(size_t size, const char* caller) {
     enhanced_heap_state.stats.total_allocations++;
     enhanced_heap_state.stats.current_allocations++;
     enhanced_heap_state.stats.bytes_allocated += size;
+    if (enhanced_heap_state.stats.bytes_free >= block->size) {
+        enhanced_heap_state.stats.bytes_free -= block->size;
+    } else {
+        enhanced_heap_state.stats.bytes_free = 0;
+    }
     enhanced_heap_state.stats.size_class_stats[size_class].allocations++;
     
     // Integrate with corruption detection if enabled
@@ -377,6 +480,7 @@ void enhanced_heap_free(void* ptr, const char* caller) {
     enhanced_heap_state.stats.total_frees++;
     enhanced_heap_state.stats.current_allocations--;
     enhanced_heap_state.stats.bytes_allocated -= user_size;
+    enhanced_heap_state.stats.bytes_free += block->size;
     
     print("[ENHANCED_HEAP] Freed block of size ");
     print_dec(user_size);

@@ -19,6 +19,7 @@ void   mmio_write16(volatile void* address, uint16 value);
 void   mmio_write32(volatile void* address, uint32 value);
 
 uint64 cpu_read_tsc(void);
+bool cpu_has_tsc(void);
 
 typedef struct {
     uint8 seconds;

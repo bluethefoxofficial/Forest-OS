@@ -26,7 +26,7 @@ typedef struct {
     bool y_overflow;
 } ps2_mouse_state_t;
 
-typedef void (*ps2_mouse_event_callback_t)(ps2_mouse_event_t* event);
+typedef void (*ps2_mouse_event_callback_t)(const ps2_mouse_event_t* event);
 
 int ps2_mouse_init(void);
 void ps2_mouse_irq_handler(struct interrupt_frame* frame, uint32 error_code);

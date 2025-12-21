@@ -55,7 +55,8 @@
       "WebFetch(domain:github.com)",
       "Bash(./test_bga_constants)",
       "Bash(chmod:*)",
-      "Bash(/dev/null)"
+      "Bash(/dev/null)",
+      "Bash(/home/bluet/forestos-toolchain/install/bin/i686-forestos-objdump:*)"
     ],
     "deny": [],
     "ask": [],

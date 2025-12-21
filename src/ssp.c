@@ -4,6 +4,7 @@
 #include "include/debuglog.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "include/system.h"
 
 // =============================================================================
 // STACK SMASHING PROTECTION (SSP) IMPLEMENTATION
@@ -67,10 +68,7 @@ static uint32_t ssp_random_next(void) {
 // Generate a cryptographically strong canary value
 void ssp_generate_random_canary(void) {
     uint32_t entropy = 0;
-    uint32_t timestamp = 0;
-    
-    // Get some entropy from CPU timestamp counter if available
-    __asm__ volatile("rdtsc" : "=a"(timestamp) : : "edx");
+    uint32_t timestamp = (uint32_t)cpu_read_tsc();
     
     // Combine multiple entropy sources
     entropy ^= timestamp;
@@ -210,6 +208,14 @@ bool ssp_validate_return_address(uint32_t return_addr) {
     
     uint32_t code_start = ssp_kernel_start();
     uint32_t code_end = ssp_kernel_end();
+    
+    // If kernel symbols are not properly initialized, use reasonable defaults
+    if (code_start == 0 || code_end == 0 || code_start >= code_end) {
+        // Fallback: assume kernel is loaded at standard location
+        code_start = 0x00100000;  // 1MB (standard kernel load address)
+        code_end = 0x00200000;    // 2MB (reasonable kernel size)
+        ssp_log_warning("using fallback kernel bounds for return addr", return_addr);
+    }
 
     if (return_addr < code_start || return_addr >= code_end) {
         return false;
@@ -234,6 +240,14 @@ bool ssp_validate_stack_frame(uint32_t *frame_pointer) {
     
     uint32_t stack_lo = ssp_stack_bottom();
     uint32_t stack_hi = ssp_stack_top();
+    
+    // If stack symbols are not properly initialized, use reasonable defaults
+    if (stack_lo == 0 || stack_hi == 0 || stack_lo >= stack_hi) {
+        // Fallback: assume kernel stack is somewhere reasonable
+        stack_lo = 0x00080000;  // 512KB
+        stack_hi = 0x00100000;  // 1MB
+        ssp_log_warning("using fallback stack bounds", frame_addr);
+    }
 
     if (frame_addr < stack_lo || frame_addr >= stack_hi) {
         return false;

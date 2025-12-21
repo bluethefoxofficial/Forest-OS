@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+struct interrupt_frame;
+
 // =============================================================================
 // FOREST OS MEMORY MANAGEMENT SYSTEM v2.0
 // =============================================================================
@@ -252,8 +254,7 @@ uint32_t memory_get_usable_kb(void);
 // =============================================================================
 
 // Page fault handler
-void page_fault_handler(uint32_t fault_addr, uint32_t error_code,
-                        uint32_t fault_eip, uint32_t fault_cs, uint32_t fault_eflags);
+void page_fault_handler(struct interrupt_frame* frame, uint32_t error_code);
 
 // =============================================================================
 // UTILITIES AND DEBUGGING

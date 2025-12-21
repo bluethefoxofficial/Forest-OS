@@ -212,7 +212,8 @@ uint32 memory_get_usable_kb(void);
 // =============================================================================
 
 // Page fault handler
-void page_fault_handler(uint32 fault_addr, uint32 error_code);
+struct interrupt_frame;
+void page_fault_handler(struct interrupt_frame* frame, uint32 error_code);
 
 // =============================================================================
 // UTILITIES AND DEBUGGING

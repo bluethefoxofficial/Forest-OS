@@ -1,29 +1,32 @@
-# Compiler and Linker Configuration
-CC = gcc
-LD = ld
-AS = nasm
+# Default target
+.DEFAULT_GOAL := all
 
-# Custom Forest OS Toolchain Configuration
+# Custom Forest OS Toolchain Configuration  
 REPO_ROOT := $(abspath $(CURDIR))
 FORESTOS_TOOLCHAIN_DIR ?= $(REPO_ROOT)/forestos-toolchain
 FORESTOS_TOOLCHAIN_BIN ?= $(FORESTOS_TOOLCHAIN_DIR)/install/bin
 FORESTOS_TOOLCHAIN_PREFIX ?= $(FORESTOS_TOOLCHAIN_BIN)/i686-forestos-
-FORESTOS_CC = $(FORESTOS_TOOLCHAIN_PREFIX)gcc
-FORESTOS_LD = $(FORESTOS_TOOLCHAIN_PREFIX)ld
 FORESTOS_SYSROOT ?= $(FORESTOS_TOOLCHAIN_DIR)/sysroot
+
+# Compiler and Linker Configuration - Use Forest OS toolchain for all compilation
+CC = $(FORESTOS_TOOLCHAIN_PREFIX)gcc
+LD = $(FORESTOS_TOOLCHAIN_PREFIX)ld
+AS = nasm
+FORESTOS_CC = $(CC)
+FORESTOS_LD = $(LD)
 
 .PHONY: ensure-toolchain
 ensure-toolchain:
-	@if [ ! -x "$(FORESTOS_CC)" ]; then \
+	@if [ ! -x "$(CC)" ]; then \
 		echo "$(ERROR_COLOR)Forest OS toolchain not found.$(NO_COLOR)"; \
-		echo "Expected compiler: $(FORESTOS_CC)"; \
+		echo "Expected compiler: $(CC)"; \
 		echo "Populate forestos-toolchain/ with install/ and sysroot/"; \
 		echo "or override FORESTOS_TOOLCHAIN_DIR before running make."; \
 		exit 1; \
 	fi
 
 # Compiler and Linker Flags
-CFLAGS = -m32 -c -ffreestanding -Wall -g -O0 -I$(SRCDIR)/include -Ilibs/uacpi/include -march=i386 -mtune=i386 -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
+CFLAGS = -m32 -c -ffreestanding -Wall -g -O0 -I$(SRCDIR)/include -Ilibs/uacpi/include -march=i386 -mtune=i386 -mno-sse -mno-sse2 -mno-mmx -mno-3dnow --sysroot=$(FORESTOS_SYSROOT)
 INTERRUPT_CFLAGS = $(CFLAGS) -mgeneral-regs-only
 LDFLAGS = -m elf_i386 -T src/link.ld --allow-multiple-definition
 ASFLAGS = -f elf32
@@ -62,12 +65,14 @@ ISO = $(ISO_NAME)
 # Source Files
 CSOURCES = $(filter-out $(SRCDIR)/interrupt.c $(SRCDIR)/interrupt_handlers.c, $(wildcard $(SRCDIR)/*.c))
 GRAPHICS_CSOURCES = $(wildcard $(SRCDIR)/graphics/*.c $(SRCDIR)/graphics/drivers/*.c)
+PANICUI_CSOURCES = $(wildcard $(SRCDIR)/panicui*.c)
 ASMSOURCES = $(wildcard $(SRCDIR)/*.asm)
 UACPI_CSOURCES = $(wildcard $(UACPI_SRCDIR)/*.c)
 
 # Object Files
 COBJECTS = $(CSOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 GRAPHICS_OBJECTS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(GRAPHICS_CSOURCES))
+PANICUI_OBJECTS = $(PANICUI_CSOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 UACPI_OBJECTS = $(UACPI_CSOURCES:$(UACPI_SRCDIR)/%.c=$(OBJDIR)/uacpi_%.o)
 ASMOBJECTS = $(ASMSOURCES:$(SRCDIR)/%.asm=$(OBJDIR)/%.o)
 INTERRUPT_OBJECTS = $(OBJDIR)/interrupt.o $(OBJDIR)/interrupt_handlers.o
@@ -98,7 +103,7 @@ all: ensure-toolchain iso
 iso: ensure-toolchain $(ISO)
 	@echo "$(OK_COLOR)ISO ready: $(ISO)$(NO_COLOR)"
 
-$(OUTPUT): ensure-toolchain $(COBJECTS) $(GRAPHICS_OBJECTS) $(ASMOBJECTS) $(INTERRUPT_OBJECTS) $(USER_ELF_BIN) $(UACPI_OBJECTS)
+$(OUTPUT): $(COBJECTS) $(GRAPHICS_OBJECTS) $(PANICUI_OBJECTS) $(ASMOBJECTS) $(INTERRUPT_OBJECTS) $(USER_ELF_BIN) $(UACPI_OBJECTS)
 	@mkdir -p $(GRUBDIR)
 	@echo "$(OK_COLOR)Linking objects...$(NO_COLOR)"
 	@$(LD) $(LDFLAGS) -o $@ $^
@@ -143,12 +148,12 @@ $(OBJDIR)/graphics/drivers/%.o: $(SRCDIR)/graphics/drivers/%.c
 $(OBJDIR)/user_%.o: $(USER_SRCDIR)/%.c
 	@mkdir -p $(OBJDIR)
 	@echo "$(OK_COLOR)Compiling userspace $< with Forest OS toolchain...$(NO_COLOR)"
-	@PATH=$(FORESTOS_TOOLCHAIN_BIN):$$PATH $(FORESTOS_CC) $(USER_CFLAGS) -o $@ $<
+	@$(CC) $(USER_CFLAGS) -o $@ $<
 
 $(OBJDIR)/userlib_%.o: userspace/libc/%.c
 	@mkdir -p $(OBJDIR)
 	@echo "$(OK_COLOR)Compiling userspace libc $< with Forest OS toolchain...$(NO_COLOR)"
-	@PATH=$(FORESTOS_TOOLCHAIN_BIN):$$PATH $(FORESTOS_CC) $(USER_CFLAGS) -I$(SRCDIR)/include -o $@ $<
+	@$(CC) $(USER_CFLAGS) -I$(SRCDIR)/include -o $@ $<
 
 $(OBJDIR)/userspace_crt0.o: userspace/crt0.S
 	@mkdir -p $(OBJDIR)
@@ -158,7 +163,7 @@ $(OBJDIR)/userspace_crt0.o: userspace/crt0.S
 $(USER_ELFS): $(USER_SUPPORT_OBJECTS) $(OBJDIR)/userspace_crt0.o
 $(OBJDIR)/%.elf: $(OBJDIR)/user_%.o $(USER_SUPPORT_OBJECTS) $(OBJDIR)/userspace_crt0.o userspace/link.ld
 	@echo "$(OK_COLOR)Linking userspace ELF $(@F) with Forest OS toolchain...$(NO_COLOR)"
-	@PATH=$(FORESTOS_TOOLCHAIN_BIN):$$PATH $(FORESTOS_LD) -m elf_i386 -T userspace/link.ld -nostdlib -o $@ $(OBJDIR)/userspace_crt0.o $(OBJDIR)/user_$*.o $(USER_SUPPORT_OBJECTS)
+	@$(LD) -m elf_i386 -T userspace/link.ld -nostdlib -o $@ $(OBJDIR)/userspace_crt0.o $(OBJDIR)/user_$*.o $(USER_SUPPORT_OBJECTS)
 
 $(USER_ELF_BIN): $(USER_PRIMARY_ELF)
 	@echo "$(OK_COLOR)Embedding $(USER_PRIMARY_APP) ELF into kernel...$(NO_COLOR)"

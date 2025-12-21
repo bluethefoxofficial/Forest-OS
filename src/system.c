@@ -1,6 +1,7 @@
 #include "include/system.h"
 #include "include/string.h"
 #include "include/memory_safe.h"
+#include "include/hardware.h"
 
 static size_t guarded_copy_span(const void* dest, const void* src, size_t length) {
     size_t dest_span = memory_is_user_pointer(dest) ? memory_probe_user_buffer(dest, length)
@@ -164,7 +165,17 @@ void cpu_set_cr3(uint32 value) {
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(value));
 }
 
+bool cpu_has_tsc(void) {
+    return hardware_cpu_has_tsc();
+}
+
 uint64 cpu_read_tsc(void) {
+    static uint64 fallback_counter = 0;
+    
+    if (!cpu_has_tsc()) {
+        return ++fallback_counter;
+    }
+    
     uint32 low, high;
     __asm__ __volatile__("rdtsc" : "=a"(low), "=d"(high));
     return ((uint64)high << 32) | low;

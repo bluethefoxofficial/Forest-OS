@@ -539,21 +539,21 @@ static void tty_scroll_if_needed(void) {
 
 static void tty_handle_control(char c) {
     switch (c) {
-        case '\n':
+        case '\n': // Line Feed
             tty_state.cursor_x = 0;
             tty_state.cursor_y++;
             tty_scroll_if_needed();
             break;
-        case '\r':
+        case '\r': // Carriage Return
             tty_state.cursor_x = 0;
             break;
-        case '\b':
+        case '\b': // Backspace
             if (tty_state.cursor_x > 0) {
                 tty_state.cursor_x--;
                 tty_backend_put(' ');
             }
             break;
-        case '\t':
+        case '\t': // Horizontal Tab
             tty_state.cursor_x = (uint16_t)((tty_state.cursor_x + 8) & ~(uint16_t)(8 - 1));
             if (tty_state.cursor_x >= tty_state.cols) {
                 tty_state.cursor_x = 0;
@@ -561,13 +561,28 @@ static void tty_handle_control(char c) {
                 tty_scroll_if_needed();
             }
             break;
+        case '\v': // Vertical Tab
+            tty_state.cursor_y++;
+            tty_scroll_if_needed();
+            break;
+        case '\f': // Form Feed
+            tty_clear();
+            break;
+        case '\a': // Bell - could implement system beep
+            // For now, just ignore
+            break;
+        case 0x7F: // Delete
+            // Could implement character deletion
+            break;
         default:
-            tty_backend_put(c);
-            tty_state.cursor_x++;
-            if (tty_state.cursor_x >= tty_state.cols) {
-                tty_state.cursor_x = 0;
-                tty_state.cursor_y++;
-                tty_scroll_if_needed();
+            if (c >= 32 || c < 0) { // Printable characters
+                tty_backend_put(c);
+                tty_state.cursor_x++;
+                if (tty_state.cursor_x >= tty_state.cols) {
+                    tty_state.cursor_x = 0;
+                    tty_state.cursor_y++;
+                    tty_scroll_if_needed();
+                }
             }
             break;
     }
@@ -783,9 +798,28 @@ static void tty_handle_csi_command(char command) {
 
     if ((command == 'h' || command == 'l') && ansi_parser.private_mode) {
         for (size_t i = 0; i < ansi_parser.param_count; i++) {
-            if (ansi_parser.params[i] == 25) {
-                tty_state.cursor_visible = (command == 'h');
-                break;
+            switch (ansi_parser.params[i]) {
+                case 25:  // DECTCEM - cursor visibility
+                    tty_state.cursor_visible = (command == 'h');
+                    break;
+                case 47:  // Alternate screen buffer
+                case 1047:
+                case 1049:
+                    // Switch to/from alternate screen buffer
+                    // For now, just acknowledge but don't implement
+                    break;
+                case 7:   // Auto wrap mode
+                    // Enable/disable line wrapping
+                    break;
+                case 1:   // Application cursor keys
+                    ansi_parser.application_mode = (command == 'h');
+                    break;
+                case 2004: // Bracketed paste mode
+                    ansi_parser.bracketed_paste_mode = (command == 'h');
+                    break;
+                default:
+                    // Handle other private mode sequences
+                    break;
             }
         }
         return;
@@ -804,20 +838,34 @@ static void tty_handle_csi_command(char command) {
         return;
     }
 
-    if (command == 'A' || command == 'B' || command == 'C' || command == 'D') {
+    // Cursor movement commands
+    if (command == 'A' || command == 'B' || command == 'C' || command == 'D' || 
+        command == 'E' || command == 'F' || command == 'G') {
         int amount = (ansi_parser.param_count > 0 && ansi_parser.params[0] > 0) ? ansi_parser.params[0] : 1;
         switch (command) {
-            case 'A':
+            case 'A': // Cursor up
                 tty_state.cursor_y = (tty_state.cursor_y >= amount) ? (tty_state.cursor_y - amount) : 0;
                 break;
-            case 'B':
+            case 'B': // Cursor down
                 tty_state.cursor_y = (tty_state.cursor_y + amount < tty_state.rows) ? (tty_state.cursor_y + amount) : (tty_state.rows - 1);
                 break;
-            case 'C':
+            case 'C': // Cursor right
                 tty_state.cursor_x = (tty_state.cursor_x + amount < tty_state.cols) ? (tty_state.cursor_x + amount) : (tty_state.cols - 1);
                 break;
-            case 'D':
+            case 'D': // Cursor left
                 tty_state.cursor_x = (tty_state.cursor_x >= amount) ? (tty_state.cursor_x - amount) : 0;
+                break;
+            case 'E': // Cursor next line
+                tty_state.cursor_x = 0;
+                tty_state.cursor_y = (tty_state.cursor_y + amount < tty_state.rows) ? (tty_state.cursor_y + amount) : (tty_state.rows - 1);
+                break;
+            case 'F': // Cursor previous line
+                tty_state.cursor_x = 0;
+                tty_state.cursor_y = (tty_state.cursor_y >= amount) ? (tty_state.cursor_y - amount) : 0;
+                break;
+            case 'G': // Cursor horizontal absolute
+                if (amount > 0) amount--; // 1-based to 0-based
+                tty_state.cursor_x = (amount < tty_state.cols) ? amount : (tty_state.cols - 1);
                 break;
         }
         tty_apply_cursor();
@@ -842,10 +890,13 @@ static void tty_handle_csi_command(char command) {
     }
 
     if (command == 'J') {
-        // 0: cursor to end, 1: start to cursor, 2: entire screen
+        // 0: cursor to end, 1: start to cursor, 2: entire screen, 3: entire screen + saved lines
         int mode = (ansi_parser.param_count > 0) ? ansi_parser.params[0] : 0;
-        if (mode == 2) {
+        if (mode == 2 || mode == 3) {
             tty_clear();
+            tty_state.cursor_x = 0;
+            tty_state.cursor_y = 0;
+            tty_apply_cursor();
         } else if (mode == 0) {
             // Clear from cursor to end of screen
             uint16_t start_y = tty_state.cursor_y;
@@ -901,6 +952,91 @@ static void tty_handle_csi_command(char command) {
         tty_apply_cursor();
         return;
     }
+
+    // Cursor position request
+    if (command == 'n' && ansi_parser.param_count > 0 && ansi_parser.params[0] == 6) {
+        // Device Status Report - Cursor Position Report
+        // Should respond with ESC[{row};{col}R but we don't have output capability here
+        return;
+    }
+
+    // Insert/Delete operations
+    if (command == 'L' || command == 'M' || command == 'P' || command == '@') {
+        int amount = (ansi_parser.param_count > 0 && ansi_parser.params[0] > 0) ? ansi_parser.params[0] : 1;
+        // Implement insert/delete lines and characters
+        switch (command) {
+            case 'L': // Insert lines
+            case 'M': // Delete lines  
+            case 'P': // Delete characters
+            case '@': // Insert characters
+                // These would require more complex buffer manipulation
+                // For now, acknowledge but don't implement
+                break;
+        }
+        return;
+    }
+
+    // Scrolling region
+    if (command == 'r') {
+        // Set scrolling region: ESC[top;bottomr
+        uint16_t top = 1, bottom = tty_state.rows;
+        if (ansi_parser.param_count >= 1 && ansi_parser.params[0] > 0) {
+            top = (uint16_t)ansi_parser.params[0];
+        }
+        if (ansi_parser.param_count >= 2 && ansi_parser.params[1] > 0) {
+            bottom = (uint16_t)ansi_parser.params[1];
+        }
+        // Validate and store scrolling region (not fully implemented)
+        // For now, just acknowledge the command
+        (void)top; (void)bottom;
+        return;
+    }
+
+    // Set/reset modes (screen modes)
+    if ((command == 'h' || command == 'l') && !ansi_parser.private_mode) {
+        for (size_t i = 0; i < ansi_parser.param_count; i++) {
+            switch (ansi_parser.params[i]) {
+                case 4: // Insert mode
+                    // Would enable/disable insert mode
+                    break;
+                case 20: // Automatic newline mode
+                    // Would enable/disable automatic CR->CRLF
+                    break;
+                default:
+                    break;
+            }
+        }
+        return;
+    }
+
+    // Tab operations
+    if (command == 'I') {
+        // Forward tabulation
+        int amount = (ansi_parser.param_count > 0 && ansi_parser.params[0] > 0) ? ansi_parser.params[0] : 1;
+        for (int i = 0; i < amount; i++) {
+            tty_state.cursor_x = (uint16_t)((tty_state.cursor_x + 8) & ~(uint16_t)(8 - 1));
+            if (tty_state.cursor_x >= tty_state.cols) {
+                tty_state.cursor_x = 0;
+                tty_state.cursor_y++;
+                tty_scroll_if_needed();
+            }
+        }
+        tty_apply_cursor();
+        return;
+    }
+    if (command == 'Z') {
+        // Backward tabulation
+        int amount = (ansi_parser.param_count > 0 && ansi_parser.params[0] > 0) ? ansi_parser.params[0] : 1;
+        for (int i = 0; i < amount; i++) {
+            if (tty_state.cursor_x >= 8) {
+                tty_state.cursor_x = (uint16_t)((tty_state.cursor_x - 1) & ~(uint16_t)(8 - 1));
+            } else {
+                tty_state.cursor_x = 0;
+            }
+        }
+        tty_apply_cursor();
+        return;
+    }
 }
 
 static void tty_process_ansi(char c) {
@@ -952,6 +1088,28 @@ static void tty_process_ansi(char c) {
                 tty_state.blink = false;
                 tty_state.inverse = false;
                 tty_state.use_true_colors = false;
+                ansi_parser.state = ANSI_STATE_NORMAL;
+            } else if (c == 'M') {
+                // Reverse Index - move cursor up one line, scroll if needed
+                if (tty_state.cursor_y > 0) {
+                    tty_state.cursor_y--;
+                } else {
+                    // Would need to implement reverse scroll here
+                }
+                tty_apply_cursor();
+                ansi_parser.state = ANSI_STATE_NORMAL;
+            } else if (c == 'D') {
+                // Index - move cursor down one line, scroll if needed
+                tty_state.cursor_y++;
+                tty_scroll_if_needed();
+                tty_apply_cursor();
+                ansi_parser.state = ANSI_STATE_NORMAL;
+            } else if (c == 'E') {
+                // Next Line - move to start of next line
+                tty_state.cursor_x = 0;
+                tty_state.cursor_y++;
+                tty_scroll_if_needed();
+                tty_apply_cursor();
                 ansi_parser.state = ANSI_STATE_NORMAL;
             } else {
                 // Unknown escape, treat literally

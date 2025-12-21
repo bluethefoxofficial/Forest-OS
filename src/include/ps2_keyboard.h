@@ -134,7 +134,7 @@ typedef struct {
 } keyboard_driver_state_t;
 
 // Callback function type for keyboard events
-typedef void (*keyboard_event_callback_t)(keyboard_event_t* event);
+typedef void (*keyboard_event_callback_t)(const keyboard_event_t* event);
 
 // Function prototypes
 int ps2_keyboard_init(void);

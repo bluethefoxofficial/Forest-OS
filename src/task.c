@@ -87,6 +87,31 @@ static void setup_initial_cpu_state(task_t* task, uint32 entry_point, uint32 use
     task->kernel_stack = (uint32)stack_ptr;
 }
 
+static uint32* prepare_kernel_task_stack(void (*entry_point)(void), uint32* stack_top) {
+    if (!stack_top) {
+        return NULL;
+    }
+    
+    uint32* sp = stack_top;
+    
+    // Return address for the final RET in task_switch_asm
+    *(--sp) = (uint32)entry_point;
+    // EFLAGS to be restored by POPF (keep IF set)
+    *(--sp) = 0x202;
+    
+    // Values consumed by POPA (push in reverse order so that the first POPA writes EDI)
+    *(--sp) = 0; // EAX
+    *(--sp) = 0; // ECX
+    *(--sp) = 0; // EDX
+    *(--sp) = 0; // EBX
+    *(--sp) = 0; // Dummy ESP
+    *(--sp) = 0; // EBP
+    *(--sp) = 0; // ESI
+    *(--sp) = 0; // EDI
+    
+    return sp;
+}
+
 
 // Helper function to create a kernel task with a function pointer
 static task_t* create_kernel_task(void (*entry_point)(void), const char* name) {
@@ -122,14 +147,12 @@ static task_t* create_kernel_task(void (*entry_point)(void), const char* name) {
     
     // Set up kernel stack for entry point
     uint32* stack_ptr = (uint32*)(kernel_stack_vaddr + KERNEL_STACK_SIZE);
-    
-    // Push return address (should never return, but just in case)  
-    *(--stack_ptr) = 0; // Return address (never used)
-    *(--stack_ptr) = (uint32)entry_point;  // Entry point
-    *(--stack_ptr) = 0; // EBP
-    *(--stack_ptr) = 0; // EBX
-    *(--stack_ptr) = 0; // ESI
-    *(--stack_ptr) = 0; // EDI
+    stack_ptr = prepare_kernel_task_stack(entry_point, stack_ptr);
+    if (!stack_ptr) {
+        kfree((void*)kernel_stack_vaddr);
+        kfree(new_task);
+        return 0;
+    }
     
     new_task->kernel_stack = (uint32)stack_ptr;
 
