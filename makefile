@@ -4,10 +4,23 @@ LD = ld
 AS = nasm
 
 # Custom Forest OS Toolchain Configuration
-FORESTOS_TOOLCHAIN_PREFIX = /home/bluet/forestos-toolchain/install/bin/i686-forestos-
+REPO_ROOT := $(abspath $(CURDIR))
+FORESTOS_TOOLCHAIN_DIR ?= $(REPO_ROOT)/forestos-toolchain
+FORESTOS_TOOLCHAIN_BIN ?= $(FORESTOS_TOOLCHAIN_DIR)/install/bin
+FORESTOS_TOOLCHAIN_PREFIX ?= $(FORESTOS_TOOLCHAIN_BIN)/i686-forestos-
 FORESTOS_CC = $(FORESTOS_TOOLCHAIN_PREFIX)gcc
 FORESTOS_LD = $(FORESTOS_TOOLCHAIN_PREFIX)ld
-FORESTOS_SYSROOT = /home/bluet/forestos-toolchain/sysroot
+FORESTOS_SYSROOT ?= $(FORESTOS_TOOLCHAIN_DIR)/sysroot
+
+.PHONY: ensure-toolchain
+ensure-toolchain:
+	@if [ ! -x "$(FORESTOS_CC)" ]; then \
+		echo "$(ERROR_COLOR)Forest OS toolchain not found.$(NO_COLOR)"; \
+		echo "Expected compiler: $(FORESTOS_CC)"; \
+		echo "Populate forestos-toolchain/ with install/ and sysroot/"; \
+		echo "or override FORESTOS_TOOLCHAIN_DIR before running make."; \
+		exit 1; \
+	fi
 
 # Compiler and Linker Flags
 CFLAGS = -m32 -c -ffreestanding -Wall -g -O0 -I$(SRCDIR)/include -Ilibs/uacpi/include -march=i386 -mtune=i386 -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
@@ -79,13 +92,13 @@ USER_CFLAGS = -m32 -c -ffreestanding -nostdlib -Wall -g -O0 -I$(SRCDIR)/include 
 # Build Targets
 .PHONY: all iso build run clean help
 
-all: iso
+all: ensure-toolchain iso
 	@echo "$(OK_COLOR)Build successful (kernel + ISO).$(NO_COLOR)"
 
-iso: $(ISO)
+iso: ensure-toolchain $(ISO)
 	@echo "$(OK_COLOR)ISO ready: $(ISO)$(NO_COLOR)"
 
-$(OUTPUT): $(COBJECTS) $(GRAPHICS_OBJECTS) $(ASMOBJECTS) $(INTERRUPT_OBJECTS) $(USER_ELF_BIN) $(UACPI_OBJECTS)
+$(OUTPUT): ensure-toolchain $(COBJECTS) $(GRAPHICS_OBJECTS) $(ASMOBJECTS) $(INTERRUPT_OBJECTS) $(USER_ELF_BIN) $(UACPI_OBJECTS)
 	@mkdir -p $(GRUBDIR)
 	@echo "$(OK_COLOR)Linking objects...$(NO_COLOR)"
 	@$(LD) $(LDFLAGS) -o $@ $^
@@ -130,12 +143,12 @@ $(OBJDIR)/graphics/drivers/%.o: $(SRCDIR)/graphics/drivers/%.c
 $(OBJDIR)/user_%.o: $(USER_SRCDIR)/%.c
 	@mkdir -p $(OBJDIR)
 	@echo "$(OK_COLOR)Compiling userspace $< with Forest OS toolchain...$(NO_COLOR)"
-	@PATH=/home/bluet/forestos-toolchain/install/bin:$$PATH $(FORESTOS_CC) $(USER_CFLAGS) -o $@ $<
+	@PATH=$(FORESTOS_TOOLCHAIN_BIN):$$PATH $(FORESTOS_CC) $(USER_CFLAGS) -o $@ $<
 
 $(OBJDIR)/userlib_%.o: userspace/libc/%.c
 	@mkdir -p $(OBJDIR)
 	@echo "$(OK_COLOR)Compiling userspace libc $< with Forest OS toolchain...$(NO_COLOR)"
-	@PATH=/home/bluet/forestos-toolchain/install/bin:$$PATH $(FORESTOS_CC) $(USER_CFLAGS) -I$(SRCDIR)/include -o $@ $<
+	@PATH=$(FORESTOS_TOOLCHAIN_BIN):$$PATH $(FORESTOS_CC) $(USER_CFLAGS) -I$(SRCDIR)/include -o $@ $<
 
 $(OBJDIR)/userspace_crt0.o: userspace/crt0.S
 	@mkdir -p $(OBJDIR)
@@ -145,7 +158,7 @@ $(OBJDIR)/userspace_crt0.o: userspace/crt0.S
 $(USER_ELFS): $(USER_SUPPORT_OBJECTS) $(OBJDIR)/userspace_crt0.o
 $(OBJDIR)/%.elf: $(OBJDIR)/user_%.o $(USER_SUPPORT_OBJECTS) $(OBJDIR)/userspace_crt0.o userspace/link.ld
 	@echo "$(OK_COLOR)Linking userspace ELF $(@F) with Forest OS toolchain...$(NO_COLOR)"
-	@PATH=/home/bluet/forestos-toolchain/install/bin:$$PATH $(FORESTOS_LD) -m elf_i386 -T userspace/link.ld -nostdlib -o $@ $(OBJDIR)/userspace_crt0.o $(OBJDIR)/user_$*.o $(USER_SUPPORT_OBJECTS)
+	@PATH=$(FORESTOS_TOOLCHAIN_BIN):$$PATH $(FORESTOS_LD) -m elf_i386 -T userspace/link.ld -nostdlib -o $@ $(OBJDIR)/userspace_crt0.o $(OBJDIR)/user_$*.o $(USER_SUPPORT_OBJECTS)
 
 $(USER_ELF_BIN): $(USER_PRIMARY_ELF)
 	@echo "$(OK_COLOR)Embedding $(USER_PRIMARY_APP) ELF into kernel...$(NO_COLOR)"
@@ -195,12 +208,12 @@ $(ISO): $(OUTPUT) $(GRUB_CFG) $(INITRD)
 	@grub-mkrescue -o $(ISO) $(OUTDIR)
 
 # Run the Kernel in QEMU
-run: $(ISO)
+run: ensure-toolchain $(ISO)
 	@echo "$(OK_COLOR)Running kernel in QEMU...$(NO_COLOR)"
 	@qemu-system-i386 -cdrom $(ISO) -serial stdio -no-shutdown
 
 # Build ISO Image
-build: $(ISO)
+build: ensure-toolchain $(ISO)
 	@echo "$(OK_COLOR)ISO image built successfully.$(NO_COLOR)"
 
 # Clean Up

@@ -1,0 +1,4 @@
+# Ignore the actual toolchain payload; developers populate this locally.
+*
+!.gitignore
+!README.md
