@@ -27,6 +27,7 @@
 #include "include/debuglog.h"
 #include "include/graphics/graphics_manager.h"
 #include "include/graphics/font_renderer.h"
+#include "include/tty.h"
 
 // =============================================================================
 // CONSTANTS AND CONFIGURATION
@@ -2703,74 +2704,79 @@ static void render_advanced_page(const panic_context_t* ctx, int start_y) {
     panic_draw_text("4. Contact system administrator", 30, y, FG_WHITE);
 }
 
-// Simple graphics-based panic display
+// Simple ANSI/Tty-based panic display
 static void draw_simple_panic_screen(const panic_context_t* ctx) {
-    // Clear screen with dark blue background
-    graphics_clear_screen(COLOR_BG);
-    
-    int y = 50;
-    
-    // Header
-    panic_print_at(50, y, "FOREST OS KERNEL PANIC", COLOR_TEXT_ERROR);
-    y += 40;
-    
-    // Error message
+    // Ensure the TTY is ready even in error paths
+    tty_init();
+    tty_set_attr(MAKE_TEXT_ATTR(TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK));
+    tty_clear();
+
+    // Build a more expressive ANSI interface with a pinned background so the
+    // panic view stays readable even when the graphics stack fails back to
+    // legacy text mode.
+    tty_write_ansi("\x1b[0m\x1b[?25l\x1b[44m\x1b[97m\x1b[2J\x1b[H");
+    tty_write_ansi("\x1b[1;97;41m   FOREST OS KERNEL PANIC   \x1b[0m\x1b[44m\x1b[97m\n");
+
+    tty_write_ansi("\x1b[94m==============================================================================\x1b[0m\x1b[44m\x1b[97m\n");
+    tty_write_ansi("\x1b[1;93mContext\x1b[0m\x1b[44m\x1b[97m\n");
+
     if (ctx->message) {
-        panic_print_at(50, y, "Message: ", COLOR_TEXT_LABEL);
-        panic_print_at(150, y, ctx->message, COLOR_TEXT_VALUE);
-        y += 30;
+        tty_write_ansi("  \x1b[1;31m• Message:\x1b[0m ");
+        tty_write_ansi(ctx->message);
+        tty_write_ansi("\n");
     }
-    
-    // Error type
-    panic_print_at(50, y, "Type: ", COLOR_TEXT_LABEL);
-    panic_print_at(150, y, get_panic_type_name(ctx->type), COLOR_TEXT_WARN);
-    y += 30;
-    
-    // Location
-    if (ctx->file) {
-        panic_print_at(50, y, "File: ", COLOR_TEXT_LABEL);
-        panic_print_at(150, y, ctx->file, COLOR_TEXT_VALUE);
-        y += 25;
-        
+
+    tty_write_ansi("  \x1b[1;34m• Classification:\x1b[0m ");
+    tty_write_ansi(get_panic_type_name(ctx->type));
+    tty_write_ansi("\n");
+
+    const char* backend = tty_uses_graphics_backend() ? "graphics text framebuffer" : "legacy text framebuffer";
+    tty_write_ansi("  \x1b[1;36m• TTY surface:\x1b[0m ");
+    tty_write_ansi(backend);
+    tty_write_ansi(" (ANSI renderer active)\n");
+
+    if (ctx->file && ctx->file[0]) {
+        tty_write_ansi("  \x1b[1;96m• Location:\x1b[0m ");
+        tty_write_ansi(ctx->file);
         if (ctx->line > 0) {
-            panic_print_at(50, y, "Line: ", COLOR_TEXT_LABEL);
             char line_str[16];
             format_decimal(ctx->line, line_str);
-            panic_print_at(150, y, line_str, COLOR_TEXT_VALUE);
-            y += 25;
+            tty_write_ansi(" : ");
+            tty_write_ansi(line_str);
         }
-        
-        if (ctx->function) {
-            panic_print_at(50, y, "Function: ", COLOR_TEXT_LABEL);
-            panic_print_at(150, y, ctx->function, COLOR_TEXT_VALUE);
-            y += 25;
+        if (ctx->function && ctx->function[0]) {
+            tty_write_ansi(" (");
+            tty_write_ansi(ctx->function);
+            tty_write_ansi(")");
         }
+        tty_write_ansi("\n");
     }
-    
-    y += 20;
-    
-    // CPU State
-    panic_print_at(50, y, "CPU STATE:", COLOR_TEXT_ERROR);
-    y += 30;
-    
+
+    tty_write_ansi("\x1b[94m------------------------------------------------------------------------------\x1b[0m\x1b[44m\x1b[97m\n");
+    tty_write_ansi("\x1b[1;93mCPU Snapshot\x1b[0m\x1b[44m\x1b[97m\n");
     char hex_str[12];
     format_hex32(ctx->cpu_state.eip, hex_str);
-    panic_print_at(70, y, "EIP: ", COLOR_TEXT_LABEL);
-    panic_print_at(150, y, hex_str, COLOR_TEXT_VALUE);
-    y += 25;
-    
+    tty_write_ansi("  \x1b[0;33mEIP\x1b[0m    : \x1b[1;97m");
+    tty_write_ansi(hex_str);
+    tty_write_ansi("\x1b[0m\x1b[44m\x1b[97m\n");
+
     format_hex32(ctx->cpu_state.esp, hex_str);
-    panic_print_at(70, y, "ESP: ", COLOR_TEXT_LABEL);
-    panic_print_at(150, y, hex_str, COLOR_TEXT_VALUE);
-    y += 25;
-    
+    tty_write_ansi("  \x1b[0;33mESP\x1b[0m    : \x1b[1;97m");
+    tty_write_ansi(hex_str);
+    tty_write_ansi("\x1b[0m\x1b[44m\x1b[97m\n");
+
     format_hex32(ctx->cpu_state.eflags, hex_str);
-    panic_print_at(70, y, "EFLAGS: ", COLOR_TEXT_LABEL);
-    panic_print_at(150, y, hex_str, COLOR_TEXT_VALUE);
-    y += 40;
-    
-    // Instructions
-    panic_print_at(50, y, "System halted. Please reboot.", COLOR_TEXT_ERROR);
+    tty_write_ansi("  \x1b[0;33mEFLAGS\x1b[0m : \x1b[1;97m");
+    tty_write_ansi(hex_str);
+    tty_write_ansi("\x1b[0m\x1b[44m\x1b[97m\n\n");
+
+    tty_write_ansi("\x1b[94m------------------------------------------------------------------------------\x1b[0m\x1b[44m\x1b[97m\n");
+    tty_write_ansi("\x1b[1;93mActions\x1b[0m\x1b[44m\x1b[97m\n");
+    tty_write_ansi("  \x1b[1;31m!\x1b[0;44;97m Safely power cycle the machine.\n");
+    tty_write_ansi("  \x1b[1;36m!\x1b[0;44;97m Capture this screen for debugging.\n");
+    tty_write_ansi("  \x1b[1;33m!\x1b[0;44;97m Review recent logs for hardware or memory faults.\n\n");
+
+    tty_write_ansi("\x1b[0;90mSystem halted. Press reset or power off.\x1b[0m\n");
 }
 
 // =============================================================================
