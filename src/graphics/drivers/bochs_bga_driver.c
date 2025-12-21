@@ -225,7 +225,8 @@ static graphics_result_t bga_set_video_mode(uint32_t width, uint32_t height, uin
     bga_state.current_bpp = bpp;
     bga_state.current_format = bga_bpp_to_pixel_format(bpp);
     bga_state.linear_fb_enabled = use_lfb;
-    
+    bga_state.framebuffer_size = (size_t)(width * height * (bpp / 8));
+
     return GRAPHICS_SUCCESS;
 }
 
@@ -316,10 +317,15 @@ static graphics_result_t bga_initialize(graphics_device_t* device) {
     // Get framebuffer address from PCI BAR0
     bga_state.framebuffer_phys = device->framebuffer_base;
     bga_state.framebuffer_size = device->framebuffer_size;
-    
+
     if (bga_state.framebuffer_phys == 0) {
-        debuglog(DEBUG_ERROR, "BGA: No framebuffer address found\n");
-        return GRAPHICS_ERROR_HARDWARE_FAULT;
+        // Common LFB base used by Bochs/QEMU when BARs are not exposed yet.
+        bga_state.framebuffer_phys = 0xE0000000;
+        debuglog(DEBUG_WARN, "BGA: No framebuffer BAR; falling back to 0xE0000000\n");
+    }
+    if (bga_state.framebuffer_size == 0) {
+        // Assume an 8 MiB window by default; a later mode set will tighten this.
+        bga_state.framebuffer_size = 8 * 1024 * 1024;
     }
     
     // Map framebuffer to virtual memory (identity mapping for now)

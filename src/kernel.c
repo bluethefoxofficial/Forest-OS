@@ -26,9 +26,12 @@
 #include "include/net.h"
 #include "include/debuglog.h"
 #include "include/gdt.h"
+#include "include/libc/stdio.h"
 #include "include/sync_test.h"
 #include "include/lock_debug.h"
 #include "include/graphics_init.h"
+#include "include/graphics/graphics_manager.h"
+#include "include/tty.h"
 #include "include/tlb_manager.h"
 #include "include/smep_smap.h"
 #include "include/stack_protection.h"
@@ -37,6 +40,7 @@
 #include "include/enhanced_heap.h"
 #include "include/bitmap_pmm.h"
 #include "include/secure_vmm.h"
+#include "include/init_system.h"
 
 // Forward declaration for SSP test
 extern int ssp_run_tests(void);
@@ -69,58 +73,27 @@ static void kernel_panic_memory_error(const char* stage, const char* reason) {
 #define COLOR_LABEL 0x0B
 
 static void boot_banner(void) {
-    set_screen_color_from_color_code(0x0F);
-    print_colored("Forest OS ", 0x0A, 0x00);  // Bright green
-    print_colored("kernel ", 0x0F, 0x00);     // White
-    print_colored("v1.0", 0x0B, 0x00);        // Cyan
-    print_colored(" (", 0x08, 0x00);          // Dark gray
-    print_colored("VGA Text Mode", 0x0E, 0x00); // Yellow
-    print_colored(")\n", 0x08, 0x00);
-    
-    print_colored("[", 0x08, 0x00);
-    print_colored("    0.000000", 0x0A, 0x00);  // Green timestamp like Linux
-    print_colored("] ", 0x08, 0x00);
-    print_colored("Booting Forest-OS with enhanced VGA text output...\n", 0x0F, 0x00);
-    
-    print_colored("[", 0x08, 0x00);
-    print_colored("    0.001000", 0x0A, 0x00);
-    print_colored("] ", 0x08, 0x00);
-    print_colored("Kernel command line: root=/dev/ram0 init=/bin/init\n", 0x07, 0x00);
-    
-    print_colored("[", 0x08, 0x00);
-    print_colored("    0.002000", 0x0A, 0x00);
-    print_colored("] ", 0x08, 0x00);
-    print_colored("Initializing subsystems...\n\n", 0x07, 0x00);
+    tty_set_attr(MAKE_TEXT_ATTR(TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK));
+    tty_clear();
+    tty_write_ansi("\x1b[32mForest OS \x1b[37mkernel \x1b[36mv1.0\x1b[0m\n");
+    tty_write_ansi("\x1b[90mTTY backend ready for graphics/text fallback\x1b[0m\n");
+    tty_write_ansi("\x1b[32m[    0.000000]\x1b[37m Booting Forest-OS with enhanced TTY output...\x1b[0m\n");
+    tty_write_ansi("\x1b[32m[    0.001000]\x1b[37m Kernel command line: root=/dev/ram0 init=/bin/init\x1b[0m\n");
+    tty_write_ansi("\x1b[32m[    0.002000]\x1b[37m Initializing subsystems...\x1b[0m\n\n");
 }
 
 static void boot_status(const char* label, bool ok) {
     static uint32 timestamp_counter = 3000;  // Start after initial messages
-    
-    print_colored("[", 0x08, 0x00);
-    print_colored("    ", 0x0A, 0x00);
-    
-    // Print timestamp (simulated)
-    print_dec(timestamp_counter / 1000);
-    print_colored(".", 0x0A, 0x00);
-    print_dec((timestamp_counter % 1000) / 100);
-    print_dec((timestamp_counter % 100) / 10);
-    print_dec(timestamp_counter % 10);
-    print_dec(timestamp_counter % 10);
-    print_dec(timestamp_counter % 10);
-    
-    print_colored("] ", 0x08, 0x00);
-    print_colored(ok ? "+" : "-", ok ? COLOR_OK : COLOR_FAIL, 0x00);
-    print(" ");
-    print_colored((string)label, 0x0F, 0x00);
-    if (ok) {
-        print_colored(" ... ", 0x08, 0x00);
-        print_colored("OK", COLOR_OK, 0x00);
-    } else {
-        print_colored(" ... ", 0x08, 0x00);
-        print_colored("FAILED", COLOR_FAIL, 0x00);
-    }
-    print("\n");
-    
+
+    char line[256];
+    snprintf(line, sizeof(line), "\x1b[90m[%8u]\x1b[0m %s%c\x1b[0m %s\x1b[90m ...\x1b[0m %s\n",
+             timestamp_counter,
+             ok ? "\x1b[32m" : "\x1b[31m",
+             ok ? '+' : '-',
+             label,
+             ok ? "\x1b[32mOK\x1b[0m" : "\x1b[31mFAILED\x1b[0m");
+    tty_write_ansi(line);
+
     timestamp_counter += 100 + (timestamp_counter % 50); // Variable timing like real boot
 }
 
@@ -140,9 +113,12 @@ void startk(uint32 magic, uint32 mbi_addr) {
     // Early interrupt setup (enables safe interrupt functions)
     interrupt_early_init();
     debuglog_init();
-    
+
+    init_system_init();
+
     // Now safe to initialize console (uses interrupt save/restore)
     console_init();
+    tty_init();
     
     // Complete interrupt system setup
     interrupt_full_init();
@@ -277,22 +253,27 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     bool pci_ok = pci_init();
     boot_status("PCI/PCIe configuration", pci_ok);
 
-    // Use reliable VGA text mode directly - skip complex graphics drivers
-    clearScreen();
-    print_colored("VGA text mode initialized successfully\n", COLOR_OK, 0x00);
-    
-    // Set high-resolution text mode for better display
-    bool high_res_ok = screen_set_mode(TEXT_MODE_80x50);
-    if (!high_res_ok) {
-        print_colored("Using standard 80x25 text mode\n", COLOR_WARN, 0x00);
-        screen_set_mode(TEXT_MODE_80x25);
+    bool graphics_console = init_system_apply_display();
+    if (!graphics_console) {
+        // Use reliable VGA text mode directly - skip complex graphics drivers
+        tty_clear();
+        tty_write_ansi("\x1b[32mVGA text mode initialized successfully\x1b[0m\n");
+
+        // Set high-resolution text mode for better display
+        bool high_res_ok = screen_set_mode(TEXT_MODE_80x50);
+        if (!high_res_ok) {
+            tty_write_ansi("\x1b[33mUsing standard 80x25 text mode\x1b[0m\n");
+            screen_set_mode(TEXT_MODE_80x25);
+        } else {
+            tty_write_ansi("\x1b[32mEnhanced 80x50 text mode active\x1b[0m\n");
+        }
+
+        tty_clear();
+        boot_banner(); // Re-display banner in proper mode
+        boot_status("VGA text mode", true);
     } else {
-        print_colored("Enhanced 80x50 text mode active\n", COLOR_OK, 0x00);
+        boot_status("Graphics console (init)", true);
     }
-    
-    clearScreen();
-    boot_banner(); // Re-display banner in proper mode
-    boot_status("VGA text mode", true);
 
     bool net_ok = driver_core_ok && net_init();
     boot_status("Network core", net_ok);
@@ -318,11 +299,9 @@ void kmain(uint32 magic, uint32 mbi_addr) {
             interrupt_set_handler(IRQ_KEYBOARD, ps2_keyboard_irq_handler);
             pic_unmask_irq(1);  // Enable keyboard IRQ
             keyboard_set_driver_mode(KEYBOARD_DRIVER_PS2);
-            print_colored(" [irq] ", COLOR_LABEL, 0x00);
-            print("Keyboard handler installed on IRQ1\n");
+            tty_write_ansi("\x1b[36m [irq] \x1b[0mKeyboard handler installed on IRQ1\n");
         } else {
-            print_colored("[WARN] ", COLOR_WARN, 0x00);
-            print("PS/2 keyboard not detected; falling back to legacy polling driver.\n");
+            tty_write_ansi("\x1b[33m[WARN]\x1b[0m PS/2 keyboard not detected; falling back to legacy polling driver.\n");
         }
 
         ps2_mouse_ok = (ps2_mouse_init() == 0);
@@ -332,12 +311,10 @@ void kmain(uint32 magic, uint32 mbi_addr) {
             interrupt_set_handler(IRQ_MOUSE, ps2_mouse_irq_handler);
             pic_unmask_irq(12);  // Enable mouse IRQ
         } else {
-            print_colored("[WARN] ", COLOR_WARN, 0x00);
-            print("PS/2 mouse unavailable.\n");
+            tty_write_ansi("\x1b[33m[WARN]\x1b[0m PS/2 mouse unavailable.\n");
         }
     } else {
-        print_colored("[WARN] ", COLOR_WARN, 0x00);
-        print("PS/2 controller not responding; using legacy keyboard driver only.\n");
+        tty_write_ansi("\x1b[33m[WARN]\x1b[0m PS/2 controller not responding; using legacy keyboard driver only.\n");
         boot_status("PS/2 keyboard driver", false);
         boot_status("PS/2 mouse driver", false);
     }
@@ -366,9 +343,8 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     irq_enable_safe();
 
     // Temporarily disable all shells to test Linux-style exception handling
-    print_colored("[INFO] ", COLOR_LABEL, 0x00);
-    print("All shells disabled for testing. Kernel initialization complete.\n");
-    print("System ready. CPU will halt to preserve power.\n");
+    tty_write_ansi("\x1b[36m[INFO]\x1b[0m All shells disabled for testing. Kernel initialization complete.\n");
+    tty_write_ansi("\x1b[36m[INFO]\x1b[0m System ready. CPU will halt to preserve power.\n");
     
     // Just halt - this tests that our exception handling works when no errors occur
     while (1) {
@@ -391,13 +367,13 @@ void mouse_event_handler(ps2_mouse_event_t* event) {
                    (event->middle_button != prev_middle);
 
     if (changed) {
-        print("[MOUSE] Buttons L:");
-        print(event->left_button ? "1" : "0");
-        print(" R:");
-        print(event->right_button ? "1" : "0");
-        print(" M:");
-        print(event->middle_button ? "1" : "0");
-        print("\n");
+        tty_write_ansi("[MOUSE] Buttons L:");
+        tty_write_ansi(event->left_button ? "1" : "0");
+        tty_write_ansi(" R:");
+        tty_write_ansi(event->right_button ? "1" : "0");
+        tty_write_ansi(" M:");
+        tty_write_ansi(event->middle_button ? "1" : "0");
+        tty_write_ansi("\n");
         prev_left = event->left_button;
         prev_right = event->right_button;
         prev_middle = event->middle_button;
