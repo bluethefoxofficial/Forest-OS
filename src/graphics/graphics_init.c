@@ -8,25 +8,21 @@
 #include "../include/libc/stdio.h"
 #include "../include/debuglog.h"
 
-// Driver initialization functions
-extern graphics_result_t vga_text_init(void);
+// Driver initialization functions - framebuffer only
 extern graphics_result_t vesa_init(void);
 extern graphics_result_t bga_init(void);
 
-// Graphics subsystem initialization table
+// Graphics subsystem initialization table - framebuffer only
 static struct {
     const char* name;
     graphics_result_t (*init_func)(void);
     bool required;
 } graphics_drivers[] = {
-    // Text mode driver is required as fallback
-    {"VGA Text Mode", vga_text_init, true},
+    // Bochs BGA driver for emulated environments
+    {"Bochs BGA", bga_init, false},
     
     // VESA driver for enhanced graphics
     {"VESA", vesa_init, false},
-    
-    // Bochs BGA driver for emulated environments
-    {"Bochs BGA", bga_init, false},
     
     // Additional drivers can be added here
     // {"VMware SVGA", vmware_svga_init, false},
@@ -38,22 +34,17 @@ graphics_result_t initialize_graphics_subsystem(void) {
     debuglog(DEBUG_INFO, "Initializing Forest-OS graphics subsystem...\n");
     
     graphics_result_t overall_result = GRAPHICS_SUCCESS;
-    bool has_fallback = false;
+    bool has_driver = false;
     
     // Register all available drivers
-    debuglog(DEBUG_INFO, "Registering graphics drivers...\n");
+    debuglog(DEBUG_INFO, "Registering graphics drivers for framebuffer TTY...\n");
     for (size_t i = 0; i < num_graphics_drivers; i++) {
         debuglog(DEBUG_INFO, "Initializing driver: %s\n", graphics_drivers[i].name);
         
         graphics_result_t result = graphics_drivers[i].init_func();
         if (result == GRAPHICS_SUCCESS) {
             debuglog(DEBUG_INFO, "Successfully registered %s\n", graphics_drivers[i].name);
-            
-            // Check if this is a fallback driver
-            if (strstr(graphics_drivers[i].name, "Text") || 
-                strstr(graphics_drivers[i].name, "VGA")) {
-                has_fallback = true;
-            }
+            has_driver = true;
         } else {
             debuglog(DEBUG_ERROR, "Failed to register %s: %s\n", 
                     graphics_drivers[i].name, graphics_get_error_string(result));
@@ -66,8 +57,8 @@ graphics_result_t initialize_graphics_subsystem(void) {
         }
     }
     
-    if (!has_fallback) {
-        debuglog(DEBUG_FATAL, "No fallback text mode driver available!\n");
+    if (!has_driver) {
+        debuglog(DEBUG_FATAL, "No graphics drivers loaded! Framebuffer TTY requires graphics support.\n");
         return GRAPHICS_ERROR_HARDWARE_FAULT;
     }
     

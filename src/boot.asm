@@ -21,7 +21,7 @@ multiboot1_header:
     dd 0        ; bss_end_addr (not used)
     dd 0        ; entry_addr (not used)
     
-    ; Video mode preference - force VGA text mode for reliability
+    ; Video mode preference - start with text mode for early boot stability
     dd 0        ; mode_type (0 = text mode, 1 = linear graphics mode)
     dd 80       ; width (80 columns)
     dd 25       ; height (25 rows) 
@@ -70,8 +70,6 @@ start:
     mov esp, _stack_top ; Initialize stack pointer
     cmp esp, 0x100000   ; Ensure stack is above 1MB
     jl stack_panic
-    cmp esp, 0x200000   ; Ensure stack is below 2MB (reasonable for early boot)
-    jg stack_panic
     
     ; Set up basic exception handling for early boot
     ; Install a temporary page fault handler

@@ -51,7 +51,8 @@ graphics_result_t font_renderer_init(void) {
             builtin_glyphs_8x8_data[glyph_index].bearing_x = 0;
             builtin_glyphs_8x8_data[glyph_index].bearing_y = 8;
             builtin_glyphs_8x8_data[glyph_index].advance = 8;
-            builtin_glyphs_8x8_data[glyph_index].bitmap = (uint8_t*)block->data[char_idx];
+            // Get pointer to the 8-byte bitmap array for this character
+            builtin_glyphs_8x8_data[glyph_index].bitmap = (uint8_t*)&(block->data[char_idx][0]);
             glyph_index++;
         }
     }
@@ -279,6 +280,7 @@ graphics_result_t font_render_char(font_t* font, graphics_surface_t* surface,
         }
     }
     
+    
     font_glyph_t* glyph = &font->glyphs[glyph_index];
     return render_glyph(font, glyph, surface, x, y, style);
 }
@@ -318,12 +320,12 @@ static graphics_result_t create_builtin_8x8_font(void) {
     strcpy(font->name, "system-8x8");
     font->size = 8;
     font->type = FONT_TYPE_BITMAP;
-    font->metrics.ascent = 7;
-    font->metrics.descent = 1;
+    font->metrics.ascent = 6;
+    font->metrics.descent = 2;
     font->metrics.line_gap = 0;
     font->metrics.max_advance = 8;
     font->metrics.height = 8;
-    font->num_glyphs = 256;
+    font->num_glyphs = 512; // Conservative upper bound
     font->glyphs = builtin_glyphs_8x8_data;
     font->is_fixed_width = true;
     font->fixed_width = 8;
@@ -343,9 +345,9 @@ static graphics_result_t render_glyph(font_t* font, font_glyph_t* glyph,
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
     
-    // Calculate glyph position
-    int32_t glyph_x = x + glyph->bearing_x;
-    int32_t glyph_y = y - glyph->bearing_y;
+    // Calculate glyph position - for 8x8 bitmap font, use direct positioning
+    int32_t glyph_x = x;
+    int32_t glyph_y = y;
     
     // Convert colors to pixel format
     uint32_t fg_pixel = graphics_color_to_pixel(style->foreground, surface->format);
@@ -357,30 +359,55 @@ static graphics_result_t render_glyph(font_t* font, font_glyph_t* glyph,
             continue;
         }
         
-        uint8_t row = glyph->bitmap[dy];
+        // Safety check for bitmap access
+        if (!glyph->bitmap || dy >= glyph->height) {
+            continue;
+        }
         
         for (int dx = 0; dx < glyph->width; dx++) {
             if (glyph_x + dx < 0 || glyph_x + dx >= (int32_t)surface->width) {
                 continue;
             }
             
-            bool pixel_set = (row & (0x80 >> dx)) != 0;
+            // Extract pixel from bitmap data  
+            uint8_t row = glyph->bitmap[dy];
+            // Fix horizontal flipping: check bits from LSB (right) to MSB (left)
+            bool pixel_set = (row & (0x01 << dx)) != 0;
             
             if (pixel_set || style->has_background) {
                 uint32_t pixel_value = pixel_set ? fg_pixel : bg_pixel;
                 
                 // Write pixel based on surface format
+                uint32_t pixel_offset;
                 switch (surface->format) {
                     case PIXEL_FORMAT_RGB_565:
                     case PIXEL_FORMAT_RGB_555: {
-                        uint16_t* pixels = (uint16_t*)surface->pixels;
-                        pixels[(glyph_y + dy) * (surface->pitch / 2) + (glyph_x + dx)] = (uint16_t)pixel_value;
+                        pixel_offset = (glyph_y + dy) * surface->pitch + (glyph_x + dx) * 2;
+                        uint16_t* pixel_ptr = (uint16_t*)((uint8_t*)surface->pixels + pixel_offset);
+                        *pixel_ptr = (uint16_t)pixel_value;
                         break;
                     }
-                    case PIXEL_FORMAT_RGB_888:
-                    case PIXEL_FORMAT_RGBA_8888: {
-                        uint32_t* pixels = (uint32_t*)surface->pixels;
-                        pixels[(glyph_y + dy) * (surface->pitch / 4) + (glyph_x + dx)] = pixel_value;
+                    case PIXEL_FORMAT_RGB_888: {
+                        pixel_offset = (glyph_y + dy) * surface->pitch + (glyph_x + dx) * 3;
+                        uint8_t* pixel_ptr = (uint8_t*)surface->pixels + pixel_offset;
+                        pixel_ptr[0] = pixel_value & 0xFF;
+                        pixel_ptr[1] = (pixel_value >> 8) & 0xFF;
+                        pixel_ptr[2] = (pixel_value >> 16) & 0xFF;
+                        break;
+                    }
+                    case PIXEL_FORMAT_BGR_888: {
+                        pixel_offset = (glyph_y + dy) * surface->pitch + (glyph_x + dx) * 3;
+                        uint8_t* pixel_ptr = (uint8_t*)surface->pixels + pixel_offset;
+                        pixel_ptr[0] = (pixel_value >> 16) & 0xFF;
+                        pixel_ptr[1] = (pixel_value >> 8) & 0xFF;
+                        pixel_ptr[2] = pixel_value & 0xFF;
+                        break;
+                    }
+                    case PIXEL_FORMAT_RGBA_8888:
+                    case PIXEL_FORMAT_BGRA_8888: {
+                        pixel_offset = (glyph_y + dy) * surface->pitch + (glyph_x + dx) * 4;
+                        uint32_t* pixel_ptr = (uint32_t*)((uint8_t*)surface->pixels + pixel_offset);
+                        *pixel_ptr = pixel_value;
                         break;
                     }
                     default:
@@ -418,16 +445,44 @@ static void apply_text_effects(graphics_surface_t* surface, const graphics_rect_
                     switch (surface->format) {
                         case PIXEL_FORMAT_RGB_565:
                         case PIXEL_FORMAT_RGB_555: {
-                            uint16_t* pixels = (uint16_t*)surface->pixels;
-                            pixels[underline_y * (surface->pitch / 2) + x] = (uint16_t)fg_pixel;
+                            uint32_t offset = underline_y * surface->pitch + x * 2;
+                            uint16_t* pixel_ptr = (uint16_t*)((uint8_t*)surface->pixels + offset);
+                            *pixel_ptr = (uint16_t)fg_pixel;
                             break;
                         }
-                        case PIXEL_FORMAT_RGB_888:
-                        case PIXEL_FORMAT_RGBA_8888: {
-                            uint32_t* pixels = (uint32_t*)surface->pixels;
-                            pixels[underline_y * (surface->pitch / 4) + x] = fg_pixel;
+                        case PIXEL_FORMAT_RGB_888: {
+                            uint32_t offset = underline_y * surface->pitch + x * 3;
+                            uint8_t* pixel_ptr = (uint8_t*)surface->pixels + offset;
+                            pixel_ptr[0] = fg_pixel & 0xFF;
+                            pixel_ptr[1] = (fg_pixel >> 8) & 0xFF;
+                            pixel_ptr[2] = (fg_pixel >> 16) & 0xFF;
                             break;
                         }
+                        case PIXEL_FORMAT_BGR_888: {
+                            uint32_t offset = underline_y * surface->pitch + x * 3;
+                            uint8_t* pixel_ptr = (uint8_t*)surface->pixels + offset;
+                            pixel_ptr[0] = (fg_pixel >> 16) & 0xFF;
+                            pixel_ptr[1] = (fg_pixel >> 8) & 0xFF;
+                            pixel_ptr[2] = fg_pixel & 0xFF;
+                            break;
+                        }
+                        case PIXEL_FORMAT_RGBA_8888:
+                        case PIXEL_FORMAT_BGRA_8888: {
+                            uint32_t offset = underline_y * surface->pitch + x * 4;
+                            uint32_t* pixel_ptr = (uint32_t*)((uint8_t*)surface->pixels + offset);
+                            *pixel_ptr = fg_pixel;
+                            break;
+                        }
+                        case PIXEL_FORMAT_INDEXED_8: {
+                            uint32_t offset = underline_y * surface->pitch + x;
+                            uint8_t* pixel_ptr = (uint8_t*)surface->pixels + offset;
+                            *pixel_ptr = (uint8_t)fg_pixel;
+                            break;
+                        }
+                        case PIXEL_FORMAT_TEXT_MODE:
+                        default:
+                            // Skip unsupported formats
+                            break;
                     }
                 }
             }
@@ -443,16 +498,44 @@ static void apply_text_effects(graphics_surface_t* surface, const graphics_rect_
                     switch (surface->format) {
                         case PIXEL_FORMAT_RGB_565:
                         case PIXEL_FORMAT_RGB_555: {
-                            uint16_t* pixels = (uint16_t*)surface->pixels;
-                            pixels[strike_y * (surface->pitch / 2) + x] = (uint16_t)fg_pixel;
+                            uint32_t offset = strike_y * surface->pitch + x * 2;
+                            uint16_t* pixel_ptr = (uint16_t*)((uint8_t*)surface->pixels + offset);
+                            *pixel_ptr = (uint16_t)fg_pixel;
                             break;
                         }
-                        case PIXEL_FORMAT_RGB_888:
-                        case PIXEL_FORMAT_RGBA_8888: {
-                            uint32_t* pixels = (uint32_t*)surface->pixels;
-                            pixels[strike_y * (surface->pitch / 4) + x] = fg_pixel;
+                        case PIXEL_FORMAT_RGB_888: {
+                            uint32_t offset = strike_y * surface->pitch + x * 3;
+                            uint8_t* pixel_ptr = (uint8_t*)surface->pixels + offset;
+                            pixel_ptr[0] = fg_pixel & 0xFF;
+                            pixel_ptr[1] = (fg_pixel >> 8) & 0xFF;
+                            pixel_ptr[2] = (fg_pixel >> 16) & 0xFF;
                             break;
                         }
+                        case PIXEL_FORMAT_BGR_888: {
+                            uint32_t offset = strike_y * surface->pitch + x * 3;
+                            uint8_t* pixel_ptr = (uint8_t*)surface->pixels + offset;
+                            pixel_ptr[0] = (fg_pixel >> 16) & 0xFF;
+                            pixel_ptr[1] = (fg_pixel >> 8) & 0xFF;
+                            pixel_ptr[2] = fg_pixel & 0xFF;
+                            break;
+                        }
+                        case PIXEL_FORMAT_RGBA_8888:
+                        case PIXEL_FORMAT_BGRA_8888: {
+                            uint32_t offset = strike_y * surface->pitch + x * 4;
+                            uint32_t* pixel_ptr = (uint32_t*)((uint8_t*)surface->pixels + offset);
+                            *pixel_ptr = fg_pixel;
+                            break;
+                        }
+                        case PIXEL_FORMAT_INDEXED_8: {
+                            uint32_t offset = strike_y * surface->pitch + x;
+                            uint8_t* pixel_ptr = (uint8_t*)surface->pixels + offset;
+                            *pixel_ptr = (uint8_t)fg_pixel;
+                            break;
+                        }
+                        case PIXEL_FORMAT_TEXT_MODE:
+                        default:
+                            // Skip unsupported formats
+                            break;
                     }
                 }
             }
@@ -465,14 +548,16 @@ static uint32_t find_glyph_index(font_t* font, uint32_t codepoint) {
         return 0;
     }
     
-    // For built-in fonts, direct mapping for ASCII range
-    if (codepoint < 256) {
-        return codepoint;
-    }
-    
-    // Linear search for other fonts (in a real implementation, use hash table)
+    // Always do linear search to find the correct glyph
     for (uint32_t i = 0; i < font->num_glyphs; i++) {
         if (font->glyphs[i].codepoint == codepoint) {
+            return i;
+        }
+    }
+    
+    // Fallback to space character (codepoint 32) if not found
+    for (uint32_t i = 0; i < font->num_glyphs; i++) {
+        if (font->glyphs[i].codepoint == 32) {
             return i;
         }
     }

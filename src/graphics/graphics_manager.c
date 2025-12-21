@@ -2,6 +2,7 @@
 #include "../include/graphics/hardware_detect.h"
 #include "../include/graphics/display_driver.h"
 #include "../include/graphics/font_renderer.h"
+#include "../include/graphics_init.h"
 #include "../include/memory.h"
 #include "../include/string.h"
 #include "../include/debuglog.h"
@@ -16,6 +17,7 @@ static struct {
     void (*input_handler)(const input_event_t* event);
     int32_t cursor_x;
     int32_t cursor_y;
+    bool framebuffer_console_active;
 } graphics_state = {
     .initialized = false,
     .primary_device = NULL,
@@ -23,7 +25,8 @@ static struct {
     .double_buffering_enabled = false,
     .input_handler = NULL,
     .cursor_x = 0,
-    .cursor_y = 0
+    .cursor_y = 0,
+    .framebuffer_console_active = false
 };
 
 static uint32_t format_to_bpp(pixel_format_t format) {
@@ -123,12 +126,188 @@ static void copy_string(char* dest, size_t size, const char* src) {
 
 static graphics_result_t ensure_font_ready(void);
 
+static void select_minimum_console_dimensions(uint32_t cols, uint32_t rows,
+                                              uint32_t* out_width,
+                                              uint32_t* out_height) {
+    uint32_t char_w = 8;
+    uint32_t char_h = 16;
+
+    if (ensure_font_ready() == GRAPHICS_SUCCESS) {
+        font_t* sys_font = NULL;
+        if (font_get_system_font(&sys_font) == GRAPHICS_SUCCESS && sys_font) {
+            if (sys_font->fixed_width > 0) {
+                char_w = sys_font->fixed_width;
+            }
+            if (sys_font->metrics.height > 0) {
+                char_h = sys_font->metrics.height;
+            }
+        }
+    }
+
+    uint32_t min_width = (cols > 0) ? cols * char_w : 0;
+    uint32_t min_height = (rows > 0) ? rows * char_h : 0;
+
+    if (min_width < 800) {
+        min_width = 800;
+    }
+    if (min_height < 600) {
+        min_height = 600;
+    }
+
+    if (out_width) {
+        *out_width = min_width;
+    }
+    if (out_height) {
+        *out_height = min_height;
+    }
+}
+
+static graphics_result_t pick_framebuffer_console_mode(uint32_t min_width,
+                                                       uint32_t min_height,
+                                                       video_mode_t* out_mode) {
+    if (!out_mode) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+
+    video_mode_t* modes = NULL;
+    uint32_t count = 0;
+    graphics_result_t result = graphics_enumerate_modes(&modes, &count);
+
+    if (result != GRAPHICS_SUCCESS || !modes || count == 0) {
+        out_mode->width = min_width;
+        out_mode->height = min_height;
+        out_mode->bpp = 32;
+        out_mode->format = PIXEL_FORMAT_RGBA_8888;
+        out_mode->refresh_rate = 60;
+        out_mode->pitch = min_width * 4;
+        out_mode->is_text_mode = false;
+        out_mode->mode_number = 0;
+        out_mode->hw_data = NULL;
+        return GRAPHICS_SUCCESS;
+    }
+
+    bool found = false;
+    video_mode_t best = {0};
+    uint64_t best_score = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        video_mode_t* candidate = &modes[i];
+        if (candidate->is_text_mode) {
+            continue;
+        }
+
+        uint64_t area = (uint64_t)candidate->width * (uint64_t)candidate->height;
+        uint64_t score = ((uint64_t)candidate->bpp) * area;
+
+        if (candidate->width < min_width || candidate->height < min_height) {
+            score /= 2;
+        }
+
+        if (!found || score > best_score) {
+            best = *candidate;
+            best_score = score;
+            found = true;
+        }
+    }
+
+    if (!found) {
+        best.width = min_width;
+        best.height = min_height;
+        best.bpp = 32;
+        best.format = PIXEL_FORMAT_RGBA_8888;
+        best.refresh_rate = 60;
+        best.pitch = min_width * 4;
+        best.is_text_mode = false;
+        best.mode_number = 0;
+        best.hw_data = NULL;
+    }
+
+    *out_mode = best;
+    kfree(modes);
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t activate_framebuffer_console(uint32_t cols, uint32_t rows) {
+    uint32_t min_width = 0;
+    uint32_t min_height = 0;
+    select_minimum_console_dimensions(cols, rows, &min_width, &min_height);
+
+    video_mode_t preferred_mode;
+    graphics_result_t result = pick_framebuffer_console_mode(min_width, min_height, &preferred_mode);
+    if (result != GRAPHICS_SUCCESS) {
+        preferred_mode.width = min_width;
+        preferred_mode.height = min_height;
+        preferred_mode.bpp = 32;
+        preferred_mode.format = PIXEL_FORMAT_RGBA_8888;
+        preferred_mode.refresh_rate = 60;
+        preferred_mode.pitch = min_width * 4;
+        preferred_mode.is_text_mode = false;
+        preferred_mode.mode_number = 0;
+        preferred_mode.hw_data = NULL;
+    }
+
+    if (preferred_mode.refresh_rate == 0) {
+        preferred_mode.refresh_rate = 60;
+    }
+
+    result = graphics_set_mode(preferred_mode.width,
+                               preferred_mode.height,
+                               preferred_mode.bpp,
+                               preferred_mode.refresh_rate);
+    if (result != GRAPHICS_SUCCESS) {
+        debuglog(DEBUG_ERROR,
+                 "Graphics: framebuffer console mode %ux%u@%u failed (%d)\n",
+                 preferred_mode.width, preferred_mode.height,
+                 preferred_mode.bpp, result);
+        return result;
+    }
+
+    if (!ensure_framebuffer_mapped()) {
+        debuglog(DEBUG_ERROR, "Graphics: unable to map framebuffer for console\n");
+        return GRAPHICS_ERROR_GENERIC;
+    }
+
+    if (ensure_font_ready() != GRAPHICS_SUCCESS) {
+        debuglog(DEBUG_ERROR, "Graphics: system font unavailable for framebuffer console\n");
+        return GRAPHICS_ERROR_NOT_SUPPORTED;
+    }
+
+    graphics_state.framebuffer_console_active = true;
+    debuglog(DEBUG_INFO,
+             "Graphics: enabled framebuffer text console at %ux%u (%u bpp)\n",
+             graphics_state.current_mode.width,
+             graphics_state.current_mode.height,
+             graphics_state.current_mode.bpp);
+    return GRAPHICS_SUCCESS;
+}
+
 graphics_result_t graphics_init(void) {
     debuglog(DEBUG_INFO, "Initializing graphics subsystem...\n");
     
     if (graphics_state.initialized) {
         debuglog(DEBUG_WARN, "Graphics subsystem already initialized\n");
         return GRAPHICS_SUCCESS;
+    }
+    
+    // Initialize drivers first  
+    debuglog(DEBUG_INFO, "Registering graphics drivers for framebuffer TTY...\n");
+    extern graphics_result_t vesa_init(void);
+    extern graphics_result_t bga_init(void);
+    
+    // Register Bochs BGA driver for emulated environments
+    graphics_result_t bga_result = bga_init();
+    if (bga_result == GRAPHICS_SUCCESS) {
+        debuglog(DEBUG_INFO, "Successfully registered Bochs BGA driver\n");
+    } else {
+        debuglog(DEBUG_ERROR, "Failed to register Bochs BGA driver\n");
+    }
+    
+    // Register VESA driver as fallback
+    graphics_result_t vesa_result = vesa_init();
+    if (vesa_result == GRAPHICS_SUCCESS) {
+        debuglog(DEBUG_INFO, "Successfully registered VESA driver\n");
+    } else {
+        debuglog(DEBUG_ERROR, "Failed to register VESA driver\n");
     }
     
     // Detect graphics hardware
@@ -209,6 +388,7 @@ graphics_result_t graphics_shutdown(void) {
     graphics_state.input_handler = NULL;
     graphics_state.cursor_x = 0;
     graphics_state.cursor_y = 0;
+    graphics_state.framebuffer_console_active = false;
     
     debuglog(DEBUG_INFO, "Graphics subsystem shutdown complete\n");
     return GRAPHICS_SUCCESS;
@@ -299,27 +479,35 @@ graphics_result_t graphics_set_text_mode(uint32_t cols, uint32_t rows) {
     }
     
     display_driver_t* driver = graphics_state.primary_device->driver;
-    if (!driver || !driver->ops->set_mode) {
-        return GRAPHICS_ERROR_NOT_SUPPORTED;
+    bool driver_supports_text = driver && (driver->flags & DRIVER_FLAG_SUPPORTS_TEXT_MODE) &&
+                                driver->ops && driver->ops->set_mode;
+
+    if (driver_supports_text) {
+        video_mode_t mode = {
+            .width = cols,
+            .height = rows,
+            .bpp = 4, // 4 bits per character attribute
+            .format = PIXEL_FORMAT_TEXT_MODE,
+            .refresh_rate = 60,
+            .is_text_mode = true,
+            .pitch = cols * 2 // 2 bytes per character (char + attribute)
+        };
+
+        graphics_result_t result = driver->ops->set_mode(graphics_state.primary_device, &mode);
+        if (result == GRAPHICS_SUCCESS) {
+            graphics_state.current_mode = mode;
+            graphics_state.framebuffer_console_active = false;
+            return GRAPHICS_SUCCESS;
+        }
+
+        debuglog(DEBUG_WARN,
+                 "Graphics: hardware text mode rejected (%d), falling back to framebuffer console\n",
+                 result);
+    } else {
+        debuglog(DEBUG_INFO, "Graphics: driver lacks hardware text mode, using framebuffer console\n");
     }
-    
-    // Create text mode structure
-    video_mode_t mode = {
-        .width = cols,
-        .height = rows,
-        .bpp = 4, // 4 bits per character attribute
-        .format = PIXEL_FORMAT_TEXT_MODE,
-        .refresh_rate = 60,
-        .is_text_mode = true,
-        .pitch = cols * 2 // 2 bytes per character (char + attribute)
-    };
-    
-    graphics_result_t result = driver->ops->set_mode(graphics_state.primary_device, &mode);
-    if (result == GRAPHICS_SUCCESS) {
-        graphics_state.current_mode = mode;
-    }
-    
-    return result;
+
+    return activate_framebuffer_console(cols, rows);
 }
 
 graphics_result_t graphics_get_current_mode(video_mode_t* mode) {

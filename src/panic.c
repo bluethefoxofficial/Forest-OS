@@ -467,9 +467,9 @@ typedef struct {
 } stack_frame_t;
 
 typedef struct panic_context {
-    const char* message;
-    const char* file;
-    const char* function;
+    char message[256];
+    char file[128];
+    char function[128];
     uint32 line;
     panic_type_t type;
     cpu_state_t cpu_state;
@@ -498,6 +498,32 @@ static font_t* g_panic_font = NULL;
 static framebuffer_t* g_panic_framebuffer = NULL;
 static uint32_t g_screen_width = 0;
 static uint32_t g_screen_height = 0;
+static panic_context_t g_panic_context;
+static struct {
+    bool valid;
+    uint32 fault_addr;
+    uint32 error_code;
+    uint32 fault_eip;
+    uint32 fault_cs;
+    uint32 fault_eflags;
+} g_panic_pending_fault = {0};
+
+static void panic_store_context(const panic_context_t* ctx) {
+    if (!ctx) {
+        return;
+    }
+    memcpy(&g_panic_context, ctx, sizeof(panic_context_t));
+}
+
+void panic_preload_fault_info(uint32 fault_addr, uint32 error_code,
+                              uint32 fault_eip, uint32 fault_cs, uint32 fault_eflags) {
+    g_panic_pending_fault.valid = true;
+    g_panic_pending_fault.fault_addr = fault_addr;
+    g_panic_pending_fault.error_code = error_code;
+    g_panic_pending_fault.fault_eip = fault_eip;
+    g_panic_pending_fault.fault_cs = fault_cs;
+    g_panic_pending_fault.fault_eflags = fault_eflags;
+}
 
 // Core graphics drawing functions using the graphics API directly
 static void panic_draw_text(const char* text, int x, int y, graphics_color_t color) {
@@ -618,7 +644,6 @@ static void panic_print_section_header(int x, int y, int width, const char* titl
 static panic_context_t g_panic_context;
 static bool g_panic_initialized = false;
 static uint32 g_panic_count = 0;
-
 // BSOD-style page system globals
 static bsod_page_t g_current_page = BSOD_PAGE_OVERVIEW;
 static int32 g_page_scroll_offset = 0;
@@ -1473,7 +1498,7 @@ static void panic_debuglog_emit_task_info(const panic_context_t* ctx) {
     debuglog_write("[PANIC][GDB] Execution Context:\n");
     debuglog_write("[PANIC][GDB]   Execution Mode: Kernel Space\n");
     debuglog_write("[PANIC][GDB]   Exception Context: ");
-    debuglog_write(ctx->message ? "EXCEPTION" : "PANIC");
+    debuglog_write(get_panic_type_name(ctx->type));
     debuglog_write("\n");
     
     // Current instruction analysis
@@ -1673,7 +1698,7 @@ static panic_type_t panic_analyze_and_classify(const panic_context_t* ctx) {
     }
     
     // Analyze based on panic message if available
-    if (ctx->message) {
+    if (ctx->message[0]) {
         // Simple string matching for common error patterns
         if (ctx->message[0] == 'D' && ctx->message[1] == 'i' && ctx->message[2] == 'v') {
             return PANIC_TYPE_DIVISION_BY_ZERO;
@@ -1800,19 +1825,19 @@ static void panic_debuglog_emit_memory_corruption_analysis(const panic_context_t
 
 static void panic_debuglog_emit_meta(const panic_context_t* ctx) {
     debuglog_write("[PANIC][GDB] ===== PANIC CONTEXT =====\n");
-    if (ctx->message) {
+    if (ctx->message[0]) {
         debuglog_write("[PANIC][GDB] Message: ");
         debuglog_write(ctx->message);
         debuglog_write("\n");
     }
-    if (ctx->file) {
+    if (ctx->file[0]) {
         debuglog_write("[PANIC][GDB] Location: ");
         debuglog_write(ctx->file);
         if (ctx->line) {
             debuglog_write(":");
             debuglog_write_dec(ctx->line);
         }
-        if (ctx->function) {
+        if (ctx->function[0]) {
             debuglog_write(" (");
             debuglog_write(ctx->function);
             debuglog_write(")");
@@ -2340,7 +2365,7 @@ static void draw_bsod_header(const panic_context_t* ctx) {
     panic_draw_text("CRITICAL_SYSTEM_ERROR", 10, 50, COLOR_TEXT_ERROR);
 
     // Panic message
-    if (ctx->message) {
+    if (ctx->message[0]) {
         panic_draw_text(ctx->message, 10, 70, COLOR_FG);
     }
 }
@@ -2432,11 +2457,15 @@ static void render_overview_page(const panic_context_t* ctx, int start_y) {
     panic_draw_text(temp, 30, y, FG_WHITE);
     y += FONT_HEIGHT;
     
-    if (ctx->file) {
+    if (ctx->file[0]) {
         strcpy(temp, "Source: ");
         strcat(temp, ctx->file);
         strcat(temp, " in ");
-        strcat(temp, ctx->function ? ctx->function : "unknown");
+        if (ctx->function[0]) {
+            strcat(temp, ctx->function);
+        } else {
+            strcat(temp, "unknown");
+        }
         strcat(temp, "()");
         panic_draw_text(temp, 30, y, FG_CYAN);
         y += FONT_HEIGHT;
@@ -2704,30 +2733,172 @@ static void render_advanced_page(const panic_context_t* ctx, int start_y) {
     panic_draw_text("4. Contact system administrator", 30, y, FG_WHITE);
 }
 
+static char panic_tolower(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return c + ('a' - 'A');
+    }
+    return c;
+}
+
+static bool panic_contains_keyword(const char* haystack, const char* keyword) {
+    if (!haystack || !keyword || !*haystack || !*keyword) {
+        return false;
+    }
+
+    size_t keyword_len = strlen(keyword);
+    for (const char* h = haystack; *h; ++h) {
+        size_t i = 0;
+        while (i < keyword_len && h[i] &&
+               panic_tolower(h[i]) == panic_tolower(keyword[i])) {
+            i++;
+        }
+        if (i == keyword_len) {
+            return true;
+        }
+        if (!h[i]) {
+            break;
+        }
+    }
+    return false;
+}
+
+static const char* panic_identify_subsystem(const panic_context_t* ctx) {
+    if (!ctx) {
+        return "Unknown subsystem";
+    }
+
+    const char* details[3] = { NULL, NULL, NULL };
+    if (ctx->file[0]) details[0] = ctx->file;
+    if (ctx->function[0]) details[1] = ctx->function;
+    if (ctx->message[0]) details[2] = ctx->message;
+
+    for (int i = 0; i < 3; ++i) {
+        const char* text = details[i];
+        if (!text) continue;
+        if (panic_contains_keyword(text, "interrupt") ||
+            panic_contains_keyword(text, "irq")) {
+            return "Interrupt & IRQ Controller";
+        }
+        if (panic_contains_keyword(text, "memory") ||
+            panic_contains_keyword(text, "paging") ||
+            panic_contains_keyword(text, "heap") ||
+            panic_contains_keyword(text, "mmu")) {
+            return "Memory Management Unit";
+        }
+        if (panic_contains_keyword(text, "fs/") ||
+            panic_contains_keyword(text, "filesystem") ||
+            panic_contains_keyword(text, "vfs")) {
+            return "Filesystem / VFS Layer";
+        }
+        if (panic_contains_keyword(text, "driver") ||
+            panic_contains_keyword(text, "ps2") ||
+            panic_contains_keyword(text, "kbd") ||
+            panic_contains_keyword(text, "mouse") ||
+            panic_contains_keyword(text, "ata") ||
+            panic_contains_keyword(text, "pci")) {
+            return "Hardware Driver Stack";
+        }
+        if (panic_contains_keyword(text, "sched") ||
+            panic_contains_keyword(text, "task") ||
+            panic_contains_keyword(text, "thread")) {
+            return "Scheduler / Tasking Core";
+        }
+        if (panic_contains_keyword(text, "graphics") ||
+            panic_contains_keyword(text, "tty") ||
+            panic_contains_keyword(text, "framebuffer")) {
+            return "Display & Console Subsystem";
+        }
+        if (panic_contains_keyword(text, "ipc") ||
+            panic_contains_keyword(text, "syscall")) {
+            return "System Call & IPC Layer";
+        }
+        if (panic_contains_keyword(text, "acpi") ||
+            panic_contains_keyword(text, "power")) {
+            return "Power / ACPI Management";
+        }
+    }
+
+    return "Core Kernel Runtime";
+}
+
 // Simple ANSI/Tty-based panic display
 static void draw_simple_panic_screen(const panic_context_t* ctx) {
-    // Ensure the TTY is ready even in error paths
-    tty_init();
-    tty_set_attr(MAKE_TEXT_ATTR(TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK));
-    tty_clear();
+    // Try to ensure the TTY is ready even in error paths
+    // First check if graphics is available to avoid circular panic
+    if (!graphics_is_initialized()) {
+        // Use basic console for panic display when graphics isn't available
+        console_init();
+        clearScreen();
+        print_colored("PANIC: Using basic console mode (graphics not initialized)\n", TEXT_ATTR_LIGHT_RED, TEXT_ATTR_BLACK);
+    } else {
+        bool tty_ok = tty_init();
+        if (!tty_ok) {
+            // Fallback to basic console for panic display
+            console_init();
+            clearScreen();
+            print_colored("PANIC: TTY initialization failed during panic handling\n", TEXT_ATTR_LIGHT_RED, TEXT_ATTR_BLACK);
+            print_colored("Using basic console mode\n", TEXT_ATTR_YELLOW, TEXT_ATTR_BLACK);
+        } else {
+            tty_set_attr(MAKE_TEXT_ATTR(TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK));
+            tty_clear();
+            // Continue with TTY-based panic display
+            goto tty_display;
+        }
+    }
+    
+    // Basic console panic display
+    print_colored("\n", TEXT_ATTR_WHITE, TEXT_ATTR_BLACK);
+    print_colored("################################################################################\n", TEXT_ATTR_RED, TEXT_ATTR_BLACK);
+    print_colored("FOREST OS KERNEL PANIC\n", TEXT_ATTR_LIGHT_RED, TEXT_ATTR_BLACK);
+    print_colored("################################################################################\n", TEXT_ATTR_RED, TEXT_ATTR_BLACK);
+    return;
+    
+tty_display:
 
     // Build a more expressive ANSI interface with a pinned background so the
     // panic view stays readable even when the graphics stack fails back to
     // legacy text mode.
-    tty_write_ansi("\x1b[0m\x1b[?25l\x1b[44m\x1b[97m\x1b[2J\x1b[H");
-    tty_write_ansi("\x1b[1;97;41m   FOREST OS KERNEL PANIC   \x1b[0m\x1b[44m\x1b[97m\n");
+    const char* subsystem = panic_identify_subsystem(ctx);
+    tty_write_ansi("\x1b[0m\x1b[?25l\x1b[45m\x1b[97m\x1b[2J\x1b[H");
+    tty_write_ansi("\x1b[1;97;45m   FOREST OS KERNEL PANIC   \x1b[0m\x1b[45m\x1b[97m\n");
 
-    tty_write_ansi("\x1b[94m==============================================================================\x1b[0m\x1b[44m\x1b[97m\n");
-    tty_write_ansi("\x1b[1;93mContext\x1b[0m\x1b[44m\x1b[97m\n");
+    tty_write_ansi("\x1b[95m==============================================================================\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("\x1b[1;95mContext\x1b[0m\x1b[45m\x1b[97m\n");
 
-    if (ctx->message) {
-        tty_write_ansi("  \x1b[1;31m• Message:\x1b[0m ");
-        tty_write_ansi(ctx->message);
-        tty_write_ansi("\n");
+    if (ctx->message[0]) {
+        char message_copy[sizeof(ctx->message)];
+        strncpy(message_copy, ctx->message, sizeof(message_copy));
+        message_copy[sizeof(message_copy) - 1] = '\0';
+        bool first_line = true;
+        char* token = message_copy;
+        while (token && *token) {
+            char* next = strchr(token, '\n');
+            if (next) {
+                *next = '\0';
+                next++;
+            }
+            if (first_line) {
+                tty_write_ansi("  \x1b[1;31m• Message:\x1b[0m ");
+                first_line = false;
+            } else {
+                tty_write_ansi("    \x1b[0;35m↳\x1b[0m ");
+            }
+            tty_write_ansi(token);
+            tty_write_ansi("\n");
+            token = next;
+        }
     }
 
     tty_write_ansi("  \x1b[1;34m• Classification:\x1b[0m ");
     tty_write_ansi(get_panic_type_name(ctx->type));
+    tty_write_ansi("\n");
+
+    tty_write_ansi("  \x1b[1;92m• Subsystem Source:\x1b[0m ");
+    tty_write_ansi(subsystem);
+    tty_write_ansi("\n");
+
+    tty_write_ansi("  \x1b[1;33m• Recovery Window:\x1b[0m ");
+    tty_write_ansi(ctx->recoverable ? "Partial recovery possible" : "Manual intervention required");
     tty_write_ansi("\n");
 
     const char* backend = tty_uses_graphics_backend() ? "graphics text framebuffer" : "legacy text framebuffer";
@@ -2735,7 +2906,7 @@ static void draw_simple_panic_screen(const panic_context_t* ctx) {
     tty_write_ansi(backend);
     tty_write_ansi(" (ANSI renderer active)\n");
 
-    if (ctx->file && ctx->file[0]) {
+    if (ctx->file[0]) {
         tty_write_ansi("  \x1b[1;96m• Location:\x1b[0m ");
         tty_write_ansi(ctx->file);
         if (ctx->line > 0) {
@@ -2744,7 +2915,7 @@ static void draw_simple_panic_screen(const panic_context_t* ctx) {
             tty_write_ansi(" : ");
             tty_write_ansi(line_str);
         }
-        if (ctx->function && ctx->function[0]) {
+        if (ctx->function[0]) {
             tty_write_ansi(" (");
             tty_write_ansi(ctx->function);
             tty_write_ansi(")");
@@ -2752,29 +2923,96 @@ static void draw_simple_panic_screen(const panic_context_t* ctx) {
         tty_write_ansi("\n");
     }
 
-    tty_write_ansi("\x1b[94m------------------------------------------------------------------------------\x1b[0m\x1b[44m\x1b[97m\n");
-    tty_write_ansi("\x1b[1;93mCPU Snapshot\x1b[0m\x1b[44m\x1b[97m\n");
+    tty_write_ansi("\x1b[95m------------------------------------------------------------------------------\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("\x1b[1;95mCPU Snapshot\x1b[0m\x1b[45m\x1b[97m\n");
     char hex_str[12];
+    char reg_str[12];
+    char dec_str[12];
     format_hex32(ctx->cpu_state.eip, hex_str);
-    tty_write_ansi("  \x1b[0;33mEIP\x1b[0m    : \x1b[1;97m");
+    tty_write_ansi("  \x1b[0;35mEIP\x1b[0m    : \x1b[1;97m");
     tty_write_ansi(hex_str);
-    tty_write_ansi("\x1b[0m\x1b[44m\x1b[97m\n");
+    tty_write_ansi("\x1b[0m\x1b[45m\x1b[97m\n");
 
     format_hex32(ctx->cpu_state.esp, hex_str);
-    tty_write_ansi("  \x1b[0;33mESP\x1b[0m    : \x1b[1;97m");
+    tty_write_ansi("  \x1b[0;35mESP\x1b[0m    : \x1b[1;97m");
     tty_write_ansi(hex_str);
-    tty_write_ansi("\x1b[0m\x1b[44m\x1b[97m\n");
+    tty_write_ansi("\x1b[0m\x1b[45m\x1b[97m\n");
 
     format_hex32(ctx->cpu_state.eflags, hex_str);
-    tty_write_ansi("  \x1b[0;33mEFLAGS\x1b[0m : \x1b[1;97m");
+    tty_write_ansi("  \x1b[0;35mEFLAGS\x1b[0m : \x1b[1;97m");
     tty_write_ansi(hex_str);
-    tty_write_ansi("\x1b[0m\x1b[44m\x1b[97m\n\n");
+    tty_write_ansi("\x1b[0m\x1b[45m\x1b[97m\n");
 
-    tty_write_ansi("\x1b[94m------------------------------------------------------------------------------\x1b[0m\x1b[44m\x1b[97m\n");
-    tty_write_ansi("\x1b[1;93mActions\x1b[0m\x1b[44m\x1b[97m\n");
-    tty_write_ansi("  \x1b[1;31m!\x1b[0;44;97m Safely power cycle the machine.\n");
-    tty_write_ansi("  \x1b[1;36m!\x1b[0;44;97m Capture this screen for debugging.\n");
-    tty_write_ansi("  \x1b[1;33m!\x1b[0;44;97m Review recent logs for hardware or memory faults.\n\n");
+    tty_write_ansi("  \x1b[0;95mGeneral registers:\x1b[0m\x1b[45m\x1b[97m\n");
+    format_hex32(ctx->cpu_state.eax, reg_str);
+    tty_write_ansi("    \x1b[0;36mEAX\x1b[0m ");
+    tty_write_ansi(reg_str);
+    tty_write_ansi("    ");
+    format_hex32(ctx->cpu_state.ebx, reg_str);
+    tty_write_ansi("\x1b[0;36mEBX\x1b[0m ");
+    tty_write_ansi(reg_str);
+    tty_write_ansi("\n");
+    format_hex32(ctx->cpu_state.ecx, reg_str);
+    tty_write_ansi("    \x1b[0;36mECX\x1b[0m ");
+    tty_write_ansi(reg_str);
+    tty_write_ansi("    ");
+    format_hex32(ctx->cpu_state.edx, reg_str);
+    tty_write_ansi("\x1b[0;36mEDX\x1b[0m ");
+    tty_write_ansi(reg_str);
+    tty_write_ansi("\n");
+    format_hex32(ctx->cpu_state.esi, reg_str);
+    tty_write_ansi("    \x1b[0;36mESI\x1b[0m ");
+    tty_write_ansi(reg_str);
+    tty_write_ansi("    ");
+    format_hex32(ctx->cpu_state.edi, reg_str);
+    tty_write_ansi("\x1b[0;36mEDI\x1b[0m ");
+    tty_write_ansi(reg_str);
+    tty_write_ansi("\n\n");
+
+    tty_write_ansi("\x1b[95m------------------------------------------------------------------------------\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("\x1b[1;95mError Details\x1b[0m\x1b[45m\x1b[97m\n");
+    if (ctx->error_code) {
+        format_hex32(ctx->error_code, hex_str);
+        format_decimal(ctx->error_code, dec_str);
+        tty_write_ansi("  \x1b[1;31m• Error Code:\x1b[0m ");
+        tty_write_ansi(hex_str);
+        tty_write_ansi(" (");
+        tty_write_ansi(dec_str);
+        tty_write_ansi(")\n");
+    } else {
+        tty_write_ansi("  \x1b[1;31m• Error Code:\x1b[0m Not supplied/CPU generated\n");
+    }
+    tty_write_ansi("  \x1b[1;36m• Fault Address (CR2):\x1b[0m ");
+    if (ctx->cpu_state.cr2) {
+        format_hex32(ctx->cpu_state.cr2, hex_str);
+        tty_write_ansi(hex_str);
+        tty_write_ansi("\n");
+    } else {
+        tty_write_ansi("No address captured\n");
+    }
+    format_hex32(ctx->cpu_state.eip, hex_str);
+    format_hex32(ctx->cpu_state.cs, reg_str);
+    tty_write_ansi("  \x1b[1;94m• Instruction Source:\x1b[0m CS=");
+    tty_write_ansi(reg_str);
+    tty_write_ansi(" EIP=");
+    tty_write_ansi(hex_str);
+    tty_write_ansi("\n");
+
+    tty_write_ansi("\x1b[95m------------------------------------------------------------------------------\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("\x1b[1;95mActions\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("  \x1b[1;31m!\x1b[0;45;97m Safely power cycle the machine.\n");
+    tty_write_ansi("  \x1b[1;36m!\x1b[0;45;97m Capture this screen for debugging.\n");
+    tty_write_ansi("  \x1b[1;33m!\x1b[0;45;97m Review recent logs for hardware or memory faults.\n");
+    tty_write_ansi("  \x1b[1;35m!\x1b[0;45;97m Inspect recent drivers or kernel modules for regressions.\n\n");
+
+    tty_write_ansi("\x1b[95m------------------------------------------------------------------------------\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("\x1b[1;95mANSI Diagnostic Palette\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("  ");
+    tty_write_ansi("\x1b[40m  0  \x1b[41m  1  \x1b[42m  2  \x1b[43m  3  \x1b[44m  4  \x1b[45m  5  \x1b[46m  6  \x1b[47m  7  \x1b[0m\n");
+    tty_write_ansi("  ");
+    tty_write_ansi("\x1b[100m  8  \x1b[101m  9  \x1b[102m 10  \x1b[103m 11  \x1b[104m 12  \x1b[105m 13  \x1b[106m 14  \x1b[107m 15  \x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("  \x1b[0mForeground sweep:\x1b[30m 30\x1b[31m 31\x1b[32m 32\x1b[33m 33\x1b[34m 34\x1b[35m 35\x1b[36m 36\x1b[37m 37\x1b[0m\x1b[45m\x1b[97m\n");
+    tty_write_ansi("  \x1b[0mBright sweep:\x1b[90m 90\x1b[91m 91\x1b[92m 92\x1b[93m 93\x1b[94m 94\x1b[95m 95\x1b[96m 96\x1b[97m 97\x1b[0m\x1b[45m\x1b[97m\n\n");
 
     tty_write_ansi("\x1b[0;90mSystem halted. Press reset or power off.\x1b[0m\n");
 }
@@ -2819,14 +3057,32 @@ void kernel_panic_annotated(const char* message, const char* file, uint32 line, 
     // Initialize simple panic context
     panic_context_t ctx;
     memset(&ctx, 0, sizeof(ctx));
+    capture_cpu_state_atomic(&ctx.cpu_state);
     strncpy((char*)ctx.message, message, sizeof(ctx.message) - 1);
     strncpy((char*)ctx.file, file, sizeof(ctx.file) - 1);
     strncpy((char*)ctx.function, func, sizeof(ctx.function) - 1);
     ctx.line = line;
     ctx.type = PANIC_TYPE_GENERAL;
 
+    if (g_panic_pending_fault.valid) {
+        ctx.cpu_state.cr2 = g_panic_pending_fault.fault_addr;
+        ctx.error_code = g_panic_pending_fault.error_code;
+        if (g_panic_pending_fault.fault_eip) {
+            ctx.cpu_state.eip = g_panic_pending_fault.fault_eip;
+        }
+        if (g_panic_pending_fault.fault_cs) {
+            ctx.cpu_state.cs = g_panic_pending_fault.fault_cs;
+        }
+        if (g_panic_pending_fault.fault_eflags) {
+            ctx.cpu_state.eflags = g_panic_pending_fault.fault_eflags;
+        }
+        g_panic_pending_fault.valid = false;
+    }
+
     // Capture current CPU state
     capture_stack_snapshot(&ctx);
+    panic_store_context(&ctx);
+    panic_debuglog_emit(&ctx);
     
     // Display panic and halt
     draw_simple_panic_screen(&ctx);
@@ -2844,8 +3100,24 @@ void kernel_panic_with_stack(const char* message, const uint32* stack_entries, u
     // Initialize panic context
     panic_context_t ctx;
     memset(&ctx, 0, sizeof(ctx));
+    capture_cpu_state_atomic(&ctx.cpu_state);
     strncpy((char*)ctx.message, message, sizeof(ctx.message) - 1);
     ctx.type = PANIC_TYPE_GENERAL;
+
+    if (g_panic_pending_fault.valid) {
+        ctx.cpu_state.cr2 = g_panic_pending_fault.fault_addr;
+        ctx.error_code = g_panic_pending_fault.error_code;
+        if (g_panic_pending_fault.fault_eip) {
+            ctx.cpu_state.eip = g_panic_pending_fault.fault_eip;
+        }
+        if (g_panic_pending_fault.fault_cs) {
+            ctx.cpu_state.cs = g_panic_pending_fault.fault_cs;
+        }
+        if (g_panic_pending_fault.fault_eflags) {
+            ctx.cpu_state.eflags = g_panic_pending_fault.fault_eflags;
+        }
+        g_panic_pending_fault.valid = false;
+    }
 
     // Copy stack entries
     if (stack_entries && entry_count > 0) {
@@ -2856,6 +3128,9 @@ void kernel_panic_with_stack(const char* message, const uint32* stack_entries, u
         ctx.manual_stack_count = copy_count;
         ctx.manual_stack_valid = true;
     }
+
+    panic_store_context(&ctx);
+    panic_debuglog_emit(&ctx);
 
     // Display panic and halt  
     draw_simple_panic_screen(&ctx);

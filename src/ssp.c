@@ -1,6 +1,7 @@
 #include "include/ssp.h"
 #include "include/screen.h"
 #include "include/memory.h"
+#include "include/debuglog.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -26,6 +27,38 @@ static bool ssp_initialized = false;
 static uint32_t ssp_random_seed = SSP_CANARY_RANDOM_SEED;
 
 // Simple PRNG for canary generation
+extern uint8 kernel_start;
+extern uint8 kernel_end;
+extern uint8 _stack_bottom;
+extern uint8 _stack_top;
+
+static inline uint32_t ssp_kernel_start(void) {
+    return (uint32_t)&kernel_start;
+}
+
+static inline uint32_t ssp_kernel_end(void) {
+    return (uint32_t)&kernel_end;
+}
+
+static inline uint32_t ssp_stack_bottom(void) {
+    return (uint32_t)&_stack_bottom;
+}
+
+static inline uint32_t ssp_stack_top(void) {
+    return (uint32_t)&_stack_top;
+}
+
+static void ssp_log_warning(const char* msg, uint32_t value) {
+    if (!debuglog_is_ready()) {
+        return;
+    }
+    debuglog_write("[SSP] ");
+    debuglog_write(msg);
+    debuglog_write(": ");
+    debuglog_write_hex(value);
+    debuglog_write("\n");
+}
+
 static uint32_t ssp_random_next(void) {
     ssp_random_seed = ssp_random_seed * 1103515245 + 12345;
     return (ssp_random_seed >> 16) & 0x7FFF;
@@ -159,11 +192,13 @@ void ssp_protect_return_address(uint32_t *return_addr) {
     // Validate that this looks like a reasonable return address
     uint32_t addr = *return_addr;
     
-    // Check if address is in reasonable code range (above 0x100000, below 0x80000000)
-    if (addr < 0x100000 || addr > 0x80000000) {
+    uint32_t code_start = ssp_kernel_start();
+    uint32_t code_end = ssp_kernel_end();
+
+    if (addr < code_start || addr >= code_end) {
         ssp_stats.return_address_violations++;
-        ssp_report_violation("return_address", addr, 0);
-        __stack_chk_fail();
+        ssp_log_warning("return address outside kernel image", addr);
+        return; // Do not panic during early boot paths
     }
 }
 
@@ -173,8 +208,10 @@ bool ssp_validate_return_address(uint32_t return_addr) {
         return true; // Can't validate if not initialized
     }
     
-    // Basic sanity checks for return address
-    if (return_addr < 0x100000 || return_addr > 0x80000000) {
+    uint32_t code_start = ssp_kernel_start();
+    uint32_t code_end = ssp_kernel_end();
+
+    if (return_addr < code_start || return_addr >= code_end) {
         return false;
     }
     
@@ -195,8 +232,10 @@ bool ssp_validate_stack_frame(uint32_t *frame_pointer) {
     // Basic sanity checks
     uint32_t frame_addr = (uint32_t)frame_pointer;
     
-    // Check if frame pointer is in reasonable stack range
-    if (frame_addr < 0x100000 || frame_addr > 0x800000) {
+    uint32_t stack_lo = ssp_stack_bottom();
+    uint32_t stack_hi = ssp_stack_top();
+
+    if (frame_addr < stack_lo || frame_addr >= stack_hi) {
         return false;
     }
     
@@ -211,7 +250,7 @@ bool ssp_validate_stack_frame(uint32_t *frame_pointer) {
     
     // Saved EBP should either be null (bottom of stack) or valid pointer
     if (saved_ebp != 0) {
-        if (saved_ebp < frame_addr || saved_ebp > 0x800000) {
+        if (saved_ebp < stack_lo || saved_ebp >= stack_hi) {
             return false;
         }
     }

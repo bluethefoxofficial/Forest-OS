@@ -9,6 +9,8 @@
 #include "include/screen.h"
 
 #include "include/memory_safe.h"
+#include "include/memory_region_manager.h"
+#include "include/page_fault_recovery.h"
 #include "include/acpi.h"
 #include "include/multiboot.h"
 #include "include/panic.h"
@@ -42,6 +44,15 @@
 #include "include/secure_vmm.h"
 #include "include/init_system.h"
 
+typedef struct {
+    char label[64];
+    bool ok;
+} boot_log_entry_t;
+
+#define BOOT_LOG_CAPACITY 64
+static boot_log_entry_t g_boot_log[BOOT_LOG_CAPACITY];
+static uint32_t g_boot_log_count = 0;
+
 // Forward declaration for SSP test
 extern int ssp_run_tests(void);
 extern int memory_corruption_run_tests(void);
@@ -72,29 +83,97 @@ static void kernel_panic_memory_error(const char* stage, const char* reason) {
 #define COLOR_FAIL 0x0C
 #define COLOR_LABEL 0x0B
 
+static bool g_graphics_ready = false;
+static bool g_framebuffer_tty_ready = false;
+
 static void boot_banner(void) {
-    tty_set_attr(MAKE_TEXT_ATTR(TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK));
-    tty_clear();
-    tty_write_ansi("\x1b[32mForest OS \x1b[37mkernel \x1b[36mv1.0\x1b[0m\n");
-    tty_write_ansi("\x1b[90mTTY backend ready for graphics/text fallback\x1b[0m\n");
-    tty_write_ansi("\x1b[32m[    0.000000]\x1b[37m Booting Forest-OS with enhanced TTY output...\x1b[0m\n");
-    tty_write_ansi("\x1b[32m[    0.001000]\x1b[37m Kernel command line: root=/dev/ram0 init=/bin/init\x1b[0m\n");
-    tty_write_ansi("\x1b[32m[    0.002000]\x1b[37m Initializing subsystems...\x1b[0m\n\n");
+    // Display appropriate banner based on available console mode
+    if (g_framebuffer_tty_ready) {
+        // Enhanced TTY is available
+        tty_set_attr(MAKE_TEXT_ATTR(TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK));
+        tty_clear();
+        tty_write_ansi("\x1b[32mForest OS \x1b[37mkernel \x1b[36mv1.0\x1b[0m\n");
+        tty_write_ansi("\x1b[90mFramebuffer TTY with advanced ANSI support\x1b[0m\n");
+        tty_write_ansi("\x1b[32m[    0.000000]\x1b[37m Booting Forest-OS with framebuffer TTY...\x1b[0m\n");
+        tty_write_ansi("\x1b[32m[    0.001000]\x1b[37m Kernel command line: root=/dev/ram0 init=/bin/init\x1b[0m\n");
+        tty_write_ansi("\x1b[32m[    0.002000]\x1b[37m Initializing subsystems...\x1b[0m\n\n");
+    } else {
+        // Fall back to basic text mode
+        print_colored("Forest OS kernel v1.0\n", TEXT_ATTR_LIGHT_CYAN, TEXT_ATTR_BLACK);
+        print_colored("Booting with text mode console...\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
+        print_colored("Initializing subsystems...\n\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
+    }
+    
+    // Always log to debuglog for early boot debugging
+    debuglog_write("Forest OS kernel v1.0 boot sequence started\n");
+    debuglog_write("Initializing subsystems...\n");
+}
+
+static void boot_log_event(const char* label, bool ok) {
+    if (!label) {
+        label = "unknown";
+    }
+    if (g_boot_log_count < BOOT_LOG_CAPACITY) {
+        boot_log_entry_t* entry = &g_boot_log[g_boot_log_count++];
+        strncpy(entry->label, label, sizeof(entry->label) - 1);
+        entry->label[sizeof(entry->label) - 1] = '\0';
+        entry->ok = ok;
+    }
 }
 
 static void boot_status(const char* label, bool ok) {
     static uint32 timestamp_counter = 3000;  // Start after initial messages
+    boot_log_event(label, ok);
+    if (debuglog_is_ready()) {
+        debuglog_write(ok ? "[BOOT][ OK ] " : "[BOOT][FAIL] ");
+        debuglog_write(label);
+        debuglog_write("\n");
+    }
 
-    char line[256];
-    snprintf(line, sizeof(line), "\x1b[90m[%8u]\x1b[0m %s%c\x1b[0m %s\x1b[90m ...\x1b[0m %s\n",
-             timestamp_counter,
-             ok ? "\x1b[32m" : "\x1b[31m",
-             ok ? '+' : '-',
-             label,
-             ok ? "\x1b[32mOK\x1b[0m" : "\x1b[31mFAILED\x1b[0m");
-    tty_write_ansi(line);
+    if (g_framebuffer_tty_ready) {
+        char line[256];
+        snprintf(line, sizeof(line), "\x1b[90m[%8u]\x1b[0m %s%c\x1b[0m %s\x1b[90m ...\x1b[0m %s\n",
+                 timestamp_counter,
+                 ok ? "\x1b[32m" : "\x1b[31m",
+                 ok ? '+' : '-',
+                 label,
+                 ok ? "\x1b[32mOK\x1b[0m" : "\x1b[31mFAILED\x1b[0m");
+        tty_write_ansi(line);
+    }
 
     timestamp_counter += 100 + (timestamp_counter % 50); // Variable timing like real boot
+}
+
+static void initialize_framebuffer_console_early(void) {
+    if (g_framebuffer_tty_ready) {
+        return;
+    }
+
+    if (!g_graphics_ready) {
+        graphics_result_t graphics_init_result = graphics_init();
+        g_graphics_ready = (graphics_init_result == GRAPHICS_SUCCESS);
+        boot_status("Graphics subsystem", g_graphics_ready);
+        if (!g_graphics_ready) {
+            print_colored("ERROR: Graphics subsystem required for modern TTY\n",
+                          TEXT_ATTR_LIGHT_RED, TEXT_ATTR_BLACK);
+            print_colored("System will continue with legacy console only\n",
+                          TEXT_ATTR_YELLOW, TEXT_ATTR_BLACK);
+            return;
+        }
+    }
+
+    if (!g_framebuffer_tty_ready) {
+        bool tty_success = tty_init();
+        if (tty_success) {
+            tty_clear();
+            boot_banner();
+            boot_status("Framebuffer TTY with truecolor support", true);
+            g_framebuffer_tty_ready = true;
+        } else {
+            boot_status("Framebuffer TTY with truecolor support", false);
+            print_colored("Failed to initialize framebuffer TTY\n", TEXT_ATTR_LIGHT_RED, TEXT_ATTR_BLACK);
+        }
+    }
 }
 
 static void boot_require(const char* label, bool ok, const char* panic_reason) {
@@ -116,9 +195,7 @@ void startk(uint32 magic, uint32 mbi_addr) {
 
     init_system_init();
 
-    // Now safe to initialize console (uses interrupt save/restore)
-    console_init();
-    tty_init();
+    // Note: Console initialization moved to after graphics init for framebuffer-only TTY
     
     // Complete interrupt system setup
     interrupt_full_init();
@@ -129,15 +206,12 @@ void startk(uint32 magic, uint32 mbi_addr) {
 }
 
 void kmain(uint32 magic, uint32 mbi_addr) {
-    // Console already initialized in startk()
+    // Initialize early text mode console first for debugging
+    clearScreen();
+    print_colored("Forest OS kernel v1.0 - Early Boot\n", TEXT_ATTR_LIGHT_GREEN, TEXT_ATTR_BLACK);
+    print_colored("Text mode console active\n\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
     
-    // bool high_res_text = screen_set_mode(TEXT_MODE_80x50);
-    // if (!high_res_text) {
-    //     clearScreen();
-    //     print_colored("Falling back to 80x25 text mode\n\n", COLOR_WARN, 0x00);
-    // }
-    
-    boot_banner();
+    // We'll initialize graphics much later in the boot process
     keyboard_set_driver_mode(KEYBOARD_DRIVER_LEGACY);
     
     bool hw_detected = hardware_detect_init();
@@ -160,6 +234,17 @@ void kmain(uint32 magic, uint32 mbi_addr) {
         kernel_panic_memory_error("memory_init", memory_result_to_string(mem_result));
     }
     boot_status("Memory subsystem", true);
+
+    // Initialize framebuffer console as early as possible now that memory is ready
+    initialize_framebuffer_console_early();
+    
+    // Initialize intelligent memory region manager
+    memory_region_manager_init();
+    boot_status("Memory region manager", true);
+    
+    // Initialize page fault recovery system
+    page_fault_recovery_init();
+    boot_status("Page fault recovery system", true);
     
     // Initialize bitmap-based physical memory manager
     pmm_config_t pmm_config = {
@@ -253,28 +338,6 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     bool pci_ok = pci_init();
     boot_status("PCI/PCIe configuration", pci_ok);
 
-    bool graphics_console = init_system_apply_display();
-    if (!graphics_console) {
-        // Use reliable VGA text mode directly - skip complex graphics drivers
-        tty_clear();
-        tty_write_ansi("\x1b[32mVGA text mode initialized successfully\x1b[0m\n");
-
-        // Set high-resolution text mode for better display
-        bool high_res_ok = screen_set_mode(TEXT_MODE_80x50);
-        if (!high_res_ok) {
-            tty_write_ansi("\x1b[33mUsing standard 80x25 text mode\x1b[0m\n");
-            screen_set_mode(TEXT_MODE_80x25);
-        } else {
-            tty_write_ansi("\x1b[32mEnhanced 80x50 text mode active\x1b[0m\n");
-        }
-
-        tty_clear();
-        boot_banner(); // Re-display banner in proper mode
-        boot_status("VGA text mode", true);
-    } else {
-        boot_status("Graphics console (init)", true);
-    }
-
     bool net_ok = driver_core_ok && net_init();
     boot_status("Network core", net_ok);
 
@@ -342,9 +405,60 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     // Enable interrupts
     irq_enable_safe();
 
-    // Temporarily disable all shells to test Linux-style exception handling
-    tty_write_ansi("\x1b[36m[INFO]\x1b[0m All shells disabled for testing. Kernel initialization complete.\n");
-    tty_write_ansi("\x1b[36m[INFO]\x1b[0m System ready. CPU will halt to preserve power.\n");
+    // Demonstrate enhanced TTY capabilities
+    tty_write_ansi("\x1b[36m[INFO]\x1b[0m Demonstrating enhanced TTY with full ANSI support:\n\n");
+    
+    // Test basic 16 colors
+    tty_write_ansi("Standard 16 colors: ");
+    for (int i = 30; i <= 37; i++) {
+        char color_test[32];
+        sprintf(color_test, "\x1b[%dm█\x1b[0m", i);
+        tty_write_ansi(color_test);
+    }
+    for (int i = 90; i <= 97; i++) {
+        char color_test[32];
+        sprintf(color_test, "\x1b[%dm█\x1b[0m", i);
+        tty_write_ansi(color_test);
+    }
+    tty_write_ansi("\n");
+    
+    // Test 256-color mode
+    tty_write_ansi("256-color palette sample: ");
+    for (int i = 16; i < 32; i++) {
+        char color_test[32];
+        sprintf(color_test, "\x1b[38;5;%dm█\x1b[0m", i);
+        tty_write_ansi(color_test);
+    }
+    tty_write_ansi("\n");
+    
+    // Test truecolor
+    tty_write_ansi("Truecolor RGB gradient: ");
+    for (int r = 0; r < 256; r += 32) {
+        char color_test[32];
+        sprintf(color_test, "\x1b[38;2;%d;0;%dm█\x1b[0m", r, 255-r);
+        tty_write_ansi(color_test);
+    }
+    tty_write_ansi("\n");
+    
+    // Test text attributes
+    tty_write_ansi("Text attributes: ");
+    tty_write_ansi("\x1b[1mBold\x1b[22m ");
+    tty_write_ansi("\x1b[2mFaint\x1b[22m ");
+    tty_write_ansi("\x1b[3mItalic\x1b[23m ");
+    tty_write_ansi("\x1b[4mUnderline\x1b[24m ");
+    tty_write_ansi("\x1b[9mStrikethrough\x1b[29m ");
+    tty_write_ansi("\x1b[7mInverse\x1b[27m");
+    tty_write_ansi("\n");
+    
+    // Test cursor control
+    tty_write_ansi("Cursor control: ");
+    tty_write_ansi("Moving");
+    tty_write_ansi("\x1b[3D\x1b[1C←→");
+    tty_write_ansi("\x1b[2C test\n");
+    
+    tty_write_ansi("\n\x1b[32mEnhanced TTY demonstration complete!\x1b[0m\n");
+    tty_write_ansi("\x1b[36m[INFO]\x1b[0m System ready with enhanced terminal capabilities.\n");
+    tty_write_ansi("\x1b[36m[INFO]\x1b[0m CPU will halt to preserve power.\n");
     
     // Just halt - this tests that our exception handling works when no errors occur
     while (1) {

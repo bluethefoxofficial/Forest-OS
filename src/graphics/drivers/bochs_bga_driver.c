@@ -5,6 +5,7 @@
 #include "../../include/string.h"
 #include "../../include/debuglog.h"
 #include "../../include/io_ports.h"
+#include "../../include/tlb_manager.h"
 
 // Bochs VBE Extension constants from the documentation
 #define VBE_DISPI_IOPORT_INDEX      0x01CE
@@ -275,7 +276,7 @@ static void bga_put_pixel(int32_t x, int32_t y, uint32_t pixel_value) {
     uint32_t pitch = bga_state.current_width * (bga_state.current_bpp / 8);
     uint32_t offset = y * pitch + x * (bga_state.current_bpp / 8);
     
-    uint8_t* fb = (uint8_t*)bga_state.framebuffer;
+    volatile uint8_t* fb = (volatile uint8_t*)bga_state.framebuffer;
     
     switch (bga_state.current_bpp) {
         case 8:
@@ -283,7 +284,7 @@ static void bga_put_pixel(int32_t x, int32_t y, uint32_t pixel_value) {
             break;
         case 15:
         case 16:
-            *(uint16_t*)(fb + offset) = (uint16_t)pixel_value;
+            *(volatile uint16_t*)(fb + offset) = (uint16_t)pixel_value;
             break;
         case 24:
             fb[offset] = pixel_value & 0xFF;
@@ -291,9 +292,12 @@ static void bga_put_pixel(int32_t x, int32_t y, uint32_t pixel_value) {
             fb[offset + 2] = (pixel_value >> 16) & 0xFF;
             break;
         case 32:
-            *(uint32_t*)(fb + offset) = pixel_value;
+            *(volatile uint32_t*)(fb + offset) = pixel_value;
             break;
     }
+    
+    // Memory barrier to ensure write ordering
+    __asm__ volatile ("" ::: "memory");
 }
 
 // Driver operation implementations
@@ -324,15 +328,52 @@ static graphics_result_t bga_initialize(graphics_device_t* device) {
         debuglog(DEBUG_WARN, "BGA: No framebuffer BAR; falling back to 0xE0000000\n");
     }
     if (bga_state.framebuffer_size == 0) {
-        // Assume an 8 MiB window by default; a later mode set will tighten this.
-        bga_state.framebuffer_size = 8 * 1024 * 1024;
+        // Assume a 16 MiB window by default for safety
+        bga_state.framebuffer_size = 16 * 1024 * 1024;
     }
     
-    // Map framebuffer to virtual memory (identity mapping for now)
-    bga_state.framebuffer = (void*)bga_state.framebuffer_phys;
+    // Map framebuffer to virtual memory using VMM identity mapping
+    uint32_t fb_start = bga_state.framebuffer_phys;
+    uint32_t fb_end = fb_start + bga_state.framebuffer_size;
     
-    // Set initial mode (640x480x16)
-    graphics_result_t result = bga_set_video_mode(640, 480, 16, true, true);
+    // Align to page boundaries
+    fb_start = fb_start & ~0xFFF;
+    fb_end = (fb_end + 0xFFF) & ~0xFFF;
+    
+    // Map the framebuffer region with proper flags
+    page_directory_t* current_dir = vmm_get_current_page_directory();
+    memory_result_t map_result = vmm_identity_map_range(current_dir, fb_start, fb_end, 
+                                                       PAGE_PRESENT | PAGE_WRITABLE);
+    
+    if (map_result != MEMORY_OK) {
+        debuglog(DEBUG_ERROR, "BGA: Failed to map framebuffer memory at 0x%x-0x%x\n", fb_start, fb_end);
+        return GRAPHICS_ERROR_HARDWARE_FAULT;
+    }
+    
+    // CRITICAL FIX: Flush TLB after memory mapping to ensure proper translation
+    tlb_invalidate_range(fb_start, fb_end);
+    
+    // Validate that the memory mapping actually works by testing read/write
+    bga_state.framebuffer = (void*)bga_state.framebuffer_phys;
+    volatile uint32_t* test_ptr = (volatile uint32_t*)bga_state.framebuffer;
+    
+    // Test memory accessibility with a safe pattern
+    uint32_t test_pattern = 0x12345678;
+    uint32_t original_value = *test_ptr;  // Save original value
+    *test_ptr = test_pattern;             // Write test pattern
+    
+    if (*test_ptr != test_pattern) {
+        debuglog(DEBUG_ERROR, "BGA: Framebuffer memory mapping validation failed\n");
+        return GRAPHICS_ERROR_HARDWARE_FAULT;
+    }
+    
+    *test_ptr = original_value;  // Restore original value
+    
+    debuglog(DEBUG_INFO, "BGA: Successfully mapped and validated framebuffer 0x%x-0x%x (size: %u MB)\n", 
+             fb_start, fb_end, (fb_end - fb_start) / (1024*1024));
+    
+    // Set initial mode (800x600x32 for better readability)
+    graphics_result_t result = bga_set_video_mode(800, 600, 32, true, true);
     if (result != GRAPHICS_SUCCESS) {
         debuglog(DEBUG_ERROR, "BGA: Failed to set initial mode\n");
         return result;
@@ -466,16 +507,19 @@ static graphics_result_t bga_clear_screen(graphics_device_t* device, graphics_co
     uint32_t pixel_size = bga_state.current_bpp / 8;
     uint32_t framebuffer_size_pixels = bga_state.current_width * bga_state.current_height;
     
-    uint8_t* fb = (uint8_t*)bga_state.framebuffer;
+    volatile uint8_t* fb = (volatile uint8_t*)bga_state.framebuffer;
     
     // Fast clear for common pixel sizes
     switch (pixel_size) {
         case 1:
-            memset(fb, (uint8_t)pixel_value, framebuffer_size_pixels);
+            // Use volatile pointer for byte-by-byte clear to ensure ordering
+            for (uint32_t i = 0; i < framebuffer_size_pixels; i++) {
+                fb[i] = (uint8_t)pixel_value;
+            }
             break;
         case 2:
             for (uint32_t i = 0; i < framebuffer_size_pixels; i++) {
-                *(uint16_t*)(fb + i * 2) = (uint16_t)pixel_value;
+                *(volatile uint16_t*)(fb + i * 2) = (uint16_t)pixel_value;
             }
             break;
         case 3:
@@ -487,10 +531,13 @@ static graphics_result_t bga_clear_screen(graphics_device_t* device, graphics_co
             break;
         case 4:
             for (uint32_t i = 0; i < framebuffer_size_pixels; i++) {
-                *(uint32_t*)(fb + i * 4) = pixel_value;
+                *(volatile uint32_t*)(fb + i * 4) = pixel_value;
             }
             break;
     }
+    
+    // Memory barrier to ensure all framebuffer writes complete
+    __asm__ volatile ("" ::: "memory");
     
     return GRAPHICS_SUCCESS;
 }

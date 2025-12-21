@@ -4,6 +4,7 @@
 #include "include/system.h"
 #include "include/timer.h"
 #include "include/util.h"
+#include "include/debuglog.h"
 
 // =============================================================================
 // GLOBAL STATE
@@ -213,6 +214,20 @@ static bool handle_invalid_opcode(struct interrupt_frame* frame) {
 
 // Default exception handler - Linux-style approach
 static void default_exception_handler(int int_no, struct interrupt_frame* frame, unsigned int error_code) {
+    if (debuglog_is_ready()) {
+        uint32 cr2 = 0;
+        __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
+        debuglog_write("[EXCEPTION] vector=");
+        debuglog_write_dec((uint32)int_no);
+        debuglog_write(" err=");
+        debuglog_write_hex(error_code);
+        debuglog_write(" eip=");
+        debuglog_write_hex(frame->eip);
+        debuglog_write(" cr2=");
+        debuglog_write_hex(cr2);
+        debuglog_write("\n");
+    }
+
     switch (int_no) {
         case EXCEPTION_INVALID_OPCODE:
             if (handle_invalid_opcode(frame)) {

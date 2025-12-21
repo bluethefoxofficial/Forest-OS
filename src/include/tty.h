@@ -4,16 +4,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Simple teletype interface that can drive either the graphics text backend or
-// the legacy VGA console. The implementation understands common ANSI escape
-// sequences (SGR colors/styles, cursor movement, clears, save/restore cursor)
-// so that higher level code can emit familiar terminal control strings without
-// worrying about which display stack is currently active.
+// Framebuffer-based teletype interface that uses the graphics subsystem for all
+// text rendering. The implementation understands common ANSI escape sequences
+// (SGR colors/styles, cursor movement, clears, save/restore cursor) and renders
+// text directly to the framebuffer with full truecolor support.
 
-// Initialize the TTY subsystem. This will try to use the graphics manager's
-// text mode when available and automatically fall back to the legacy console
-// when graphics hardware is unavailable or not initialized.
-void tty_init(void);
+// Initialize the TTY subsystem. This requires the graphics subsystem to be
+// initialized first and will set up framebuffer-based text rendering.
+// Returns true on success, false on failure.
+bool tty_init(void);
 
 // Clear the entire screen and reset the cursor to the top-left corner using
 // the current attribute settings.
@@ -37,13 +36,11 @@ void tty_set_attr(uint8_t attr);
 uint8_t tty_get_attr(void);
 
 // Report whether the TTY is currently using the graphics subsystem for text
-// output.
+// output. Always returns true for framebuffer-only TTY.
 bool tty_uses_graphics_backend(void);
 
-// Attempt to switch the TTY to the graphics backend, selecting a text mode
-// when available or falling back to a common framebuffer resolution so that
-// glyph rendering continues to function. Returns true when graphics output is
-// active.
+// Attempt to enable the graphics backend. Always returns true if graphics
+// subsystem is initialized, since framebuffer TTY requires graphics.
 bool tty_try_enable_graphics_backend(void);
 
 #endif // TTY_H

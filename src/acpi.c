@@ -2,6 +2,7 @@
 #include "include/string.h"
 #include "include/interrupt.h"
 #include "include/debuglog.h"
+#include "include/memory.h"
 #include <uacpi/uacpi.h>
 #include <uacpi/sleep.h>
 #include <uacpi/event.h>
@@ -18,6 +19,58 @@ static const acpi_sdt_header_t* g_xsdt = 0;
 static const acpi_mcfg_table_t* g_mcfg = 0;
 static bool g_acpi_initialized = false;
 static bool g_uacpi_ready = false;
+
+static bool acpi_map_physical_range(uint32 phys_addr, uint32 length) {
+    if (length == 0) {
+        return false;
+    }
+
+    uint64_t end = (uint64_t)phys_addr + length;
+    if (end > 0xFFFFFFFFULL) {
+        return false;
+    }
+
+    uint32 start_aligned = memory_align_down(phys_addr, MEMORY_PAGE_SIZE);
+    uint32 end_aligned = memory_align_up((uint32)end, MEMORY_PAGE_SIZE);
+
+    if (end_aligned <= start_aligned) {
+        return false;
+    }
+
+    page_directory_t* dir = vmm_get_current_page_directory();
+    if (!dir) {
+        return false;
+    }
+
+    memory_result_t res = vmm_identity_map_range(
+        dir, start_aligned, end_aligned, PAGE_PRESENT | PAGE_WRITABLE);
+
+    return res == MEMORY_OK || res == MEMORY_ERROR_ALREADY_MAPPED;
+}
+
+static const acpi_sdt_header_t* acpi_map_table(uint64 phys_addr) {
+    if (phys_addr == 0 || phys_addr > 0xFFFFFFFFULL) {
+        return NULL;
+    }
+
+    uint32 phys32 = (uint32)phys_addr;
+    if (!acpi_map_physical_range(phys32, sizeof(acpi_sdt_header_t))) {
+        return NULL;
+    }
+
+    const acpi_sdt_header_t* hdr = (const acpi_sdt_header_t*)phys32;
+    uint32 length = hdr->length;
+
+    if (length < sizeof(acpi_sdt_header_t) || length > (1 * 1024 * 1024)) {
+        return NULL;
+    }
+
+    if (!acpi_map_physical_range(phys32, length)) {
+        return NULL;
+    }
+
+    return hdr;
+}
 
 static uint8 acpi_checksum(const void* ptr, uint32 length) {
     const uint8* bytes = (const uint8*)ptr;
@@ -71,9 +124,9 @@ static const acpi_sdt_header_t* acpi_get_root_table(const acpi_rsdp_t* rsdp) {
         return 0;
     }
     if (rsdp->v1.revision >= 2 && rsdp->xsdt_address) {
-        return (const acpi_sdt_header_t*)(uint32)(rsdp->xsdt_address & 0xFFFFFFFFu);
+        return acpi_map_table(rsdp->xsdt_address);
     }
-    return (const acpi_sdt_header_t*)(uint32)rsdp->v1.rsdt_address;
+    return acpi_map_table((uint32)rsdp->v1.rsdt_address);
 }
 
 static const acpi_sdt_header_t* acpi_find_table(const char* signature) {
@@ -81,7 +134,7 @@ static const acpi_sdt_header_t* acpi_find_table(const char* signature) {
         uint32 entries = (g_xsdt->length - sizeof(acpi_sdt_header_t)) / sizeof(uint64);
         const uint64* entry = (const uint64*)((const uint8*)g_xsdt + sizeof(acpi_sdt_header_t));
         for (uint32 i = 0; i < entries; i++, entry++) {
-            const acpi_sdt_header_t* table = (const acpi_sdt_header_t*)(uint32)(*entry & 0xFFFFFFFFu);
+            const acpi_sdt_header_t* table = acpi_map_table(*entry & 0xFFFFFFFFu);
             if (!table) {
                 continue;
             }
@@ -95,7 +148,7 @@ static const acpi_sdt_header_t* acpi_find_table(const char* signature) {
         uint32 entries = (g_rsdt->length - sizeof(acpi_sdt_header_t)) / sizeof(uint32);
         const uint32* entry = (const uint32*)((const uint8*)g_rsdt + sizeof(acpi_sdt_header_t));
         for (uint32 i = 0; i < entries; i++, entry++) {
-            const acpi_sdt_header_t* table = (const acpi_sdt_header_t*)(uint32)(*entry);
+            const acpi_sdt_header_t* table = acpi_map_table(*entry);
             if (!table) {
                 continue;
             }
@@ -124,14 +177,14 @@ bool acpi_init(void) {
     }
 
     if (g_rsdp->v1.revision >= 2 && g_rsdp->xsdt_address) {
-        g_xsdt = (const acpi_sdt_header_t*)(uint32)(g_rsdp->xsdt_address & 0xFFFFFFFFu);
-        if (!acpi_validate_table(g_xsdt)) {
+        g_xsdt = acpi_map_table(g_rsdp->xsdt_address);
+        if (!g_xsdt || !acpi_validate_table(g_xsdt)) {
             g_xsdt = 0;
         }
     }
 
-    g_rsdt = (const acpi_sdt_header_t*)(uint32)g_rsdp->v1.rsdt_address;
-    if (!acpi_validate_table(g_rsdt)) {
+    g_rsdt = acpi_map_table((uint32)g_rsdp->v1.rsdt_address);
+    if (!g_rsdt || !acpi_validate_table(g_rsdt)) {
         g_rsdt = 0;
     }
 

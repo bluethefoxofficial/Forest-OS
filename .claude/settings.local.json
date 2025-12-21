@@ -53,7 +53,9 @@
       "Bash(./obj/echo.elf:*)",
       "WebSearch",
       "WebFetch(domain:github.com)",
-      "Bash(./test_bga_constants)"
+      "Bash(./test_bga_constants)",
+      "Bash(chmod:*)",
+      "Bash(/dev/null)"
     ],
     "deny": [],
     "ask": [],

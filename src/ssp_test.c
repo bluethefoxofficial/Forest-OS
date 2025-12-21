@@ -1,5 +1,6 @@
 #include "include/ssp.h"
 #include "include/screen.h"
+#include "include/debuglog.h"
 #include <stdint.h>
 
 // =============================================================================
@@ -148,33 +149,40 @@ int ssp_run_tests(void) {
     int failures = 0;
     
     print("\n=== SSP Functionality Tests ===\n");
+    if (debuglog_is_ready()) debuglog_write("[SSP-TEST] Starting tests\n");
     
     // Test basic buffer protection
+    if (debuglog_is_ready()) debuglog_write("[SSP-TEST] buffer\n");
     if (test_buffer_overflow_protection() != 0) {
         failures++;
     }
     
     // Test return address validation
+    if (debuglog_is_ready()) debuglog_write("[SSP-TEST] return addr\n");
     if (test_return_address_validation() != 0) {
         failures++;
     }
     
     // Test stack frame validation
+    if (debuglog_is_ready()) debuglog_write("[SSP-TEST] stack frame\n");
     if (test_stack_frame_validation() != 0) {
         failures++;
     }
     
     // Test canary management
+    if (debuglog_is_ready()) debuglog_write("[SSP-TEST] canary mgmt\n");
     if (test_canary_management() != 0) {
         failures++;
     }
     
     // Test statistics
+    if (debuglog_is_ready()) debuglog_write("[SSP-TEST] stats\n");
     if (test_statistics_reporting() != 0) {
         failures++;
     }
     
     // Test controlled corruption (disabled)
+    if (debuglog_is_ready()) debuglog_write("[SSP-TEST] controlled corruption\n");
     if (test_controlled_corruption_detection() != 0) {
         failures++;
     }

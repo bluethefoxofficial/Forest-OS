@@ -252,7 +252,8 @@ uint32_t memory_get_usable_kb(void);
 // =============================================================================
 
 // Page fault handler
-void page_fault_handler(uint32_t fault_addr, uint32_t error_code);
+void page_fault_handler(uint32_t fault_addr, uint32_t error_code,
+                        uint32_t fault_eip, uint32_t fault_cs, uint32_t fault_eflags);
 
 // =============================================================================
 // UTILITIES AND DEBUGGING

@@ -21,7 +21,7 @@ static struct {
 };
 
 void init_system_init(void) {
-    init_state.display.graphics_requested = false;
+    init_state.display.graphics_requested = true;  // Always request graphics for framebuffer TTY
     init_state.display.width = 800;
     init_state.display.height = 600;
     init_state.display.bpp = 32;
