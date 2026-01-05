@@ -6,6 +6,7 @@
 #include "../include/libc/stdio.h"
 #include "../include/io_ports.h"
 #include "../include/debuglog.h"
+#include "../include/mm.h"
 
 // Global hardware state
 graphics_hw_state_t graphics_hw_state = {
@@ -18,24 +19,104 @@ graphics_hw_state_t graphics_hw_state = {
 
 // Graphics device database - known devices and their recommended drivers
 const graphics_device_db_entry_t graphics_device_db[] = {
-    // Intel devices
-    {PCI_VENDOR_INTEL, 0x0042, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics", "intel_hd", 0},
-    {PCI_VENDOR_INTEL, 0x0046, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics", "intel_hd", 0},
+    // Intel integrated graphics devices
+    {PCI_VENDOR_INTEL, 0x0042, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics (Ironlake)", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x0046, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics (Ironlake Mobile)", "intel_hd", 0},
     {PCI_VENDOR_INTEL, 0x0102, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 2000", "intel_hd", 0},
     {PCI_VENDOR_INTEL, 0x0112, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 3000", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x0152, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 2500", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x0162, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 4000", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x0412, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 4600", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x0416, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 4600", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x041E, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 4400", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x1616, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 5500", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x161E, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 5300", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x1912, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 530", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x1916, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 520", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x191B, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel HD Graphics 530", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x3E90, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel UHD Graphics 630", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x3E92, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel UHD Graphics 630", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x9BC4, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel UHD Graphics", "intel_hd", 0},
+    {PCI_VENDOR_INTEL, 0x9BC5, 0, 0, GRAPHICS_DEVICE_INTEL_HD, "Intel UHD Graphics", "intel_hd", 0},
     
-    // NVIDIA devices
+    // NVIDIA RTX 40 series
+    {PCI_VENDOR_NVIDIA, 0x2684, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 4090", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2704, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 4080", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2782, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 4070 Ti", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2786, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 4070", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2790, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 4060 Ti", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2793, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 4060", "nvidia", 0},
+    
+    // NVIDIA RTX 30 series
+    {PCI_VENDOR_NVIDIA, 0x2204, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 3090", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2206, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 3080", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x220A, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 3080", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2216, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 3080", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2420, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 3070", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2484, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 3070", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2488, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 3060 Ti", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2504, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 3060", "nvidia", 0},
+    
+    // NVIDIA RTX 20 series
+    {PCI_VENDOR_NVIDIA, 0x1E02, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 2080 Ti", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1E04, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 2080", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1E07, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 2080", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1E81, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 2070", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1E84, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 2070", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1F02, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 2060", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1F06, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce RTX 2060", "nvidia", 0},
+    
+    // NVIDIA GTX 16 series
+    {PCI_VENDOR_NVIDIA, 0x2182, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1660 Ti", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2184, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1660", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x2187, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1650", "nvidia", 0},
+    
+    // NVIDIA GTX 10 series  
+    {PCI_VENDOR_NVIDIA, 0x1B00, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1080 Ti", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1B01, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1080", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1B04, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1080", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1B06, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1080", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1B80, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1070", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1B81, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1070", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1C02, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1060", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1C03, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1060", "nvidia", 0},
+    {PCI_VENDOR_NVIDIA, 0x1C20, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce GTX 1050", "nvidia", 0},
+    
+    // Legacy NVIDIA devices
     {PCI_VENDOR_NVIDIA, 0x0640, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce 9500 GT", "nvidia", 0},
     {PCI_VENDOR_NVIDIA, 0x0641, 0, 0, GRAPHICS_DEVICE_NVIDIA, "NVIDIA GeForce 9400 GT", "nvidia", 0},
     
-    // AMD/ATI devices
-    {PCI_VENDOR_AMD, 0x6798, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon HD 7900", "amd", 0},
-    {PCI_VENDOR_AMD, 0x6799, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon HD 7970", "amd", 0},
+    // AMD RDNA3 (RX 7000 series)
+    {PCI_VENDOR_AMD, 0x744C, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 7900 XTX", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x7448, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 7900 XT", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x747E, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 7700 XT", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x7480, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 7600", "amd_ati", 0},
+    
+    // AMD RDNA2 (RX 6000 series)
+    {PCI_VENDOR_AMD, 0x73A0, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 6950 XT", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x73A1, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 6900 XT", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x73A3, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 6800 XT", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x73AB, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 6800", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x73BF, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 6700 XT", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x73DF, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 6600 XT", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x73EF, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 6600", "amd_ati", 0},
+    
+    // AMD RDNA (RX 5000 series)
+    {PCI_VENDOR_AMD, 0x731F, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 5700 XT", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x7340, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 5700", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x7360, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 5600 XT", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x7341, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon RX 5500 XT", "amd_ati", 0},
+    
+    // Legacy AMD/ATI devices
+    {PCI_VENDOR_AMD, 0x6798, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon HD 7900", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x6799, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon HD 7970", "amd_ati", 0},
+    {PCI_VENDOR_AMD, 0x679A, 0, 0, GRAPHICS_DEVICE_AMD, "AMD Radeon HD 7950", "amd_ati", 0},
     
     // Virtualization devices
     {PCI_VENDOR_VMWARE, PCI_DEVICE_VMWARE_SVGA_II, 0, 0, GRAPHICS_DEVICE_VMWARE_SVGA, "VMware SVGA II", "vmware_svga", 0},
     {PCI_VENDOR_BOCHS, PCI_DEVICE_BOCHS_VGA, 0, 0, GRAPHICS_DEVICE_BOCHS_VBE, "Bochs BGA", "bochs_bga", 0},
-    {PCI_VENDOR_VIRTUALBOX, 0xBEEF, 0, 0, GRAPHICS_DEVICE_VESA, "VirtualBox Graphics", "vesa", 0},
+    {PCI_VENDOR_VIRTUALBOX, 0xBEEF, 0, 0, GRAPHICS_DEVICE_VESA, "VirtualBox Graphics", "virtualbox", 0},
+    {PCI_VENDOR_VIRTUALBOX, 0xDEAD, 0, 0, GRAPHICS_DEVICE_VESA, "VirtualBox VESA", "virtualbox", 0},
 };
 
 const size_t graphics_device_db_size = sizeof(graphics_device_db) / sizeof(graphics_device_db[0]);
@@ -54,7 +135,7 @@ graphics_result_t detect_graphics_hardware(void) {
         
         // Fall back to legacy VGA detection
         if (is_vga_present()) {
-            graphics_device_t* vga_device = kmalloc(sizeof(graphics_device_t));
+            graphics_device_t* vga_device = kmalloc(sizeof(graphics_device_t), GFP_KERNEL);
             if (vga_device) {
                 result = setup_legacy_vga_device(vga_device);
                 if (result == GRAPHICS_SUCCESS) {
@@ -118,7 +199,7 @@ graphics_result_t probe_pci_graphics_devices(void) {
                             vendor_id, device_id, bus, slot, func);
                     
                     // Allocate new device structure
-                    graphics_device_t* new_device = kmalloc(sizeof(graphics_device_t));
+                    graphics_device_t* new_device = kmalloc(sizeof(graphics_device_t), GFP_KERNEL);
                     if (!new_device) {
                         debuglog(DEBUG_ERROR, "Failed to allocate memory for graphics device\n");
                         continue;
@@ -399,4 +480,94 @@ void pci_write_config_word(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offs
 
 void pci_write_config_byte(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint8_t value) {
     pci_config_write8(0, bus, slot, func, offset, value);
+}
+
+// ---------------------------------------------------------------------------
+// Driver loading and matching
+// ---------------------------------------------------------------------------
+
+graphics_result_t load_driver_for_device(graphics_device_t* device) {
+    if (!device) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    const char* recommended_driver = get_recommended_driver(device->vendor_id, device->device_id);
+    if (recommended_driver) {
+        debuglog(DEBUG_INFO, "Loading recommended driver '%s' for %s\n", 
+                recommended_driver, device->name);
+        return try_load_driver(recommended_driver, device);
+    }
+    
+    debuglog(DEBUG_WARN, "No specific driver found for %04x:%04x, using fallbacks\n",
+             device->vendor_id, device->device_id);
+    
+    return GRAPHICS_ERROR_NOT_SUPPORTED;
+}
+
+graphics_result_t try_load_driver(const char* driver_name, graphics_device_t* device) {
+    if (!driver_name || !device) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Try to find and load the driver
+    extern display_driver_t* find_driver_for_device(graphics_device_t* device);
+    
+    // Simplified driver matching by name
+    if (strcmp(driver_name, "bochs_bga") == 0) {
+        extern display_driver_t bga_driver;
+        device->driver = &bga_driver;
+        debuglog(DEBUG_INFO, "Loaded Bochs BGA driver for %s\n", device->name);
+        return GRAPHICS_SUCCESS;
+    }
+    else if (strcmp(driver_name, "virtualbox") == 0) {
+        extern display_driver_t vbox_driver;
+        device->driver = &vbox_driver;
+        debuglog(DEBUG_INFO, "Loaded VirtualBox driver for %s\n", device->name);
+        return GRAPHICS_SUCCESS;
+    }
+    else if (strcmp(driver_name, "intel_hd") == 0) {
+        extern display_driver_t intel_hd_driver;
+        device->driver = &intel_hd_driver;
+        debuglog(DEBUG_INFO, "Loaded Intel HD driver for %s\n", device->name);
+        return GRAPHICS_SUCCESS;
+    }
+    else if (strcmp(driver_name, "nvidia") == 0) {
+        extern display_driver_t nvidia_driver;
+        device->driver = &nvidia_driver;
+        debuglog(DEBUG_INFO, "Loaded NVIDIA driver for %s\n", device->name);
+        return GRAPHICS_SUCCESS;
+    }
+    else if (strcmp(driver_name, "amd_ati") == 0) {
+        extern display_driver_t amd_ati_driver;
+        device->driver = &amd_ati_driver;
+        debuglog(DEBUG_INFO, "Loaded AMD/ATI driver for %s\n", device->name);
+        return GRAPHICS_SUCCESS;
+    }
+    else if (strcmp(driver_name, "vesa") == 0) {
+        extern display_driver_t vesa_driver;
+        device->driver = &vesa_driver;
+        debuglog(DEBUG_INFO, "Loaded VESA driver for %s\n", device->name);
+        return GRAPHICS_SUCCESS;
+    }
+    
+    debuglog(DEBUG_ERROR, "Driver '%s' not found or not compiled in\n", driver_name);
+    return GRAPHICS_ERROR_NOT_SUPPORTED;
+}
+
+graphics_result_t fallback_to_vesa_driver(graphics_device_t* device) {
+    if (!device) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    debuglog(DEBUG_INFO, "Falling back to VESA driver for %s\n", device->name);
+    return try_load_driver("vesa", device);
+}
+
+graphics_result_t fallback_to_text_driver(graphics_device_t* device) {
+    if (!device) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    debuglog(DEBUG_INFO, "Falling back to VGA text driver for %s\n", device->name);
+    return try_load_driver("vga_text", device);
 }

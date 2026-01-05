@@ -4,6 +4,7 @@
 #include "include/util.h"
 #include "include/string.h"
 #include <stdarg.h>
+#include <stdint.h>
 
 #define DEBUGLOG_SERIAL_PORT 0x3F8
 #define DEBUGLOG_DEBUGCON_PORT 0xE9
@@ -104,7 +105,7 @@ void debuglog_write_dec(uint32 value) {
     }
 }
 
-static void debuglog_write_uint_base(uint32 value, uint32 base, bool uppercase, bool prefix) {
+static void debuglog_write_uint_base_width(uint32 value, uint32 base, bool uppercase, bool prefix, int width, char pad_char) {
     char buffer[34];
     static const char* hex_lower = "0123456789abcdef";
     static const char* hex_upper = "0123456789ABCDEF";
@@ -112,13 +113,22 @@ static void debuglog_write_uint_base(uint32 value, uint32 base, bool uppercase, 
 
     int pos = sizeof(buffer) - 1;
     buffer[pos--] = '\0';
+    int num_digits = 0;
     if (value == 0) {
         buffer[pos--] = '0';
+        num_digits = 1;
     } else {
         while (value > 0 && pos >= 0) {
             buffer[pos--] = digits[value % base];
             value /= base;
+            num_digits++;
         }
+    }
+
+    // Add padding if needed
+    while (num_digits < width && pos >= 0) {
+        buffer[pos--] = pad_char;
+        num_digits++;
     }
 
     if (prefix && base == 16) {
@@ -129,6 +139,10 @@ static void debuglog_write_uint_base(uint32 value, uint32 base, bool uppercase, 
     debuglog_write(&buffer[pos + 1]);
 }
 
+static void debuglog_write_uint_base(uint32 value, uint32 base, bool uppercase, bool prefix) {
+    debuglog_write_uint_base_width(value, base, uppercase, prefix, 0, ' ');
+}
+
 static void debuglog_vformat(const char* format, va_list args) {
     while (format && *format) {
         if (*format != '%') {
@@ -137,6 +151,21 @@ static void debuglog_vformat(const char* format, va_list args) {
         }
 
         format++;
+
+        // Parse width specifier (e.g., %02x, %8d)
+        char pad_char = ' ';
+        int width = 0;
+
+        if (*format == '0') {
+            pad_char = '0';
+            format++;
+        }
+
+        while (*format >= '0' && *format <= '9') {
+            width = width * 10 + (*format - '0');
+            format++;
+        }
+
         switch (*format) {
             case '%':
                 debuglog_write_char('%');
@@ -170,7 +199,7 @@ static void debuglog_vformat(const char* format, va_list args) {
             case 'X': {
                 uint32 value = va_arg(args, uint32);
                 bool uppercase = (*format == 'X');
-                debuglog_write_uint_base(value, 16, uppercase, false);
+                debuglog_write_uint_base_width(value, 16, uppercase, false, width, pad_char);
                 break;
             }
             case 'p': {
@@ -178,6 +207,9 @@ static void debuglog_vformat(const char* format, va_list args) {
                 debuglog_write_uint_base((uint32)value, 16, false, true);
                 break;
             }
+            case '\0':
+                // End of format string after %
+                return;
             default:
                 debuglog_write_char('%');
                 debuglog_write_char(*format);
@@ -205,6 +237,17 @@ void debuglog(debug_log_level_t level, const char* format, ...) {
     }
 
     debuglog_write(level_prefix[index]);
+    va_list args;
+    va_start(args, format);
+    debuglog_vformat(format, args);
+    va_end(args);
+}
+
+void debuglog_printf(const char* format, ...) {
+    if (!debuglog_initialized || !format) {
+        return;
+    }
+
     va_list args;
     va_start(args, format);
     debuglog_vformat(format, args);

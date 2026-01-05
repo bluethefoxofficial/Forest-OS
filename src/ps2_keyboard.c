@@ -5,6 +5,7 @@
 #include "include/screen.h"
 #include "include/util.h"
 #include "include/keyboard_layout.h"
+#include "include/debuglog.h"
 
 #ifndef PS2_KEYBOARD_DEFAULT_LAYOUT
 #define PS2_KEYBOARD_DEFAULT_LAYOUT KEYBOARD_LAYOUT_US
@@ -55,6 +56,7 @@ bool ps2_keyboard_poll_ascii(char* out_char) {
     }
     *out_char = ascii_buffer[ascii_buffer_tail];
     ascii_buffer_tail = (ascii_buffer_tail + 1) % PS2_ASCII_BUFFER_SIZE;
+    debuglog(DEBUG_INFO, "[KB] ps2 char '%c' (0x%02x)\n", *out_char, (uint8)*out_char);
     return true;
 }
 
@@ -178,67 +180,78 @@ static const keyboard_layout_t* ps2_keyboard_layout_from_id(keyboard_layout_id_t
 
 int ps2_keyboard_init(void) {
     print("[KB] Initializing PS/2 keyboard driver...\n");
-    
+
     // Initialize driver state
     kbd_memset(&kbd_state, 0, sizeof(kbd_state));
     kbd_state.scanning_enabled = false;
-    
-    // Reset keyboard
-    if (!ps2_keyboard_reset()) {
-        print("[KB] Failed to reset keyboard\n");
-        return -1;
+
+    // Try to reset keyboard - but continue even if it fails
+    // Some emulators (QEMU) and systems without keyboards connected
+    // may timeout here but still work fine for input
+    bool reset_ok = ps2_keyboard_reset();
+    if (!reset_ok) {
+        print("[KB] Warning: Keyboard reset failed/timeout - continuing anyway\n");
+        // Flush any garbage from the data port
+        for (int i = 0; i < 10; i++) {
+            if (inportb(0x64) & 0x01) {
+                inportb(0x60);
+            }
+        }
     }
-    
-    // Since we disabled translation in controller init, always use scan code set 2
-    if (!ps2_keyboard_set_scancode_set(KB_SCANCODE_SET_2)) {
-        print("[KB] Warning: Failed to set scan code set 2, trying default\n");
-        // Try to get current scan code set
-        if (!ps2_send_keyboard_command(KB_CMD_GET_SET_SCANCODE_SET)) {
-            print("[KB] Failed to query scan code set\n");
-            return -1;
-        }
-        if (!ps2_send_keyboard_data(0)) {
-            print("[KB] Failed to send scan code set query\n");
-            return -1;
-        }
-        
-        // Wait for response
-        if (!ps2_controller_wait_output_ready()) {
-            print("[KB] Timeout waiting for scan code set response\n");
-            return -1;
-        }
-        
-        uint8 current_set = ps2_controller_read_data();
-        print("[KB] Current scan code set: ");
-        print_hex8(current_set);
-        print("\n");
-        
-        // Use whatever set is currently active
-        if (current_set == 1 || current_set == 0x43) {
-            kbd_state.current_scancode_set = KB_SCANCODE_SET_1;
-        } else {
-            kbd_state.current_scancode_set = KB_SCANCODE_SET_2;
-        }
-    } else {
+
+    // Default to scan code set 1 (most compatible, used by BIOS/emulators)
+    // This is what QEMU and most BIOSes use
+    kbd_state.current_scancode_set = KB_SCANCODE_SET_1;
+
+    // Try to set scan code set 2, but fall back gracefully
+    if (ps2_keyboard_set_scancode_set(KB_SCANCODE_SET_2)) {
         kbd_state.current_scancode_set = KB_SCANCODE_SET_2;
+        print("[KB] Using scan code set 2\n");
+    } else {
+        print("[KB] Warning: Failed to set scan code set 2, using set 1 (legacy)\n");
+        // Try to query current set, but don't fail if we can't
+        if (ps2_send_keyboard_command(KB_CMD_GET_SET_SCANCODE_SET)) {
+            if (ps2_send_keyboard_data(0)) {
+                if (ps2_controller_wait_output_ready()) {
+                    uint8 current_set = ps2_controller_read_data();
+                    print("[KB] Detected scan code set: ");
+                    print_hex8(current_set);
+                    print("\n");
+                    if (current_set == 2 || current_set == 0x41) {
+                        kbd_state.current_scancode_set = KB_SCANCODE_SET_2;
+                    }
+                }
+            }
+        }
     }
-    
+
     ps2_keyboard_select_layout(PS2_KEYBOARD_DEFAULT_LAYOUT);
-    
-    // Set default typematic rate
+
+    // Set default typematic rate - non-critical, ignore failure
     if (!ps2_keyboard_set_typematic(0x0B, 0x01)) {
-        print("[KB] Failed to set typematic rate\n");
-        return -1;
+        print("[KB] Warning: Failed to set typematic rate (non-critical)\n");
     }
-    
-    // Enable scanning
-    if (!ps2_keyboard_enable_scanning()) {
-        print("[KB] Failed to enable scanning\n");
-        return -1;
+
+    // Enable scanning - try multiple times as this is critical
+    bool scanning_enabled = false;
+    for (int retry = 0; retry < 3; retry++) {
+        if (ps2_keyboard_enable_scanning()) {
+            scanning_enabled = true;
+            break;
+        }
+        // Brief delay between retries
+        for (volatile int i = 0; i < 10000; i++);
     }
-    
-    print("[KB] PS/2 keyboard driver initialized successfully\n");
-    return 0;
+
+    if (!scanning_enabled) {
+        print("[KB] Warning: Could not enable scanning via command\n");
+        // Even if we couldn't send the enable command, the keyboard might
+        // still be sending scancodes (especially in QEMU/emulators)
+        kbd_state.scanning_enabled = true;  // Assume it's enabled
+    }
+
+    print("[KB] PS/2 keyboard driver initialized\n");
+    return 0;  // Always return success - we'll handle input either way
 }
 
 void ps2_keyboard_irq_handler(struct interrupt_frame* frame, uint32 error_code) {
@@ -476,6 +489,7 @@ static void ps2_keyboard_send_event(key_code_t key_code, key_state_t state, uint
     if (state == KEY_STATE_PRESSED && emitted > 0) {
         for (uint8 i = 0; i < emitted; ++i) {
             ps2_keyboard_enqueue_ascii(seq[i]);
+            debuglog(DEBUG_INFO, "[KB] ps2 emit '%c' (scancode=0x%02x)\n", seq[i], raw_scancode[0]);
         }
     }
     

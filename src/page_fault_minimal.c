@@ -5,6 +5,17 @@
 #include "include/secure_vmm.h"
 #include "include/memory_region_manager.h"
 #include "include/page_fault_recovery.h"
+#include "include/interrupt.h"
+
+#if ARCH_64BIT
+#define FRAME_IP(f)    ((f)->rip)
+#define FRAME_FLAGS(f) ((f)->rflags)
+typedef uint64_t fault_addr_t;
+#else
+#define FRAME_IP(f)    ((f)->eip)
+#define FRAME_FLAGS(f) ((f)->eflags)
+typedef uint32_t fault_addr_t;
+#endif
 
 // =============================================================================
 // MINIMAL PAGE FAULT HANDLER - RECURSION SAFE
@@ -150,13 +161,15 @@ void page_fault_handler_minimal(uint32 fault_addr, uint32 error_code, struct int
     for (int i = 0; middle[i] != '\0'; i++) *p++ = middle[i];
     for (int i = 0; err_buf[i] != '\0'; i++) *p++ = err_buf[i];
     *p = '\0';
-    panic_preload_fault_info(fault_addr, error_code, frame->eip, frame->cs, frame->eflags);
+    panic_preload_fault_info(fault_addr, error_code, FRAME_IP(frame), frame->cs, FRAME_FLAGS(frame));
     kernel_panic(panic_msg);
 }
 
 // External interface that matches the expected signature
 void page_fault_handler(struct interrupt_frame* frame, uint32 error_code) {
-    uint32 fault_addr;
+    fault_addr_t fault_addr = 0;
+#if !ARCH_64BIT
     __asm__ __volatile__("mov %%cr2, %0" : "=r"(fault_addr));
+#endif
     page_fault_handler_minimal(fault_addr, error_code, frame);
 }

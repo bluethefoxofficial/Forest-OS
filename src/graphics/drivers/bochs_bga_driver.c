@@ -6,6 +6,7 @@
 #include "../../include/debuglog.h"
 #include "../../include/io_ports.h"
 #include "../../include/tlb_manager.h"
+#include "../../include/mm.h"
 
 // Bochs VBE Extension constants from the documentation
 #define VBE_DISPI_IOPORT_INDEX      0x01CE
@@ -88,7 +89,7 @@ static const bga_mode_info_t standard_bga_modes[] = {
 
 #define NUM_STANDARD_BGA_MODES (sizeof(standard_bga_modes) / sizeof(standard_bga_modes[0]))
 
-// Driver state
+// Driver state with enhanced VBE Extensions support
 static struct {
     bool initialized;
     uint16_t bga_version;
@@ -101,6 +102,21 @@ static struct {
     pixel_format_t current_format;
     bool linear_fb_enabled;
     graphics_device_t* device;
+    
+    // VBE Extensions enhancements
+    uint32_t virtual_width;
+    uint32_t virtual_height;
+    int32_t x_offset;
+    int32_t y_offset;
+    uint16_t current_bank;
+    bool is_8bit_dac_enabled;
+    bool banked_mode_enabled;
+    
+    // Capabilities from hardware
+    uint32_t max_width;
+    uint32_t max_height;
+    uint32_t max_bpp;
+    uint32_t total_vram;
 } bga_state = {
     .initialized = false,
     .bga_version = 0,
@@ -108,17 +124,36 @@ static struct {
     .framebuffer_phys = 0,
     .framebuffer_size = 0,
     .linear_fb_enabled = false,
-    .device = NULL
+    .device = NULL,
+    .virtual_width = 0,
+    .virtual_height = 0,
+    .x_offset = 0,
+    .y_offset = 0,
+    .current_bank = 0,
+    .is_8bit_dac_enabled = false,
+    .banked_mode_enabled = false,
+    .max_width = 0,
+    .max_height = 0,
+    .max_bpp = 0,
+    .total_vram = 0
 };
 
 // Helper functions for BGA register access
 static void bga_write_register(uint16_t index, uint16_t data);
 static uint16_t bga_read_register(uint16_t index);
 static bool bga_is_available(void);
-static graphics_result_t bga_set_video_mode(uint32_t width, uint32_t height, uint32_t bpp, bool use_lfb, bool clear_memory);
+/* Exported for virtualbox_driver.c */
+graphics_result_t bga_set_video_mode(uint32_t width, uint32_t height, uint32_t bpp, bool use_lfb, bool clear_memory);
 static pixel_format_t bga_bpp_to_pixel_format(uint8_t bpp);
 static uint32_t bga_color_to_pixel(graphics_color_t color, pixel_format_t format);
 static void bga_put_pixel(int32_t x, int32_t y, uint32_t pixel_value);
+
+// Enhanced VBE Extensions support functions
+static graphics_result_t bga_set_virtual_display(uint32_t virtual_width, uint32_t virtual_height);
+static graphics_result_t bga_set_display_offset(int32_t x_offset, int32_t y_offset);
+static graphics_result_t bga_get_capabilities(graphics_capabilities_t* caps);
+static graphics_result_t bga_set_bank(uint16_t bank_number);
+static graphics_result_t bga_enable_8bit_dac(bool enable);
 
 // Driver operation implementations
 static graphics_result_t bga_initialize(graphics_device_t* device);
@@ -128,9 +163,12 @@ static graphics_result_t bga_set_mode(graphics_device_t* device, const video_mod
 static graphics_result_t bga_get_current_mode(graphics_device_t* device, video_mode_t* mode);
 static graphics_result_t bga_map_framebuffer(graphics_device_t* device, framebuffer_t** fb);
 static graphics_result_t bga_unmap_framebuffer(graphics_device_t* device, framebuffer_t* fb);
-static graphics_result_t bga_clear_screen(graphics_device_t* device, graphics_color_t color);
-static graphics_result_t bga_draw_pixel(graphics_device_t* device, int32_t x, int32_t y, graphics_color_t color);
-static graphics_result_t bga_draw_rect(graphics_device_t* device, const graphics_rect_t* rect, graphics_color_t color, bool filled);
+/* Exported for virtualbox_driver.c */
+graphics_result_t bga_clear_screen(graphics_device_t* device, graphics_color_t color);
+graphics_result_t bga_draw_pixel(graphics_device_t* device, int32_t x, int32_t y, graphics_color_t color);
+graphics_result_t bga_draw_rect(graphics_device_t* device, const graphics_rect_t* rect, graphics_color_t color, bool filled);
+static graphics_result_t bga_wait_for_vsync(graphics_device_t* device);
+static graphics_result_t bga_ioctl(graphics_device_t* device, uint32_t cmd, void* arg);
 
 // BGA driver operations structure
 static display_driver_ops_t bga_ops = {
@@ -159,10 +197,10 @@ static display_driver_ops_t bga_ops = {
     .hw_fill_rect = NULL,
     .hw_copy_rect = NULL,
     .hw_line = NULL,
-    .wait_for_vsync = NULL,
+    .wait_for_vsync = bga_wait_for_vsync,
     .page_flip = NULL,
     .read_edid = NULL,
-    .ioctl = NULL
+    .ioctl = bga_ioctl
 };
 
 // Declare the driver with appropriate flags
@@ -189,7 +227,7 @@ static bool bga_is_available(void) {
     return (version >= VBE_DISPI_ID0 && version <= VBE_DISPI_ID5);
 }
 
-static graphics_result_t bga_set_video_mode(uint32_t width, uint32_t height, uint32_t bpp, bool use_lfb, bool clear_memory) {
+graphics_result_t bga_set_video_mode(uint32_t width, uint32_t height, uint32_t bpp, bool use_lfb, bool clear_memory) {
     // Disable VBE extensions first
     bga_write_register(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
     
@@ -410,7 +448,7 @@ static graphics_result_t bga_enumerate_modes(graphics_device_t* device, video_mo
     }
     
     *count = NUM_STANDARD_BGA_MODES;
-    *modes = kmalloc(sizeof(video_mode_t) * NUM_STANDARD_BGA_MODES);
+    *modes = kmalloc(sizeof(video_mode_t) * NUM_STANDARD_BGA_MODES, GFP_KERNEL);
     
     if (!*modes) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
@@ -467,7 +505,7 @@ static graphics_result_t bga_map_framebuffer(graphics_device_t* device, framebuf
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
     
-    framebuffer_t* framebuffer = kmalloc(sizeof(framebuffer_t));
+    framebuffer_t* framebuffer = kmalloc(sizeof(framebuffer_t), GFP_KERNEL);
     if (!framebuffer) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
     }
@@ -498,7 +536,7 @@ static graphics_result_t bga_unmap_framebuffer(graphics_device_t* device, frameb
     return GRAPHICS_SUCCESS;
 }
 
-static graphics_result_t bga_clear_screen(graphics_device_t* device, graphics_color_t color) {
+graphics_result_t bga_clear_screen(graphics_device_t* device, graphics_color_t color) {
     if (!device || !bga_state.initialized) {
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
@@ -542,7 +580,7 @@ static graphics_result_t bga_clear_screen(graphics_device_t* device, graphics_co
     return GRAPHICS_SUCCESS;
 }
 
-static graphics_result_t bga_draw_pixel(graphics_device_t* device, int32_t x, int32_t y, graphics_color_t color) {
+graphics_result_t bga_draw_pixel(graphics_device_t* device, int32_t x, int32_t y, graphics_color_t color) {
     if (!device || !bga_state.initialized) {
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
@@ -553,7 +591,7 @@ static graphics_result_t bga_draw_pixel(graphics_device_t* device, int32_t x, in
     return GRAPHICS_SUCCESS;
 }
 
-static graphics_result_t bga_draw_rect(graphics_device_t* device, const graphics_rect_t* rect, graphics_color_t color, bool filled) {
+graphics_result_t bga_draw_rect(graphics_device_t* device, const graphics_rect_t* rect, graphics_color_t color, bool filled) {
     if (!device || !rect || !bga_state.initialized) {
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
@@ -589,6 +627,215 @@ DRIVER_INIT_FUNCTION(bga) {
     debuglog(DEBUG_INFO, "Registering Bochs BGA driver\n");
     bga_set_driver_flags();
     return register_display_driver(&bga_driver);
+}
+
+// Enhanced VBE Extensions implementation
+
+static graphics_result_t bga_set_virtual_display(uint32_t virtual_width, uint32_t virtual_height) {
+    if (!bga_state.initialized) {
+        return GRAPHICS_ERROR_GENERIC;
+    }
+    
+    // Set virtual width (virtual height is implicit based on VRAM)
+    bga_write_register(VBE_DISPI_INDEX_VIRT_WIDTH, (uint16_t)virtual_width);
+    
+    // Verify setting
+    uint16_t actual_vwidth = bga_read_register(VBE_DISPI_INDEX_VIRT_WIDTH);
+    if (actual_vwidth != virtual_width) {
+        debuglog(DEBUG_WARN, "BGA: Virtual width mismatch: requested %u, got %u\n", 
+                virtual_width, actual_vwidth);
+    }
+    
+    bga_state.virtual_width = virtual_width;
+    bga_state.virtual_height = virtual_height;
+    
+    debuglog(DEBUG_INFO, "BGA: Set virtual display %ux%u\n", virtual_width, virtual_height);
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t bga_set_display_offset(int32_t x_offset, int32_t y_offset) {
+    if (!bga_state.initialized) {
+        return GRAPHICS_ERROR_GENERIC;
+    }
+    
+    // Set display offsets
+    bga_write_register(VBE_DISPI_INDEX_X_OFFSET, (uint16_t)x_offset);
+    bga_write_register(VBE_DISPI_INDEX_Y_OFFSET, (uint16_t)y_offset);
+    
+    bga_state.x_offset = x_offset;
+    bga_state.y_offset = y_offset;
+    
+    debuglog(DEBUG_INFO, "BGA: Set display offset (%d, %d)\n", x_offset, y_offset);
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t bga_get_capabilities(graphics_capabilities_t* caps) {
+    if (!caps || !bga_state.initialized) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Enable capabilities mode to read maximum values
+    bga_write_register(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_GETCAPS);
+    
+    // Read capabilities
+    bga_state.max_width = bga_read_register(VBE_DISPI_INDEX_XRES);
+    bga_state.max_height = bga_read_register(VBE_DISPI_INDEX_YRES);
+    bga_state.max_bpp = bga_read_register(VBE_DISPI_INDEX_BPP);
+    
+    // Restore normal mode
+    uint16_t enable_flags = VBE_DISPI_ENABLED;
+    if (bga_state.linear_fb_enabled) {
+        enable_flags |= VBE_DISPI_LFB_ENABLED;
+    }
+    if (bga_state.is_8bit_dac_enabled) {
+        enable_flags |= VBE_DISPI_8BIT_DAC;
+    }
+    bga_write_register(VBE_DISPI_INDEX_ENABLE, enable_flags);
+    
+    // Calculate total VRAM based on version
+    switch (bga_state.bga_version) {
+        case VBE_DISPI_ID0:
+        case VBE_DISPI_ID1:
+        case VBE_DISPI_ID2:
+        case VBE_DISPI_ID3:
+            bga_state.total_vram = 4 * 1024 * 1024; // 4 MB
+            break;
+        case VBE_DISPI_ID4:
+            bga_state.total_vram = 8 * 1024 * 1024; // 8 MB  
+            break;
+        case VBE_DISPI_ID5:
+            bga_state.total_vram = 16 * 1024 * 1024; // 16 MB
+            break;
+        default:
+            bga_state.total_vram = 16 * 1024 * 1024; // Assume latest
+            break;
+    }
+    
+    // Fill capabilities structure
+    caps->supports_2d_accel = false; // Bochs BGA is software-rendered
+    caps->supports_3d_accel = false;
+    caps->supports_hw_cursor = false;
+    caps->supports_page_flipping = true; // Virtual display supports this
+    caps->supports_vsync = true;
+    caps->supports_multiple_heads = false;
+    caps->max_resolution_x = bga_state.max_width;
+    caps->max_resolution_y = bga_state.max_height;
+    caps->video_memory_size = bga_state.total_vram;
+    caps->num_video_modes = NUM_STANDARD_BGA_MODES;
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t bga_set_bank(uint16_t bank_number) {
+    if (!bga_state.initialized) {
+        return GRAPHICS_ERROR_GENERIC;
+    }
+    
+    if (bga_state.linear_fb_enabled) {
+        debuglog(DEBUG_WARN, "BGA: Cannot set bank in linear framebuffer mode\n");
+        return GRAPHICS_ERROR_NOT_SUPPORTED;
+    }
+    
+    bga_write_register(VBE_DISPI_INDEX_BANK, bank_number);
+    bga_state.current_bank = bank_number;
+    bga_state.banked_mode_enabled = true;
+    
+    debuglog(DEBUG_INFO, "BGA: Set bank to %u\n", bank_number);
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t bga_enable_8bit_dac(bool enable) {
+    if (!bga_state.initialized) {
+        return GRAPHICS_ERROR_GENERIC;
+    }
+    
+    uint16_t enable_flags = VBE_DISPI_ENABLED;
+    if (bga_state.linear_fb_enabled) {
+        enable_flags |= VBE_DISPI_LFB_ENABLED;
+    }
+    if (enable) {
+        enable_flags |= VBE_DISPI_8BIT_DAC;
+    }
+    
+    bga_write_register(VBE_DISPI_INDEX_ENABLE, enable_flags);
+    bga_state.is_8bit_dac_enabled = enable;
+    
+    debuglog(DEBUG_INFO, "BGA: %s 8-bit DAC\n", enable ? "Enabled" : "Disabled");
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t bga_wait_for_vsync(graphics_device_t* device) {
+    if (!device || !bga_state.initialized) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Bochs BGA doesn't have real vsync, so we implement a simple delay
+    // In a real implementation, you would wait for the vertical retrace
+    
+    // Simple delay approximating ~60Hz refresh
+    for (volatile int i = 0; i < 10000; i++) {
+        // Busy wait
+    }
+    
+    return GRAPHICS_SUCCESS;
+}
+
+// IOCTL commands for BGA-specific operations
+#define BGA_IOCTL_SET_VIRTUAL_DISPLAY   0x1001
+#define BGA_IOCTL_SET_DISPLAY_OFFSET    0x1002
+#define BGA_IOCTL_GET_CAPABILITIES      0x1003
+#define BGA_IOCTL_SET_BANK              0x1004
+#define BGA_IOCTL_ENABLE_8BIT_DAC       0x1005
+
+typedef struct {
+    uint32_t virtual_width;
+    uint32_t virtual_height;
+} bga_virtual_display_t;
+
+typedef struct {
+    int32_t x_offset;
+    int32_t y_offset;
+} bga_display_offset_t;
+
+static graphics_result_t bga_ioctl(graphics_device_t* device, uint32_t cmd, void* arg) {
+    if (!device || !bga_state.initialized) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    switch (cmd) {
+        case BGA_IOCTL_SET_VIRTUAL_DISPLAY: {
+            bga_virtual_display_t* vd = (bga_virtual_display_t*)arg;
+            if (!vd) return GRAPHICS_ERROR_INVALID_PARAMETER;
+            return bga_set_virtual_display(vd->virtual_width, vd->virtual_height);
+        }
+        
+        case BGA_IOCTL_SET_DISPLAY_OFFSET: {
+            bga_display_offset_t* offset = (bga_display_offset_t*)arg;
+            if (!offset) return GRAPHICS_ERROR_INVALID_PARAMETER;
+            return bga_set_display_offset(offset->x_offset, offset->y_offset);
+        }
+        
+        case BGA_IOCTL_GET_CAPABILITIES: {
+            graphics_capabilities_t* caps = (graphics_capabilities_t*)arg;
+            if (!caps) return GRAPHICS_ERROR_INVALID_PARAMETER;
+            return bga_get_capabilities(caps);
+        }
+        
+        case BGA_IOCTL_SET_BANK: {
+            uint16_t* bank = (uint16_t*)arg;
+            if (!bank) return GRAPHICS_ERROR_INVALID_PARAMETER;
+            return bga_set_bank(*bank);
+        }
+        
+        case BGA_IOCTL_ENABLE_8BIT_DAC: {
+            bool* enable = (bool*)arg;
+            if (!enable) return GRAPHICS_ERROR_INVALID_PARAMETER;
+            return bga_enable_8bit_dac(*enable);
+        }
+        
+        default:
+            return GRAPHICS_ERROR_NOT_SUPPORTED;
+    }
 }
 
 // Driver exit function

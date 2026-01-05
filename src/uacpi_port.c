@@ -9,6 +9,7 @@
 #include "include/task.h"
 #include "include/spinlock.h"
 #include "include/semaphore.h"
+#include "include/mm.h"
 #include <stdint.h>
 
 
@@ -68,7 +69,7 @@ void uacpi_kernel_vlog(uacpi_log_level level, const uacpi_char *format, uacpi_va
 // ============================================================================ 
 
 uacpi_status uacpi_kernel_pci_device_open(uacpi_pci_address address, uacpi_handle *out_handle) {
-    uacpi_pci_address* addr = kmalloc(sizeof(uacpi_pci_address));
+    uacpi_pci_address* addr = kmalloc(sizeof(uacpi_pci_address), GFP_KERNEL);
     if (!addr) return UACPI_STATUS_OUT_OF_MEMORY;
     *addr = address;
     *out_handle = (uacpi_handle)addr;
@@ -162,7 +163,7 @@ uacpi_status uacpi_kernel_io_write32(uacpi_handle handle, uacpi_size offset, uac
 // ============================================================================ 
 
 void *uacpi_kernel_alloc(uacpi_size size) {
-    return kmalloc(size);
+    return kmalloc(size, GFP_KERNEL);
 }
 
 void uacpi_kernel_free(void *mem) {
@@ -199,7 +200,7 @@ uacpi_thread_id uacpi_kernel_get_thread_id(void) {
 }
 
 uacpi_handle uacpi_kernel_create_spinlock(void) {
-    spinlock_t* lock = kmalloc(sizeof(spinlock_t));
+    spinlock_t* lock = kmalloc(sizeof(spinlock_t), GFP_KERNEL);
     if (!lock) return NULL;
     spinlock_init(lock, "uacpi_lock");
     return (uacpi_handle)lock;
@@ -219,7 +220,7 @@ void uacpi_kernel_unlock_spinlock(uacpi_handle handle, uacpi_cpu_flags flags) {
 
 
 uacpi_handle uacpi_kernel_create_mutex(void) {
-    mutex_t* mutex = kmalloc(sizeof(mutex_t));
+    mutex_t* mutex = kmalloc(sizeof(mutex_t), GFP_KERNEL);
     if (!mutex) return NULL;
     mutex_init(mutex, "uacpi_mutex");
     return (uacpi_handle)mutex;
@@ -250,7 +251,7 @@ void uacpi_kernel_release_mutex(uacpi_handle handle) {
 
 
 uacpi_handle uacpi_kernel_create_event(void) {
-    semaphore_t* sem = kmalloc(sizeof(semaphore_t));
+    semaphore_t* sem = kmalloc(sizeof(semaphore_t), GFP_KERNEL);
     if (!sem) return NULL;
     semaphore_init(sem, 0, 1, "uacpi_event");
     return (uacpi_handle)sem;

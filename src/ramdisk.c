@@ -5,6 +5,8 @@
 #include "include/util.h"
 #include "include/memory.h"
 #include "include/string.h"
+#include "include/mm.h"
+#include "include/debuglog.h"
 
 #define TAR_BLOCK_SIZE 512
 #define RAMDISK_MAX_NAME 256
@@ -143,6 +145,16 @@ static uint32 initrd_start = 0;
 static uint32 initrd_size = 0;
 static uint8 empty_file_stub = 0;
 
+static bool tar_block_is_zero(const tar_header_t* header) {
+    const uint8* bytes = (const uint8*)header;
+    for (uint32 i = 0; i < TAR_BLOCK_SIZE; i++) {
+        if (bytes[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool reserve_file_capacity(uint32 required_capacity) {
     if (required_capacity < RAMDISK_MIN_FILE_CAPACITY) {
         required_capacity = RAMDISK_MIN_FILE_CAPACITY;
@@ -152,16 +164,23 @@ static bool reserve_file_capacity(uint32 required_capacity) {
         return true;
     }
 
-    ramdisk_file_t* new_files = (ramdisk_file_t*)kmalloc(sizeof(ramdisk_file_t) * required_capacity);
+    uint32 files_size = sizeof(ramdisk_file_t) * required_capacity;
+    uint32 names_size = RAMDISK_MAX_NAME * required_capacity;
+
+    ramdisk_file_t* new_files = (ramdisk_file_t*)kmalloc(files_size, GFP_KERNEL);
     if (!new_files) {
         return false;
     }
 
-    char* new_names = (char*)kmalloc(RAMDISK_MAX_NAME * required_capacity);
+    char* new_names = (char*)kmalloc(names_size, GFP_KERNEL);
     if (!new_names) {
         kfree(new_files);
         return false;
     }
+
+    // Zero-initialize new arrays to avoid garbage in unused slots
+    memset(new_files, 0, files_size);
+    memset(new_names, 0, names_size);
 
     if (files && file_name_storage && file_total > 0) {
         for (uint32 i = 0; i < file_total; i++) {
@@ -218,28 +237,67 @@ static uint32 octal_to_uint(const char* src, uint32 len) {
     return value;
 }
 
-static const char* copy_filename(const char* src, uint32 index) {
-    uint32 max_len = RAMDISK_MAX_NAME - 1;
-    uint32 i = 0;
+static const char* store_path_string(const char* path, uint32 index) {
     char* dest = filename_slot(index);
-
-    // Skip tar prefixes like "./" or leading slashes.
-    if (src[0] == '.' && src[1] == '/') {
-        src += 2;
+    uint32 max_len = RAMDISK_MAX_NAME - 1;
+    uint32 len = 0;
+    while (len < max_len && path[len] != '\0') {
+        dest[len] = path[len];
+        len++;
     }
-    while (*src == '/') {
-        src++;
+    dest[len] = '\0';
+    return dest;
+}
+
+static uint32 tar_copy_field(char* dest, uint32 pos, const char* field, uint32 field_len, uint32 max_len) {
+    for (uint32 i = 0; i < field_len && pos < max_len; i++) {
+        char c = field[i];
+        if (c == '\0') {
+            break;
+        }
+        dest[pos++] = c;
+    }
+    return pos;
+}
+
+static const char* copy_filename(const tar_header_t* header, uint32 index) {
+    char temp[RAMDISK_MAX_NAME];
+    uint32 temp_len = 0;
+    const uint32 max_len = RAMDISK_MAX_NAME - 1;
+
+    temp_len = tar_copy_field(temp, temp_len, header->prefix, sizeof(header->prefix), max_len);
+    if (temp_len > 0 && temp_len < max_len && temp[temp_len - 1] != '/') {
+        temp[temp_len++] = '/';
+    }
+    temp_len = tar_copy_field(temp, temp_len, header->filename, sizeof(header->filename), max_len);
+    temp[temp_len] = '\0';
+
+    char* dest = filename_slot(index);
+    uint32 dpos = 0;
+    uint32 i = 0;
+
+    while (temp[i] == '.') {
+        if (temp[i + 1] == '/') {
+            i += 2;
+            continue;
+        }
+        break;
+    }
+    while (temp[i] == '/') {
+        i++;
     }
 
-    for (; i < max_len && *src != '\0'; i++, src++) {
-        dest[i] = *src;
+    for (; temp[i] != '\0' && dpos < max_len; i++) {
+        if (temp[i] == '/' && (dpos == 0 || dest[dpos - 1] == '/')) {
+            continue;
+        }
+        dest[dpos++] = temp[i];
     }
 
-    while (i > 0 && dest[i - 1] == '/') {
-        i--;
+    while (dpos > 0 && dest[dpos - 1] == '/') {
+        dpos--;
     }
-
-    dest[i] = '\0';
+    dest[dpos] = '\0';
     return dest;
 }
 
@@ -270,7 +328,7 @@ static bool ramdisk_add_directory_entry(const char* path) {
         }
     }
 
-    const char* stored_name = copy_filename(path, file_total);
+    const char* stored_name = store_path_string(path, file_total);
     files[file_total].name = stored_name;
     files[file_total].data = &empty_file_stub;
     files[file_total].size = 0;
@@ -314,6 +372,9 @@ static bool parse_tar(const uint8* base, uint32 size) {
     const uint8* end = base + size;
     file_total = 0;
     bool reached_end = false;
+    uint32 zero_block_count = 0;
+
+    debuglog(DEBUG_INFO, "[RAMDISK] Starting tar parse at %p, size %u\n", (void*)base, size);
 
     if (!reserve_file_capacity(RAMDISK_MIN_FILE_CAPACITY)) {
         print("[RAMDISK] Failed to allocate initial file metadata\n");
@@ -323,11 +384,18 @@ static bool parse_tar(const uint8* base, uint32 size) {
     while (cursor + TAR_BLOCK_SIZE <= end) {
         tar_header_t* header = (tar_header_t*)cursor;
 
-        // End of archive is indicated by a zeroed filename.
-        if (header->filename[0] == '\0') {
-            reached_end = true;
-            break;
+        if (tar_block_is_zero(header)) {
+            zero_block_count++;
+            if (zero_block_count >= 2) {
+                reached_end = true;
+                debuglog(DEBUG_INFO, "[RAMDISK] Reached tar terminator after %u entries at cursor=0x%08x\n",
+                         file_total, (uint32)cursor);
+                break;
+            }
+            cursor += TAR_BLOCK_SIZE;
+            continue;
         }
+        zero_block_count = 0;
 
         uint32 file_size = octal_to_uint(header->size, sizeof(header->size));
         const uint8* data = cursor + TAR_BLOCK_SIZE;
@@ -337,8 +405,11 @@ static bool parse_tar(const uint8* base, uint32 size) {
             return false;
         }
 
+        // Debug: Log resizes
         if (file_total == file_capacity) {
             uint32 new_capacity = file_capacity * 2;
+            debuglog(DEBUG_INFO, "[RAMDISK] Resizing: %u -> %u at entry %u\n",
+                     file_capacity, new_capacity, file_total);
             if (new_capacity < file_capacity) {
                 // Overflow guard.
                 print("[RAMDISK] Ramdisk file capacity overflow\n");
@@ -350,11 +421,29 @@ static bool parse_tar(const uint8* base, uint32 size) {
             }
         }
 
-        const char* name = copy_filename(header->filename, file_total);
+        const char* name = copy_filename(header, file_total);
         files[file_total].name = name;
         files[file_total].data = file_size ? data : &empty_file_stub;
         files[file_total].size = file_size;
         files[file_total].is_dir = (header->typeflag == '5');
+
+        // Debug: Log files with hex bytes to see actual memory content
+        // Show first 25 entries to diagnose early termination
+        bool show_debug = (file_total < 25) ||
+                          (file_total >= 85 && file_total <= 95);
+        if (show_debug) {
+            debuglog(DEBUG_INFO, "[RAMDISK] [%u] cursor=0x%08x name='%s' size=%u dir=%u\n",
+                     file_total, (uint32)cursor, name, file_size, files[file_total].is_dir ? 1 : 0);
+            // Also show raw bytes if name looks suspicious (empty or too short)
+            if (!name[0] || (name[0] && !name[1])) {
+                debuglog(DEBUG_WARN, "[RAMDISK]   RAW hdr[0-7]: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                         header->filename[0] & 0xFF, header->filename[1] & 0xFF,
+                         header->filename[2] & 0xFF, header->filename[3] & 0xFF,
+                         header->filename[4] & 0xFF, header->filename[5] & 0xFF,
+                         header->filename[6] & 0xFF, header->filename[7] & 0xFF);
+            }
+        }
+
         file_total++;
 
         // Move to next header (aligned to 512-byte boundary).
@@ -366,6 +455,8 @@ static bool parse_tar(const uint8* base, uint32 size) {
         print("[RAMDISK] Reached end of module without tar terminator\n");
         return false;
     }
+
+    debuglog(DEBUG_INFO, "[RAMDISK] Parsed %u tar entries\n", file_total);
 
     if (!ramdisk_add_virtual_directories()) {
         print("[RAMDISK] Failed to provision virtual directories\n");
@@ -391,10 +482,32 @@ static bool load_initrd_range(uint32 base, uint32 end) {
     print(int_to_string(size));
     print(" bytes\n");
 
-    // Identity map the initrd module before touching it.
-    vmm_identity_map_range(vmm_get_current_page_directory(), base, end, PAGE_WRITABLE);
+    debuglog(DEBUG_INFO, "[RAMDISK] Initrd base=0x%08x end=0x%08x size=%u bytes (%u pages)\n",
+             base, end, size, (size + 4095) / 4096);
 
-    if (!parse_tar((const uint8*)base, size)) {
+    // Identity map the initrd module before touching it.
+    memory_result_t map_result = vmm_identity_map_range(vmm_get_current_page_directory(), base, end, PAGE_WRITABLE);
+    debuglog(DEBUG_INFO, "[RAMDISK] vmm_identity_map_range result: %d\n", (int)map_result);
+
+    // Ensure this range stays reserved in the PMM in case other code tries to reuse it.
+    pmm_reserve_range(base, end);
+
+    uint32 pages = (size + MEMORY_PAGE_SIZE - 1) / MEMORY_PAGE_SIZE;
+    uint32 relocated_phys = pmm_alloc_frames(pages);
+    if (relocated_phys == 0) {
+        kernel_panic("Failed to allocate initrd relocation buffer");
+    }
+    uint32 relocated_end = relocated_phys + pages * MEMORY_PAGE_SIZE;
+    pmm_reserve_range(relocated_phys, relocated_end);
+    memory_result_t reloc_map = vmm_identity_map_range(vmm_get_current_page_directory(),
+                                                       relocated_phys, relocated_end,
+                                                       PAGE_WRITABLE);
+    if (reloc_map != MEMORY_OK) {
+        kernel_panic("Failed to map relocated initrd");
+    }
+    memcpy((void*)relocated_phys, (const void*)base, size);
+
+    if (!parse_tar((const uint8*)relocated_phys, size)) {
         kernel_panic("Failed to parse initrd tar");
     }
 
@@ -452,6 +565,17 @@ bool ramdisk_init(uint32 magic, uint32 mbi_addr) {
         loaded = load_initrd_multiboot2(mbi_addr);
     } else {
         print("[RAMDISK] Unsupported bootloader magic, cannot locate initrd\n");
+    }
+
+    // Fallback: if modules weren't found (e.g., multiboot info not accessible
+    // after paging changes), try the cached bounds detected during memory init.
+    if (!loaded) {
+        uint32 cached_start = memory_get_cached_initrd_start();
+        uint32 cached_end = memory_get_cached_initrd_end();
+        if (cached_start != 0 && cached_end != 0 && cached_end > cached_start) {
+            print("[RAMDISK] Using cached initrd bounds from early memory detection\n");
+            loaded = load_initrd_range(cached_start, cached_end);
+        }
     }
 
     return loaded;

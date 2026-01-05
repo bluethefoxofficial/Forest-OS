@@ -372,22 +372,41 @@ enum syscall_number {
     SYS_OPEN_TREE_ATTR          = 467,
     SYS_NETINFO                 = 469,
     SYS_POWER                   = 470,
+    SYS_USERCTL                 = 471,
 
     // Maximum syscall number
-    SYS_MAX                     = 471
+    SYS_MAX                     = 472
 };
 
 #ifndef USERSPACE_BUILD
 typedef struct {
-    // pusha pushes in this order: EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
-    uint32 eax;  // System call number and return value
-    uint32 ecx;  // Argument 2
-    uint32 edx;  // Argument 3  
-    uint32 ebx;  // Argument 1
-    uint32 esp;  // Original ESP (saved by pusha)
-    uint32 ebp;  // Argument 6
+#if ARCH_64BIT
+    /* Register snapshot for 64-bit int 0x80 ABI:
+     * rax = syscall number / return value
+     * rbx, rcx, rdx, rsi, rdi, rbp = arguments 1..6
+     * rsp captured for completeness/debugging
+     */
+    uint64 rdi;
+    uint64 rsi;
+    uint64 rbp;
+    uint64 rsp;
+    uint64 rbx;
+    uint64 rdx;
+    uint64 rcx;
+    uint64 rax;
+#else
+    // pusha pushes EAX first, EDI last. On stack (low to high address):
+    // EDI, ESI, EBP, ESP, EBX, EDX, ECX, EAX
+    // Struct fields must match stack layout (ESP points to EDI after pusha)
+    uint32 edi;  // Argument 5 (at lowest address, top of stack)
     uint32 esi;  // Argument 4
-    uint32 edi;  // Argument 5
+    uint32 ebp;  // Argument 6
+    uint32 esp;  // Original ESP (saved by pusha, not used)
+    uint32 ebx;  // Argument 1
+    uint32 edx;  // Argument 3
+    uint32 ecx;  // Argument 2
+    uint32 eax;  // System call number and return value (at highest address)
+#endif
 } syscall_frame_t;
 
 void syscall_init(void);

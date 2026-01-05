@@ -2,6 +2,7 @@
 #include "include/screen.h"
 #include "include/util.h"
 #include "include/memory.h"
+#include "include/mm.h"
 #include "include/string.h"
 
 #if LOCK_DEBUG_ENABLED
@@ -27,7 +28,7 @@ void lock_debug_register_lock(const char* name, void* lock_ptr) {
         existing = existing->next;
     }
     
-    lock_debug_info_t* new_info = (lock_debug_info_t*)kmalloc(sizeof(lock_debug_info_t));
+    lock_debug_info_t* new_info = (lock_debug_info_t*)kmalloc(sizeof(lock_debug_info_t), GFP_KERNEL);
     if (new_info) {
         new_info->name = name;
         new_info->acquisition_count = 0;

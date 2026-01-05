@@ -43,4 +43,7 @@ bool tty_uses_graphics_backend(void);
 // subsystem is initialized, since framebuffer TTY requires graphics.
 bool tty_try_enable_graphics_backend(void);
 
+// Returns true once the framebuffer TTY has successfully initialized.
+bool tty_is_ready(void);
+
 #endif // TTY_H

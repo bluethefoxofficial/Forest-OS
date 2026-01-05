@@ -20,4 +20,7 @@ typedef enum {
 
 void debuglog(debug_log_level_t level, const char* format, ...) __attribute__((format(printf, 2, 3)));
 
+/* Printf-style debug output without level prefix (for advanced subsystems) */
+void debuglog_printf(const char* format, ...) __attribute__((format(printf, 1, 2)));
+
 #endif

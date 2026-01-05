@@ -15,18 +15,25 @@ typedef enum {
 
 // Task Control Block (TCB)
 typedef struct task {
+    char name[32];              // Task name
     uint32 id;                  // Process ID
     task_state_t state;         // Current state of the task
     uint32 kernel_stack;        // Saved kernel stack pointer (ESP) for this task
     uint32 kernel_stack_base;   // Base address of the allocated kernel stack
     page_directory_t* page_directory; // Page directory for this task
     elf_load_info_t elf_info;   // ELF loading information (for cleanup, etc.)
+    int32 exit_code;            // Exit status (set when task terminates)
+    char  exit_reason[32];      // Short reason string for termination
+    uint32 uid;                 // Owning user
+    uint32 gid;                 // Primary group
+    uint32 groups_mask;         // Supplemental groups bitmask
 
     // Scheduling-related fields
     uint32 priority;            // Task priority
     uint32 ticks_left;          // Time slices left for execution
     uint32 pending_signals;     // Bitmap of pending signals
     uint32 sleep_until_tick;    // Tick count to wake up at
+    uint32 last_active_tick;    // Last tick when the task made a syscall/IO (0 if never)
 
     struct task* next;          // Pointer to the next task in the linked list
 } task_t;
@@ -41,6 +48,11 @@ void task_destroy(task_t* task);
 void task_switch(task_t* next_task); // Updated signature
 void task_schedule(void);
 void task_kill(uint32 pid); // Added
+void task_terminate_current(int signal);  // Terminate current task with signal
+void task_exit(int code, const char* reason); // Graceful exit with reason
+bool task_exists(uint32 pid);
+uint32 task_get_last_active_tick(uint32 pid);
+void task_mark_active(void);
 void debug_print_ready_queue(void); // Debug function
 
 void sleep_busy(uint32 microseconds);

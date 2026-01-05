@@ -5,6 +5,15 @@
 #include "include/libc/stdlib.h"
 #ifndef USERSPACE_BUILD
 #include "include/memory.h"
+#include "include/mm.h"
+#endif
+
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#else
+#define ARCH_64BIT 0
+#endif
 #endif
 
 void memory_copy(const char *source, char *dest, int nbytes) {
@@ -106,7 +115,7 @@ void* malloc(size_t size) {
     if (size == 0) {
         return NULL;
     }
-    return kmalloc(size);
+    return kmalloc(size, GFP_KERNEL);
 }
 
 void free(void* ptr) {
@@ -157,9 +166,11 @@ long atol(const char *str) {
     return (long)atoi(str);
 }
 
+#if !ARCH_64BIT
 double atof(const char *str) {
     return (double)atoi(str);
 }
+#endif
 
 char *itoa(int value, char *str, int base) {
     static const char digits[] = "0123456789ABCDEF";

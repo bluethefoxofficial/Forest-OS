@@ -26,5 +26,6 @@ void panic_preload_fault_info(uint32 fault_addr, uint32 error_code,
 
 #define kernel_panic(msg) kernel_panic_annotated(msg, __FILE__, __LINE__, __func__)
 #define PANIC(msg) kernel_panic_annotated(msg, __FILE__, __LINE__, __func__)
+#define panic(msg) kernel_panic_annotated(msg, __FILE__, __LINE__, __func__)
 
 #endif

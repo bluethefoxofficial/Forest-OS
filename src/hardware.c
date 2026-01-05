@@ -1,6 +1,15 @@
 #include "include/hardware.h"
 #include "include/system.h"
 #include "include/util.h"
+#include <stdint.h>
+
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#else
+#define ARCH_64BIT 0
+#endif
+#endif
 
 #define FEATURE_SUMMARY_CAPACITY  (sizeof(g_cpuid_info.feature_summary))
 
@@ -56,32 +65,57 @@ static void trim_trailing_spaces(char* str) {
 }
 
 static bool cpuid_supported(void) {
-    uint32 original_eflags;
-    uint32 toggled_eflags;
+    unsigned long original_eflags;
+    unsigned long toggled_eflags;
     
+#if ARCH_64BIT
+    __asm__ __volatile__(
+        "pushfq\n\t"
+        "popq %0"
+        : "=r"(original_eflags)
+    );
+#else
     __asm__ __volatile__(
         "pushfl\n\t"
         "popl %0"
         : "=r"(original_eflags)
     );
+#endif
     
-    toggled_eflags = original_eflags ^ (1 << 21);
+    toggled_eflags = original_eflags ^ (1UL << 21);
     
+#if ARCH_64BIT
+    __asm__ __volatile__(
+        "pushq %0\n\t"
+        "popfq"
+        :
+        : "r"(toggled_eflags)
+    );
+#else
     __asm__ __volatile__(
         "pushl %0\n\t"
         "popfl"
         :
         : "r"(toggled_eflags)
     );
+#endif
     
-    uint32 new_eflags;
+    unsigned long new_eflags;
+#if ARCH_64BIT
+    __asm__ __volatile__(
+        "pushfq\n\t"
+        "popq %0"
+        : "=r"(new_eflags)
+    );
+#else
     __asm__ __volatile__(
         "pushfl\n\t"
         "popl %0"
         : "=r"(new_eflags)
     );
+#endif
     
-    return ((new_eflags ^ original_eflags) & (1 << 21)) != 0;
+    return ((new_eflags ^ original_eflags) & (1UL << 21)) != 0;
 }
 
 static void cpuid_exec(uint32 leaf, uint32 subleaf, cpuid_regs_t* out) {

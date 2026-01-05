@@ -17,10 +17,16 @@
 #include "kb.h"
 #include "util.h"
 #include "hardware.h"
-#include <stdio.h>
+#include "include/libc/stdio.h"
+#include "include/libc/math.h"
 #include "panicui_gfx.h"
 #include "panicui_input.h"
 #include "panicui_wm.h"
+
+// Math constants
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 // =============================================================================
 // GLOBAL STATE
@@ -36,6 +42,7 @@ static const char* g_tab_names[PANICUI_PANEL_COUNT] = {
     "Memory",
     "Stack Trace",
     "System Info",
+    "Colors",
     "Recovery"
 };
 
@@ -61,36 +68,40 @@ void panicui_draw_rounded_rect(graphics_rect_t rect, graphics_color_t color,
     }
 }
 
-// Draw rectangle with border and optional shadow
+// Draw rectangle with border and enhanced shadow
 void panicui_draw_rect_with_border(graphics_rect_t rect, graphics_color_t bg, 
                                   graphics_color_t border, uint32_t border_width) {
-    // Draw shadow first (offset by 1 pixel)
-    graphics_rect_t shadow_rect = {rect.x + 1, rect.y + 1, rect.width, rect.height};
-    graphics_color_t shadow_color = {0, 0, 0, 32};
-    graphics_draw_rect(&shadow_rect, shadow_color, true);
+    // Draw multi-layer shadow for depth
+    for (int i = 3; i >= 1; i--) {
+        graphics_rect_t shadow_rect = {rect.x + i, rect.y + i, rect.width, rect.height};
+        graphics_color_t shadow_color = {0, 0, 0, 16 - (i * 4)};
+        graphics_draw_rect(&shadow_rect, shadow_color, true);
+    }
     
     // Draw main background
     graphics_draw_rect(&rect, bg, true);
     
-    // Draw border
+    // Draw border with enhanced styling
     if (border_width > 0) {
-        // Top border
+        // Top border (lighter for 3D effect)
         graphics_rect_t top = {rect.x, rect.y, rect.width, border_width};
-        graphics_draw_rect(&top, border, true);
+        graphics_color_t top_color = panicui_lighten_color(border, 40);
+        graphics_draw_rect(&top, top_color, true);
         
-        // Bottom border  
+        // Bottom border (darker for 3D effect)
         graphics_rect_t bottom = {rect.x, rect.y + rect.height - border_width, 
                                  rect.width, border_width};
-        graphics_draw_rect(&bottom, border, true);
+        graphics_color_t bottom_color = panicui_darken_color(border, 40);
+        graphics_draw_rect(&bottom, bottom_color, true);
         
-        // Left border
+        // Left border (lighter)
         graphics_rect_t left = {rect.x, rect.y, border_width, rect.height};
-        graphics_draw_rect(&left, border, true);
+        graphics_draw_rect(&left, top_color, true);
         
-        // Right border
+        // Right border (darker)
         graphics_rect_t right = {rect.x + rect.width - border_width, rect.y, 
                                 border_width, rect.height};
-        graphics_draw_rect(&right, border, true);
+        graphics_draw_rect(&right, bottom_color, true);
     }
 }
 
@@ -411,6 +422,16 @@ void panicui_handle_mouse_event(const ps2_mouse_event_t* event) {
                 break;
             }
         }
+        
+        // Handle color panel interactions
+        if (g_panicui.active_panel == PANICUI_PANEL_COLORS) {
+            panicui_handle_color_panel_click(g_panicui.cursor.x, g_panicui.cursor.y);
+        }
+        
+        // Add sparkle effect at click location
+        if (g_panicui.enable_animations) {
+            panicui_add_sparkle_effect(g_panicui.cursor.x, g_panicui.cursor.y);
+        }
     }
     
     // Update mouse state
@@ -429,9 +450,11 @@ void panicui_handle_mouse_event(const ps2_mouse_event_t* event) {
 
 void panicui_handle_key_event(uint32_t keycode) {
     switch (keycode) {
-        case '1': case '2': case '3': case '4': case '5': case '6':
-            // Switch to panel by number
-            panicui_switch_to_panel((panicui_panel_type_t)(keycode - '1'));
+        case '1': case '2': case '3': case '4': case '5': case '6': case '7':
+            // Switch to panel by number (7 panels now including Colors)
+            if (keycode - '1' < PANICUI_PANEL_COUNT) {
+                panicui_switch_to_panel((panicui_panel_type_t)(keycode - '1'));
+            }
             break;
             
         case 'q': case 'Q':
@@ -446,6 +469,43 @@ void panicui_handle_key_event(uint32_t keycode) {
                 debuglog(DEBUG_INFO, "[PanicUI] User requested system reboot\n");
                 // TODO: Implement safe reboot
             }
+            break;
+            
+        case 'a': case 'A':
+            // Toggle animations
+            g_panicui.enable_animations = !g_panicui.enable_animations;
+            if (g_panicui.enable_animations) {
+                panicui_init_effects();
+                debuglog(DEBUG_INFO, "[PanicUI] Animations enabled\n");
+            } else {
+                debuglog(DEBUG_INFO, "[PanicUI] Animations disabled\n");
+            }
+            break;
+            
+        case 'c': case 'C':
+            // Jump to Colors panel
+            panicui_switch_to_panel(PANICUI_PANEL_COLORS);
+            break;
+            
+        case 'h': case 'H':
+        case '/': case '?':
+            // Show help/shortcuts (could display an overlay)
+            panicui_show_help_overlay();
+            break;
+            
+        case ' ': // Spacebar
+            // Pause/unpause effects
+            g_panicui.enable_animations = !g_panicui.enable_animations;
+            break;
+            
+        case 9: // Tab key
+            // Cycle through panels
+            panicui_switch_to_panel((panicui_panel_type_t)((g_panicui.active_panel + 1) % PANICUI_PANEL_COUNT));
+            break;
+            
+        case 8: case 127: // Backspace/Delete
+            // Go back to Overview
+            panicui_switch_to_panel(PANICUI_PANEL_OVERVIEW);
             break;
             
         default:
@@ -505,6 +565,10 @@ void panicui_update_panel_content(panicui_panel_type_t panel) {
         case PANICUI_PANEL_MEMORY:
         case PANICUI_PANEL_STACK:
         case PANICUI_PANEL_SYSTEM:
+        case PANICUI_PANEL_COLORS:
+            panicui_init_colors_panel();
+            break;
+            
         case PANICUI_PANEL_RECOVERY:
             // Content updated by respective collection functions
             break;
@@ -583,11 +647,45 @@ void panicui_generate_recovery_suggestions(void) {
 void panicui_render_frame(void) {
     if (!g_panicui.initialized || !panicui_is_graphics_available()) return;
     
-    // Clear screen with background color
-    graphics_clear_screen(PANICUI_COLOR_BG_PRIMARY);
+    // Use enhanced rendering if animations are enabled
+    if (g_panicui.enable_animations) {
+        // Enhanced animated background
+        panicui_draw_animated_background();
+        
+        // Draw floating particles
+        panicui_draw_particle_system();
+    } else {
+        // Standard background
+        graphics_clear_screen(PANICUI_COLOR_BG_PRIMARY);
+    }
     
-    // Draw all windows
-    panicui_wm_draw(g_panicui.main_surface);
+    // Draw main window frame with enhanced shadows
+    panicui_draw_window_frame();
+    
+    // Draw titlebar
+    panicui_draw_titlebar();
+    
+    // Draw tabs
+    panicui_draw_tabs();
+    
+    // Draw current panel
+    panicui_draw_panel(g_panicui.active_panel);
+    
+    // Draw status bar
+    panicui_draw_statusbar();
+    
+    // Draw visual effects overlay
+    if (g_panicui.enable_animations) {
+        panicui_draw_sparkles();
+        panicui_draw_scanlines();
+        panicui_draw_vignette();
+    }
+    
+    // Draw cursor last (on top of everything)
+    panicui_draw_cursor();
+    
+    // Draw help overlay on top of everything else
+    panicui_draw_help_overlay();
     
     // Swap buffers for smooth display
     graphics_swap_buffers();
@@ -759,6 +857,10 @@ void panicui_draw_panel(panicui_panel_type_t panel) {
         case PANICUI_PANEL_SYSTEM:
             panicui_draw_system_panel(&p->content.system, content_area);
             break;
+        case PANICUI_PANEL_COLORS:
+            panicui_draw_colors_panel(&p->content.colors, content_area);
+            break;
+            
         case PANICUI_PANEL_RECOVERY:
             panicui_draw_recovery_panel(&p->content.recovery, content_area);
             break;
@@ -1009,15 +1111,125 @@ void panicui_draw_statusbar(void) {
 void panicui_draw_cursor(void) {
     if (!g_panicui.cursor.visible) return;
     
-    // Draw simple cursor (crosshair or arrow)
-    graphics_color_t cursor_color = PANICUI_COLOR_TEXT_PRIMARY;
+    // Draw enhanced cursor with glow effect (skip expensive trig when SSE is disabled)
+    graphics_color_t cursor_color = PANICUI_COLOR_HIGHLIGHT;
+#if !ARCH_64BIT
+    graphics_color_t glow_color = {cursor_color.r, cursor_color.g, cursor_color.b, 64};
     
-    // Draw cursor as crosshair for now
-    graphics_draw_line(g_panicui.cursor.x - 5, g_panicui.cursor.y, 
-                      g_panicui.cursor.x + 5, g_panicui.cursor.y, cursor_color);
-    graphics_draw_line(g_panicui.cursor.x, g_panicui.cursor.y - 5,
-                      g_panicui.cursor.x, g_panicui.cursor.y + 5, cursor_color);
+    // Draw glow effect
+    for (int r = 8; r > 0; r--) {
+        uint8_t alpha = 64 - (r * 8);
+        graphics_color_t ring_color = {cursor_color.r, cursor_color.g, cursor_color.b, alpha};
+        
+        // Draw circle outline for glow
+        for (int angle = 0; angle < 360; angle += 10) {
+            int x = g_panicui.cursor.x + (r * cos(angle * M_PI / 180.0));
+            int y = g_panicui.cursor.y + (r * sin(angle * M_PI / 180.0));
+            graphics_draw_pixel(x, y, ring_color);
+        }
+    }
+#endif
     
-    // Draw cursor center dot
-    graphics_draw_pixel(g_panicui.cursor.x, g_panicui.cursor.y, cursor_color);
+    // Draw main cursor (modern arrow style)
+    graphics_color_t cursor_bg = {255, 255, 255, 255};
+    graphics_color_t cursor_border = {0, 0, 0, 255};
+    
+    // Arrow shape points
+    int cx = g_panicui.cursor.x;
+    int cy = g_panicui.cursor.y;
+    
+    // Draw cursor arrow with border
+    graphics_draw_line(cx, cy, cx, cy + 12, cursor_border);
+    graphics_draw_line(cx, cy, cx + 8, cy + 8, cursor_border);
+    graphics_draw_line(cx, cy + 12, cx + 4, cy + 8, cursor_border);
+    graphics_draw_line(cx + 4, cy + 8, cx + 8, cy + 8, cursor_border);
+    
+    // Fill the arrow
+    graphics_draw_line(cx + 1, cy + 1, cx + 1, cy + 10, cursor_bg);
+    graphics_draw_line(cx + 2, cy + 2, cx + 2, cy + 8, cursor_bg);
+    graphics_draw_line(cx + 3, cy + 3, cx + 3, cy + 7, cursor_bg);
+    graphics_draw_line(cx + 4, cy + 4, cx + 4, cy + 7, cursor_bg);
+    graphics_draw_line(cx + 5, cy + 5, cx + 5, cy + 7, cursor_bg);
+    graphics_draw_line(cx + 6, cy + 6, cx + 6, cy + 7, cursor_bg);
+    graphics_draw_line(cx + 7, cy + 7, cx + 7, cy + 7, cursor_bg);
+}
+
+// Color panel functions are implemented in panicui_colors.c
+
+// =============================================================================
+// HELP OVERLAY IMPLEMENTATION
+// =============================================================================
+
+static bool g_show_help_overlay = false;
+
+void panicui_show_help_overlay(void) {
+    g_show_help_overlay = !g_show_help_overlay;
+}
+
+void panicui_draw_help_overlay(void) {
+    if (!g_show_help_overlay) return;
+    
+    // Semi-transparent overlay
+    graphics_rect_t overlay_rect = {0, 0, g_panicui.screen_width, g_panicui.screen_height};
+    graphics_color_t overlay_color = {0, 0, 0, 128};
+    graphics_draw_rect(&overlay_rect, overlay_color, true);
+    
+    // Help window
+    uint32_t help_width = 500;
+    uint32_t help_height = 400;
+    graphics_rect_t help_window = {
+        (g_panicui.screen_width - help_width) / 2,
+        (g_panicui.screen_height - help_height) / 2,
+        help_width,
+        help_height
+    };
+    
+    panicui_draw_rect_with_border(help_window, PANICUI_COLOR_BG_SECONDARY, PANICUI_COLOR_HIGHLIGHT, 3);
+    
+    // Help title
+    if (g_panicui.font_large) {
+        panicui_draw_text_with_shadow(help_window.x + 20, help_window.y + 20,
+                                     "Forest OS Panic Screen - Help",
+                                     g_panicui.font_large, PANICUI_COLOR_TEXT_PRIMARY);
+    }
+    
+    // Help content
+    if (g_panicui.font_normal) {
+        int32_t y = help_window.y + 60;
+        int32_t line_height = 20;
+        
+        const char* help_lines[] = {
+            "Keyboard Shortcuts:",
+            "",
+            "1-7     - Switch to panels (Overview, Registers, etc.)",
+            "Tab     - Cycle through panels",
+            "C       - Jump to Colors panel",
+            "A       - Toggle animations and effects",
+            "Space   - Pause/resume effects",
+            "H or ?  - Show/hide this help",
+            "Q/ESC   - Exit panic screen",
+            "R       - Restart system (if available)",
+            "",
+            "Mouse Controls:",
+            "",
+            "• Click tabs to switch panels",
+            "• Click in HSV square to select colors",
+            "• Click hue bar to change hue",
+            "• Click ANSI colors to select them",
+            "• Clicking adds sparkle effects",
+            "",
+            "Press H again to close this help."
+        };
+        
+        for (uint32_t i = 0; i < sizeof(help_lines) / sizeof(help_lines[0]); i++) {
+            graphics_color_t text_color = (help_lines[i][0] == '\0') ? 
+                PANICUI_COLOR_TEXT_MUTED : 
+                ((help_lines[i][strlen(help_lines[i])-1] == ':') ? 
+                 PANICUI_COLOR_TEXT_PRIMARY : PANICUI_COLOR_TEXT_SECONDARY);
+            
+            panicui_draw_text_with_shadow(help_window.x + 30, y, help_lines[i],
+                                         g_panicui.font_normal, text_color);
+            y += line_height;
+        }
+    }
 }

@@ -4,6 +4,7 @@
 #include "include/screen.h"
 #include "include/memory.h"
 #include "include/panic.h"
+#include "include/debuglog.h"
 
 // Explicit forward declaration to help compiler resolve implicit declaration
 extern page_directory_t* vmm_get_current_page_directory(void);
@@ -92,10 +93,14 @@ static bool map_segment_pages(page_directory_t* dir, uint32 start, uint32 end, u
     for (uint32 va = start; va < end; va += MEMORY_PAGE_SIZE) {
         uint32 frame = pmm_alloc_frame();
         if (!frame) {
+            debuglog(DEBUG_ERROR, "[ELF] pmm_alloc_frame failed while mapping segment page 0x%x-0x%x\n", start, end);
             return false;
         }
 
-        if (vmm_map_page(dir, va, frame, flags) != MEMORY_OK) {
+        memory_result_t map_res = vmm_map_page(dir, va, frame, flags);
+        if (map_res != MEMORY_OK && map_res != MEMORY_ERROR_ALREADY_MAPPED) {
+            debuglog(DEBUG_ERROR, "[ELF] vmm_map_page failed (res=%d) va=0x%x frame=0x%x flags=0x%x\n",
+                     map_res, va, frame, flags);
             return false;
         }
     }
@@ -166,15 +171,21 @@ int elf_load_executable(const uint8 *elf_data, size_t elf_size,
         if (segment->p_memsz == 0)
             continue;
 
-        if (!phdr_in_bounds(segment, elf_size) || segment->p_filesz > segment->p_memsz)
+        if (!phdr_in_bounds(segment, elf_size) || segment->p_filesz > segment->p_memsz) {
+            debuglog(DEBUG_ERROR, "[ELF] Invalid program header: type=%u off=0x%x filesz=0x%x memsz=0x%x elf_size=0x%x\n",
+                     segment->p_type, segment->p_offset, segment->p_filesz, segment->p_memsz, (uint32)elf_size);
             goto fail;
+        }
 
         uint32 segment_start = align_down(segment->p_vaddr, MEMORY_PAGE_SIZE);
         uint32 segment_end = align_up(segment->p_vaddr + segment->p_memsz, MEMORY_PAGE_SIZE);
 
         uint32 flags = phdr_page_flags(segment);
-        if (!map_segment_pages(new_dir, segment_start, segment_end, flags))
+        if (!map_segment_pages(new_dir, segment_start, segment_end, flags)) {
+            debuglog(DEBUG_ERROR, "[ELF] Failed to map segment %u: vaddr=0x%x-0x%x flags=0x%x\n",
+                     i, segment_start, segment_end, flags);
             goto fail;
+        }
 
         const uint8* file_src = elf_data + segment->p_offset;
         uint8* dest = (uint8*)segment->p_vaddr;

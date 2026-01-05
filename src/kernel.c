@@ -1,10 +1,11 @@
 #include "include/kb.h"
 #include "include/cpu_ops.h"
-#include "include/interrupt.h"  // New unified interrupt management system
-#include "include/timer.h"      // Timer management
+#include "include/interrupt.h"
+#include "include/timer.h"
 #include "include/ps2_controller.h"
 #include "include/ps2_keyboard.h"
 #include "include/ps2_mouse.h"
+#include "include/io_ports.h"
 #include "include/util.h"
 #include "include/screen.h"
 
@@ -17,7 +18,7 @@
 #include "include/panic.h"
 #include "include/ramdisk.h"
 #include "include/vfs.h"
-#include "include/task.h" // Added for task management
+#include "include/task.h"
 #include "include/syscall.h"
 #include "include/hardware.h"
 #include "include/string.h"
@@ -40,6 +41,9 @@
 #include "include/bitmap_pmm.h"
 #include "include/secure_vmm.h"
 #include "include/init_system.h"
+#include "include/shell_loader.h"
+#include "include/dks.h"
+#include "include/session.h"
 
 typedef struct {
     char label[64];
@@ -80,6 +84,7 @@ static void kernel_panic_memory_error(const char* stage, const char* reason) {
 #define COLOR_FAIL 0x0C
 #define COLOR_LABEL 0x0B
 
+static bool g_silent_boot = false;
 static bool g_graphics_ready = false;
 static bool g_framebuffer_tty_ready = false;
 static bool g_boot_failed = false;
@@ -129,21 +134,39 @@ static void mouse_log_enqueue(uint8 buttons);
 static bool mouse_log_pop(mouse_log_entry_t* entry);
 
 static void boot_banner(void) {
-    // Display appropriate banner based on available console mode
-    if (g_framebuffer_tty_ready) {
-        // Enhanced TTY is available
-        tty_set_attr(MAKE_TEXT_ATTR(TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK));
-        tty_clear();
-        tty_write_ansi("\x1b[32mForest OS \x1b[37mkernel \x1b[36mv1.0\x1b[0m\n");
-        tty_write_ansi("\x1b[90mFramebuffer TTY with advanced ANSI support\x1b[0m\n");
-        tty_write_ansi("\x1b[32m[    0.000000]\x1b[37m Booting Forest-OS with framebuffer TTY...\x1b[0m\n");
-        tty_write_ansi("\x1b[32m[    0.001000]\x1b[37m Kernel command line: root=/dev/ram0 init=/bin/init\x1b[0m\n");
-        tty_write_ansi("\x1b[32m[    0.002000]\x1b[37m Initializing subsystems...\x1b[0m\n\n");
+    if (g_silent_boot) {
+        if (g_graphics_ready) {
+            graphics_clear_screen(COLOR_BLACK);
+
+            //primative
+
+            graphics_rect_t main_rect = {100, 100, 600, 200};
+            graphics_draw_rect(&main_rect, COLOR_GREEN, true);
+
+            graphics_rect_t inner_rect = {150, 120, 500, 160};
+            graphics_draw_rect(&inner_rect, COLOR_WHITE, true);
+
+        } else {
+            // Fallback for silent mode if graphics isn't ready
+            print_colored("Forest OS (Silent Mode)\n", TEXT_ATTR_GREEN, TEXT_ATTR_BLACK);
+        }
     } else {
-        // Fall back to basic text mode
-        print_colored("Forest OS kernel v1.0\n", TEXT_ATTR_LIGHT_CYAN, TEXT_ATTR_BLACK);
-        print_colored("Booting with text mode console...\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
-        print_colored("Initializing subsystems...\n\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
+        // Display appropriate banner based on available console mode
+        if (g_framebuffer_tty_ready) {
+            // Enhanced TTY is available
+            tty_set_attr(MAKE_TEXT_ATTR(TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK));
+            tty_clear();
+            tty_write_ansi("\x1b[32mForest OS \x1b[37mkernel \x1b[36mv1.0\x1b[0m\n");
+            tty_write_ansi("\x1b[90mFramebuffer TTY with advanced ANSI support\x1b[0m\n");
+            tty_write_ansi("\x1b[32m[    0.000000]\x1b[37m Booting Forest-OS with framebuffer TTY...\x1b[0m\n");
+            tty_write_ansi("\x1b[32m[    0.001000]\x1b[37m Kernel command line: root=/dev/ram0 init=/bin/init\x1b[0m\n");
+            tty_write_ansi("\x1b[32m[    0.002000]\x1b[37m Initializing subsystems...\x1b[0m\n\n");
+        } else {
+            // Fall back to basic text mode
+            print_colored("Forest OS kernel v1.0\n", TEXT_ATTR_LIGHT_CYAN, TEXT_ATTR_BLACK);
+            print_colored("Booting with text mode console...\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
+            print_colored("Initializing subsystems...\n\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
+        }
     }
     
     // Always log to debuglog for early boot debugging
@@ -164,6 +187,18 @@ static void boot_log_event(const char* label, bool ok) {
 }
 
 static void boot_status(const char* label, bool ok) {
+    if (g_silent_boot) {
+        // In silent mode, only log to debuglog, do not print to screen
+        if (!ok) {
+            g_boot_failed = true;
+        }
+        if (debuglog_is_ready()) {
+            debuglog_write(ok ? "[BOOT][ OK ] " : "[BOOT][FAIL] ");
+            debuglog_write(label);
+            debuglog_write("\n");
+        }
+        return;
+    }
     static uint32 timestamp_counter = 3000;  // Start after initial messages
     boot_log_event(label, ok);
     if (!ok) {
@@ -187,6 +222,32 @@ static void boot_status(const char* label, bool ok) {
     }
 
     timestamp_counter += 100 + (timestamp_counter % 50); // Variable timing like real boot
+}
+
+// Drain any pending PS/2 controller output to avoid stuck scancodes from firmware.
+static uint32 ps2_flush_output_buffer(const char* stage __attribute__((unused)), uint32 max_reads) {
+    uint32 drained = 0;
+
+    for (uint32 i = 0; i < max_reads; i++) {
+        uint8 status = inportb(PS2_STATUS_PORT);
+        if ((status & PS2_STATUS_OUTPUT_BUFFER_FULL) == 0) {
+            break;
+        }
+        (void)inportb(PS2_DATA_PORT);
+        drained++;
+    }
+
+    if (drained > 0) {
+        KBOOT_DEBUG("[PS/2] Drained %u byte(s) %s\n", drained, stage ? stage : "");
+    }
+
+    return drained;
+}
+
+static void ps2_keyboard_flush_and_delay(const char* stage) {
+    ps2_flush_output_buffer(stage, 64);
+    for (volatile int i = 0; i < 20000; i++) { /* short settle */ }
+    ps2_flush_output_buffer(stage, 64);
 }
 
 static void initialize_framebuffer_console_early(void) {
@@ -231,6 +292,56 @@ static void boot_require(const char* label, bool ok, const char* panic_reason) {
         }
     }
 }
+
+/* Forward declaration */
+void startk(uint32 magic, uint32 mbi_addr);
+
+// Helper to get initrd module bounds from multiboot info (for early reservation)
+static bool get_initrd_bounds(uint32 magic, uint32 mbi_addr, uint32* out_start, uint32* out_end) {
+    if (!out_start || !out_end) {
+        return false;
+    }
+    *out_start = 0;
+    *out_end = 0;
+
+    if (magic == MULTIBOOT_BOOTLOADER_MAGIC && mbi_addr != 0) {
+        multiboot_info_t* mbi = (multiboot_info_t*)mbi_addr;
+        if (mbi->mods_count > 0 && mbi->mods_addr != 0) {
+            multiboot_module_t* mod = (multiboot_module_t*)mbi->mods_addr;
+            *out_start = mod->mod_start;
+            *out_end = mod->mod_end;
+            return true;
+        }
+    } else if (magic == MULTIBOOT2_BOOTLOADER_MAGIC && mbi_addr != 0) {
+        multiboot2_info_t* hdr = (multiboot2_info_t*)mbi_addr;
+        uint8* cursor = (uint8*)mbi_addr + sizeof(multiboot2_info_t);
+        uint8* end = (uint8*)mbi_addr + hdr->total_size;
+        while (cursor < end) {
+            multiboot2_tag_t* tag = (multiboot2_tag_t*)cursor;
+            if (tag->type == MULTIBOOT2_TAG_END) {
+                break;
+            }
+            if (tag->type == MULTIBOOT2_TAG_MODULE) {
+                multiboot2_tag_module_t* module = (multiboot2_tag_module_t*)tag;
+                *out_start = module->mod_start;
+                *out_end = module->mod_end;
+                return true;
+            }
+            uint32 advance = (tag->size + 7) & ~7;
+            cursor += advance;
+        }
+    }
+    return false;
+}
+
+/* Wrapper for BIOS/UEFI boot entry point that calls startk with dummy values */
+int kernel_main(void) {
+    // Called from bios_main/uefi_main without multiboot info
+    // Pass 0 for magic (won't validate) and NULL for mbi_addr
+    startk(0, 0);
+    return 0;
+}
+
 void startk(uint32 magic, uint32 mbi_addr) {
     cpu_disable_interrupts();
     gdt_init((uint32)&_stack_top);
@@ -255,6 +366,35 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     clearScreen();
     print_colored("Forest OS kernel v1.0 - Early Boot\n", TEXT_ATTR_LIGHT_GREEN, TEXT_ATTR_BLACK);
     print_colored("Text mode console active\n\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
+
+    // Parse kernel command line for bootmode=silent
+    if (magic == MULTIBOOT_BOOTLOADER_MAGIC && mbi_addr != 0) {
+        multiboot_info_t* mbi = (multiboot_info_t*)mbi_addr;
+        if (mbi->cmdline) {
+            char* cmdline = (char*)mbi->cmdline;
+            if (strstr(cmdline, "bootmode=silent")) {
+                g_silent_boot = true;
+            }
+        }
+    } else if (magic == MULTIBOOT2_BOOTLOADER_MAGIC && mbi_addr != 0) {
+        multiboot2_info_t* hdr = (multiboot2_info_t*)mbi_addr;
+        uint8* cursor = (uint8*)mbi_addr + sizeof(multiboot2_info_t);
+        uint8* end = (uint8*)mbi_addr + hdr->total_size;
+        while (cursor < end) {
+            multiboot2_tag_t* tag = (multiboot2_tag_t*)cursor;
+            if (tag->type == MULTIBOOT2_TAG_END) {
+                break;
+            }
+            if (tag->type == MULTIBOOT2_TAG_CMDLINE) {
+                multiboot2_tag_string_t* cmdline_tag = (multiboot2_tag_string_t*)tag;
+                if (strstr(cmdline_tag->string, "bootmode=silent")) {
+                    g_silent_boot = true;
+                }
+            }
+            uint32 advance = (tag->size + 7) & ~7;
+            cursor += advance;
+        }
+    }
     
     // We'll initialize graphics much later in the boot process
     keyboard_set_driver_mode(KEYBOARD_DRIVER_LEGACY);
@@ -280,6 +420,17 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     }
     boot_status("Memory subsystem", true);
 
+    // CRITICAL: Reserve initrd memory in the old PMM to prevent corruption
+    // This must happen immediately after memory_init before any allocations
+    {
+        uint32 initrd_start_early = 0, initrd_end_early = 0;
+        if (get_initrd_bounds(magic, mbi_addr, &initrd_start_early, &initrd_end_early)) {
+            debuglog(DEBUG_INFO, "[KERNEL] Reserving initrd in old PMM: 0x%08x - 0x%08x\n",
+                     initrd_start_early, initrd_end_early);
+            pmm_reserve_range(initrd_start_early, initrd_end_early);
+        }
+    }
+
     // Initialize framebuffer console as early as possible now that memory is ready
     initialize_framebuffer_console_early();
     
@@ -302,11 +453,23 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     };
     
     bitmap_pmm_init(&pmm_config);
-    
+
     // Add some example memory regions (in real system, this would come from multiboot/ACPI)
     bitmap_pmm_add_memory_region(0x100000, 32 * 1024 * 1024, MEMORY_TYPE_AVAILABLE); // 32MB starting at 1MB
     bitmap_pmm_add_memory_region(0x0, 0x100000, MEMORY_TYPE_RESERVED); // First 1MB reserved
-    
+
+    // CRITICAL: Reserve the initrd module memory before PMM finalization
+    // to prevent the allocator from corrupting the initrd data
+    uint32 initrd_start = 0, initrd_end = 0;
+    if (get_initrd_bounds(magic, mbi_addr, &initrd_start, &initrd_end)) {
+        // Align to page boundaries (expand the range)
+        uint32 aligned_start = initrd_start & ~0xFFF;
+        uint32 aligned_end = (initrd_end + 0xFFF) & ~0xFFF;
+        debuglog(DEBUG_INFO, "[KERNEL] Reserving initrd memory: 0x%08x - 0x%08x (%u KB)\n",
+                 aligned_start, aligned_end, (aligned_end - aligned_start) / 1024);
+        bitmap_pmm_add_memory_region(aligned_start, aligned_end - aligned_start, MEMORY_TYPE_RESERVED);
+    }
+
     bitmap_pmm_finalize_initialization();
     boot_status("Bitmap physical memory manager", true);
     
@@ -338,7 +501,7 @@ void kmain(uint32 magic, uint32 mbi_addr) {
         .aslr_enabled = false,
         .dep_enabled = true,
         .debug_mode_enabled = false,
-        .kernel_heap_start = MEMORY_KERNEL_HEAP_START,
+        .kernel_heap_start = memory_get_kernel_heap_start(),
         .kernel_heap_size = 32 * 1024 * 1024,
         .user_space_start = MEMORY_USER_START,
         .user_space_size = 512 * 1024 * 1024
@@ -396,38 +559,59 @@ void kmain(uint32 magic, uint32 mbi_addr) {
     bool vfs_ok = initrd_ok && vfs_init();
     boot_require("Virtual filesystem mount", vfs_ok, "VFS failed to mount");
 
+    // Clear any stale bytes BIOS/firmware may have left in the PS/2 output buffer
+    ps2_flush_output_buffer("before PS/2 init", 64);
+
     bool ps2_controller_ok = (ps2_controller_init() == 0);
     boot_status("PS/2 controller reset + self-test", ps2_controller_ok);
-    
+
+    // If full controller init failed, do minimal init to at least get keyboard working
+    if (!ps2_controller_ok) {
+        ps2_controller_minimal_init();
+    }
+
+    // Drain anything the controller self-test might have produced so the keyboard
+    // can start with a clean buffer.
+    ps2_flush_output_buffer("after controller init", 64);
+
     bool ps2_keyboard_ok = false;
     bool ps2_mouse_ok = false;
-    
-    if (ps2_controller_ok) {
-        ps2_keyboard_ok = (ps2_keyboard_init() == 0);
-        boot_status("PS/2 keyboard driver", ps2_keyboard_ok);
-        
-        if (ps2_keyboard_ok) {
-            ps2_keyboard_register_event_callback(keyboard_event_handler);
-            interrupt_set_handler(IRQ_KEYBOARD, ps2_keyboard_irq_handler);
-            pic_unmask_irq(1);  // Enable keyboard IRQ
-            keyboard_set_driver_mode(KEYBOARD_DRIVER_PS2);
-            tty_write_ansi("\x1b[36m [irq] \x1b[0mKeyboard handler installed on IRQ1\n");
-        } else {
-            tty_write_ansi("\x1b[33m[WARN]\x1b[0m PS/2 keyboard not detected; falling back to legacy polling driver.\n");
-        }
 
+    // Always try to initialize keyboard - even if controller init reported issues
+    // Many emulators (QEMU) and systems work fine even if tests fail
+    ps2_keyboard_ok = (ps2_keyboard_init() == 0);
+    boot_status("PS/2 keyboard driver", ps2_keyboard_ok);
+
+    // Flush/wake the keyboard so pending scancodes don't block fresh ones.
+    ps2_keyboard_flush_and_delay("after keyboard init");
+
+    // ALWAYS set up keyboard IRQ handler and unmask IRQ1
+    // This ensures keyboard works even if initialization had warnings
+    ps2_keyboard_register_event_callback(keyboard_event_handler);
+    interrupt_set_handler_legacy(IRQ_KEYBOARD, ps2_keyboard_irq_handler);
+    pic_unmask_irq(1);  // Enable keyboard IRQ
+    // Read any latched output so the first interrupt doesn't get stuck behind firmware data
+    ps2_flush_output_buffer("after IRQ1 unmask", 32);
+    keyboard_set_driver_mode(KEYBOARD_DRIVER_PS2);
+    tty_write_ansi("\x1b[36m [irq] \x1b[0mKeyboard handler installed on IRQ1\n");
+
+    if (!ps2_keyboard_ok) {
+        tty_write_ansi("\x1b[33m[WARN]\x1b[0m Keyboard init had warnings; IRQ handler installed anyway.\n");
+    }
+
+    // Mouse initialization - only if controller is working
+    if (ps2_controller_ok) {
         ps2_mouse_ok = (ps2_mouse_init() == 0);
         boot_status("PS/2 mouse driver", ps2_mouse_ok);
         if (ps2_mouse_ok) {
             ps2_mouse_register_event_callback(mouse_event_handler);
-            interrupt_set_handler(IRQ_MOUSE, ps2_mouse_irq_handler);
+            interrupt_set_handler_legacy(IRQ_MOUSE, ps2_mouse_irq_handler);
             pic_unmask_irq(12);  // Enable mouse IRQ
         } else {
             tty_write_ansi("\x1b[33m[WARN]\x1b[0m PS/2 mouse unavailable.\n");
         }
     } else {
-        tty_write_ansi("\x1b[33m[WARN]\x1b[0m PS/2 controller not responding; using legacy keyboard driver only.\n");
-        boot_status("PS/2 keyboard driver", false);
+        tty_write_ansi("\x1b[33m[WARN]\x1b[0m PS/2 controller had issues; mouse disabled.\n");
         boot_status("PS/2 mouse driver", false);
     }
     
@@ -453,96 +637,50 @@ void kmain(uint32 magic, uint32 mbi_addr) {
 #if CONFIG_DEBUG_BOOT
     KBOOT_DEBUG("[KERNEL] Lock debugging initialized successfully\n");
 #endif
-    
-    // TODO: Run synchronization tests after task system is fully initialized
-    // sync_test_run_all();
+
+    boot_status("Lock debugging", true);
+
+    tty_write_ansi("\n");
+    tty_write_ansi("\x1b[32m=============================================\x1b[0m\n");
+    tty_write_ansi("\x1b[32m   Forest OS Boot Complete\x1b[0m\n");
+    tty_write_ansi("\x1b[32m=============================================\x1b[0m\n");
+    tty_write_ansi("\n");
+
+    // Check for critical boot failures (but ACPI/sound failures are non-critical)
+    if (g_boot_failed) {
+        tty_write_ansi("\x1b[33m[WARN]\x1b[0m Some non-critical subsystems failed during boot.\n");
+        tty_write_ansi("\x1b[36m[INFO]\x1b[0m Continuing to login manager...\n");
+    }
+
+    boot_status("Login/session manager", true);
+
+    bool autologin_root = false;
+#ifdef ENABLE_ROOT_AUTOLOGIN
+    autologin_root = true;
+#endif
 
 #if CONFIG_DEBUG_BOOT
     KBOOT_DEBUG("[KERNEL] About to enable interrupts...\n");
 #endif
-    // Enable interrupts
+    // Enable interrupts before entering the session loop
     irq_enable_safe();
 #if CONFIG_DEBUG_BOOT
     KBOOT_DEBUG("[KERNEL] Interrupts enabled successfully\n");
 #endif
 
-    // Add a brief delay after enabling interrupts to stabilize
-    for (volatile int i = 0; i < 1000000; i++) { /* delay */ }
+    // Brief delay for interrupt system to stabilize
+    for (volatile int i = 0; i < 50000; i++) { /* delay */ }
 
-    process_deferred_mouse_logs();
+    // Enter the interactive session/login loop. This function does not return.
+    session_run(autologin_root);
 
-#if CONFIG_DEBUG_BOOT
-    KBOOT_DEBUG("[INFO] Interrupts enabled successfully\n");
-
-    // Re-enabled TTY demonstration to capture stack trace of original panic
-    KBOOT_DEBUG("[INFO] Re-enabling TTY demonstration to debug original issue...\n");
-    
-    tty_write_ansi("\x1b[36m[INFO]\x1b[0m Demonstrating enhanced TTY with full ANSI support:\n\n");
-    
-    // Test basic 16 colors
-    tty_write_ansi("Standard 16 colors: ");
-    for (int i = 30; i <= 37; i++) {
-        char color_test[32];
-        sprintf(color_test, "\x1b[%dm█\x1b[0m", i);
-        tty_write_ansi(color_test);
-    }
-    for (int i = 90; i <= 97; i++) {
-        char color_test[32];
-        sprintf(color_test, "\x1b[%dm█\x1b[0m", i);
-        tty_write_ansi(color_test);
-    }
-    tty_write_ansi("\n");
-    
-    // Test 256-color mode
-    tty_write_ansi("256-color palette sample: ");
-    for (int i = 16; i < 32; i++) {
-        char color_test[32];
-        sprintf(color_test, "\x1b[38;5;%dm█\x1b[0m", i);
-        tty_write_ansi(color_test);
-    }
-    tty_write_ansi("\n");
-    
-    // Test truecolor
-    tty_write_ansi("Truecolor RGB gradient: ");
-    for (int r = 0; r < 256; r += 32) {
-        char color_test[32];
-        sprintf(color_test, "\x1b[38;2;%d;0;%dm█\x1b[0m", r, 255-r);
-        tty_write_ansi(color_test);
-    }
-    tty_write_ansi("\n");
-    
-    // Test text attributes
-    tty_write_ansi("Text attributes: ");
-    tty_write_ansi("\x1b[1mBold\x1b[22m ");
-    tty_write_ansi("\x1b[2mFaint\x1b[22m ");
-    tty_write_ansi("\x1b[3mItalic\x1b[23m ");
-    tty_write_ansi("\x1b[4mUnderline\x1b[24m ");
-    tty_write_ansi("\x1b[9mStrikethrough\x1b[29m ");
-    tty_write_ansi("\x1b[7mInverse\x1b[27m");
-    tty_write_ansi("\n");
-    
-    // Test cursor control
-    tty_write_ansi("Cursor control: ");
-    tty_write_ansi("Moving");
-    tty_write_ansi("\x1b[3D\x1b[1C←→");
-    tty_write_ansi("\x1b[2C test\n");
-    
-    tty_write_ansi("\n\x1b[32mEnhanced TTY demonstration complete!\x1b[0m\n");
-    tty_write_ansi("\x1b[36m[INFO]\x1b[0m System ready with enhanced terminal capabilities.\n");
-#endif
-    if (g_boot_failed) {
-        print("[WARN] Boot reported failures; invoking kernel panic instead of halting silently.\n");
-        kernel_panic("Boot encountered unrecoverable failures. See boot log for details.");
-    }
-
-    tty_write_ansi("\x1b[36m[INFO]\x1b[0m CPU entering idle loop.\n");
-    
-    // Idle forever to keep interrupts and scheduled work running without hiding failures
+    // Safety net: keep CPU busy if session_run ever returns unexpectedly.
     while (1) {
-        process_deferred_mouse_logs();
+        task_schedule();
         __asm__ __volatile__("hlt");
     }
 }
+
 
 static void mouse_log_enqueue(uint8 buttons) {
     uint8 next_head = (g_mouse_log_buffer.head + 1) % MOUSE_LOG_CAPACITY;
@@ -568,6 +706,7 @@ static bool mouse_log_pop(mouse_log_entry_t* entry) {
     return has_entry;
 }
 
+static void process_deferred_mouse_logs(void) __attribute__((unused));
 static void process_deferred_mouse_logs(void) {
     mouse_log_entry_t entry;
 

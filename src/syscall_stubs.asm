@@ -1,6 +1,16 @@
 ; Forest OS Syscall Stub
 ; Assembly wrapper for system call interrupt
 
+%ifdef __x86_64__
+BITS 64
+section .text
+extern syscall_handler
+global isr128
+isr128:
+    ; Forward to the main 64-bit interrupt stub so we share the same context logic
+    jmp syscall_handler
+
+%else
 section .text
 align 4
 
@@ -23,31 +33,30 @@ isr128:
     mov es, ax
     mov fs, ax
     mov gs, ax
-    
+
     ; Create syscall frame structure on stack matching the syscall_frame_t structure
-    ; After pusha, the stack contains (from top to bottom after DS push):
-    ; - DS (saved data segment)
-    ; - EDI (from pusha)
-    ; - ESI (from pusha) 
+    ; After pusha, the stack contains (from low address/ESP to high address):
+    ; - DS (saved data segment) <- ESP after push eax
+    ; - EDI (from pusha - pushed last)
+    ; - ESI (from pusha)
     ; - EBP (from pusha)
-    ; - ESP (from pusha - original ESP)
+    ; - ESP (from pusha - original ESP, not used)
     ; - EBX (from pusha)
     ; - EDX (from pusha)
     ; - ECX (from pusha)
-    ; - EAX (from pusha)
+    ; - EAX (from pusha - pushed first)
     ; - Interrupt number (128)
     ; - Dummy error code (0)
     ; - Return address (EIP)
     ; - Code segment (CS)
     ; - Flags (EFLAGS)
-    
-    ; ESP now points to the syscall frame (after the DS push)
-    ; Adjust ESP to point to EAX (which is the first field in syscall_frame_t)
-    add esp, 4             ; Skip the DS we pushed
-    push esp               ; Pass pointer to syscall frame (starting at EAX)
+
+    ; Calculate pointer to EDI (syscall_frame_t starts at ESP+4, skipping DS)
+    ; Using LEA avoids modifying ESP which would corrupt the saved DS
+    lea eax, [esp + 4]     ; EAX = pointer to EDI (syscall_frame_t)
+    push eax               ; Pass pointer to syscall frame
     call syscall_handle    ; Call C handler
     add esp, 4             ; Remove frame pointer from stack
-    sub esp, 4             ; Restore ESP to point to DS
     
     pop eax                ; Restore data segment
     mov ds, ax
@@ -59,3 +68,4 @@ isr128:
     add esp, 8             ; Remove error code and interrupt number
     sti                    ; Re-enable interrupts
     iret                   ; Return from interrupt
+%endif

@@ -126,17 +126,20 @@ void memory_region_manager_init(void) {
     // === KERNEL REGIONS ===
     
     // 10. Kernel code and data (1MB - estimated 3MB for safety)
-    add_protected_region(MEMORY_KERNEL_START, 0x00400000, 
+    add_protected_region(MEMORY_KERNEL_START, memory_get_pmm_start(), 
                         REGION_TYPE_KERNEL_CODE,
                         "Kernel code and data", true, true);
     
     // 11. PMM bitmap area  
-    add_protected_region(MEMORY_PMM_START, MEMORY_PMM_START + MEMORY_PMM_SIZE,
+    add_protected_region(memory_get_pmm_start(),
+                        memory_get_pmm_start() + memory_get_pmm_size(),
                         REGION_TYPE_KERNEL_DATA,
                         "Physical Memory Manager bitmap", false, true);
     
     // 12. Kernel heap
-    add_protected_region(MEMORY_KERNEL_HEAP_START, 0x02000000,
+    const uint32 heap_region_end = memory_get_kernel_heap_start() +
+                                   (0x02000000 - MEMORY_KERNEL_HEAP_START);
+    add_protected_region(memory_get_kernel_heap_start(), heap_region_end,
                         REGION_TYPE_KERNEL_HEAP,
                         "Kernel heap", false, true);
     

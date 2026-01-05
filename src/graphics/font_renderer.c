@@ -4,6 +4,7 @@
 #include "../include/memory.h"
 #include "../include/string.h"
 #include "../include/debuglog.h"
+#include "../include/mm.h"
 
 // Built-in glyph information for 8x8 font
 static font_glyph_t builtin_glyphs_8x8_data[2048]; // Support for extended Unicode blocks
@@ -310,7 +311,7 @@ graphics_result_t font_set_system_font(font_t* font) {
 
 // Helper function implementations
 static graphics_result_t create_builtin_8x8_font(void) {
-    font_t* font = kmalloc(sizeof(font_t));
+    font_t* font = kmalloc(sizeof(font_t), GFP_KERNEL);
     if (!font) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
     }

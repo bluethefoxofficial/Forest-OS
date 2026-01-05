@@ -2,6 +2,7 @@
 #define TIMER_H
 
 #include "types.h"
+#include <stdint.h>
 
 /*
  * Timer management for Forest OS
@@ -16,5 +17,12 @@ uint32 timer_get_ticks(void);
 
 // Disable timer IRQs and handlers (used for shutdown)
 void timer_shutdown(void);
+
+// Additional timer functions
+void timer_sleep_ms(uint32_t milliseconds);
+uint64_t timer_get_frequency(void);
+uint64_t rdtsc(void);
+
+// Timer source structure is defined in interrupt.h
 
 #endif // TIMER_H

@@ -88,4 +88,9 @@ typedef struct multiboot2_mmap_entry {
     uint32 reserved;
 } __attribute__((packed)) multiboot2_mmap_entry_t;
 
+typedef struct multiboot2_tag_string {
+    multiboot2_tag_t tag;
+    char string[];
+} __attribute__((packed)) multiboot2_tag_string_t;
+
 #endif

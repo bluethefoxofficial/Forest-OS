@@ -18,7 +18,15 @@
 #include "../../src/include/syscall.h"
 #include "../../src/include/power.h"
 
-typedef int32 ssize_t;
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#else
+#define ARCH_64BIT 0
+#endif
+#endif
+typedef long sysret_t;
+typedef unsigned long sysarg_t;
 
 static int normalize_errno_value(int raw_errno) {
     switch (raw_errno) {
@@ -96,8 +104,9 @@ static void populate_forest_uname(struct utsname *uts_buffer) {
     (void)snprintf(uts_buffer->machine, sizeof(uts_buffer->machine), "i386");
 }
 #else
-static inline int32 syscall0(int32 num) {
-    int32 ret;
+#if ARCH_64BIT
+static inline sysret_t syscall0(sysarg_t num) {
+    sysret_t ret;
     __asm__ __volatile__("int $0x80"
         : "=a"(ret)
         : "a"(num)
@@ -105,8 +114,8 @@ static inline int32 syscall0(int32 num) {
     return ret;
 }
 
-static inline int32 syscall1(int32 num, int32 a1) {
-    int32 ret;
+static inline sysret_t syscall1(sysarg_t num, sysarg_t a1) {
+    sysret_t ret;
     __asm__ __volatile__("int $0x80"
         : "=a"(ret)
         : "a"(num), "b"(a1)
@@ -114,8 +123,8 @@ static inline int32 syscall1(int32 num, int32 a1) {
     return ret;
 }
 
-static inline int32 syscall2(int32 num, int32 a1, int32 a2) {
-    int32 ret;
+static inline sysret_t syscall2(sysarg_t num, sysarg_t a1, sysarg_t a2) {
+    sysret_t ret;
     __asm__ __volatile__("int $0x80"
         : "=a"(ret)
         : "a"(num), "b"(a1), "c"(a2)
@@ -123,8 +132,8 @@ static inline int32 syscall2(int32 num, int32 a1, int32 a2) {
     return ret;
 }
 
-static inline int32 syscall3(int32 num, int32 a1, int32 a2, int32 a3) {
-    int32 ret;
+static inline sysret_t syscall3(sysarg_t num, sysarg_t a1, sysarg_t a2, sysarg_t a3) {
+    sysret_t ret;
     __asm__ __volatile__("int $0x80"
         : "=a"(ret)
         : "a"(num), "b"(a1), "c"(a2), "d"(a3)
@@ -132,8 +141,8 @@ static inline int32 syscall3(int32 num, int32 a1, int32 a2, int32 a3) {
     return ret;
 }
 
-static inline int32 syscall4(int32 num, int32 a1, int32 a2, int32 a3, int32 a4) {
-    int32 ret;
+static inline sysret_t syscall4(sysarg_t num, sysarg_t a1, sysarg_t a2, sysarg_t a3, sysarg_t a4) {
+    sysret_t ret;
     __asm__ __volatile__("int $0x80"
         : "=a"(ret)
         : "a"(num), "b"(a1), "c"(a2), "d"(a3), "S"(a4)
@@ -141,8 +150,8 @@ static inline int32 syscall4(int32 num, int32 a1, int32 a2, int32 a3, int32 a4) 
     return ret;
 }
 
-static inline int32 syscall5(int32 num, int32 a1, int32 a2, int32 a3, int32 a4, int32 a5) {
-    int32 ret;
+static inline sysret_t syscall5(sysarg_t num, sysarg_t a1, sysarg_t a2, sysarg_t a3, sysarg_t a4, sysarg_t a5) {
+    sysret_t ret;
     __asm__ __volatile__("int $0x80"
         : "=a"(ret)
         : "a"(num), "b"(a1), "c"(a2), "d"(a3), "S"(a4), "D"(a5)
@@ -150,9 +159,77 @@ static inline int32 syscall5(int32 num, int32 a1, int32 a2, int32 a3, int32 a4, 
     return ret;
 }
 
-static inline int32 syscall6(int32 num, int32 a1, int32 a2, int32 a3,
-                             int32 a4, int32 a5, int32 a6) {
-    int32 ret;
+static inline sysret_t syscall6(sysarg_t num, sysarg_t a1, sysarg_t a2, sysarg_t a3, sysarg_t a4, sysarg_t a5, sysarg_t a6) {
+    sysret_t ret;
+    __asm__ __volatile__(
+        "push %%rbp\n"
+        "mov %[arg6], %%rbp\n"
+        "int $0x80\n"
+        "pop %%rbp\n"
+        : "=a"(ret)
+        : "a"(num), "b"(a1), "c"(a2), "d"(a3),
+          "S"(a4), "D"(a5), [arg6]"r"(a6)
+        : "memory");
+    return ret;
+}
+#else
+static inline sysret_t syscall0(sysarg_t num) {
+    sysret_t ret;
+    __asm__ __volatile__("int $0x80"
+        : "=a"(ret)
+        : "a"(num)
+        : "memory");
+    return ret;
+}
+
+static inline sysret_t syscall1(sysarg_t num, sysarg_t a1) {
+    sysret_t ret;
+    __asm__ __volatile__("int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(a1)
+        : "memory");
+    return ret;
+}
+
+static inline sysret_t syscall2(sysarg_t num, sysarg_t a1, sysarg_t a2) {
+    sysret_t ret;
+    __asm__ __volatile__("int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(a1), "c"(a2)
+        : "memory");
+    return ret;
+}
+
+static inline sysret_t syscall3(sysarg_t num, sysarg_t a1, sysarg_t a2, sysarg_t a3) {
+    sysret_t ret;
+    __asm__ __volatile__("int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(a1), "c"(a2), "d"(a3)
+        : "memory");
+    return ret;
+}
+
+static inline sysret_t syscall4(sysarg_t num, sysarg_t a1, sysarg_t a2, sysarg_t a3, sysarg_t a4) {
+    sysret_t ret;
+    __asm__ __volatile__("int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(a1), "c"(a2), "d"(a3), "S"(a4)
+        : "memory");
+    return ret;
+}
+
+static inline sysret_t syscall5(sysarg_t num, sysarg_t a1, sysarg_t a2, sysarg_t a3, sysarg_t a4, sysarg_t a5) {
+    sysret_t ret;
+    __asm__ __volatile__("int $0x80"
+        : "=a"(ret)
+        : "a"(num), "b"(a1), "c"(a2), "d"(a3), "S"(a4), "D"(a5)
+        : "memory");
+    return ret;
+}
+
+static inline sysret_t syscall6(sysarg_t num, sysarg_t a1, sysarg_t a2, sysarg_t a3,
+                             sysarg_t a4, sysarg_t a5, sysarg_t a6) {
+    sysret_t ret;
     __asm__ __volatile__(
         "push %%ebp\n"
         "mov %7, %%ebp\n"
@@ -164,13 +241,14 @@ static inline int32 syscall6(int32 num, int32 a1, int32 a2, int32 a3,
         : "memory");
     return ret;
 }
+#endif /* ARCH_64BIT */
 
-static inline int32 handle_forest_result(int32 result) {
+static inline sysret_t handle_forest_result(sysret_t result) {
     if (result >= 0) {
         errno = 0;
         return result;
     }
-    return assign_errno_and_fail(-result);
+    return assign_errno_and_fail((int)(-result));
 }
 #endif
 
@@ -178,7 +256,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
 #ifdef FOREST_USE_HOST_LIBC
     return handle_linux_result(::write(fd, buf, count));
 #else
-    return handle_forest_result(syscall3(SYS_WRITE, fd, (int32)buf, (int32)count));
+    return handle_forest_result(syscall3(SYS_WRITE, fd, (sysarg_t)buf, (sysarg_t)count));
 #endif
 }
 
@@ -186,7 +264,7 @@ ssize_t read(int fd, void *buf, size_t count) {
 #ifdef FOREST_USE_HOST_LIBC
     return handle_linux_result(::read(fd, buf, count));
 #else
-    return handle_forest_result(syscall3(SYS_READ, fd, (int32)buf, (int32)count));
+    return handle_forest_result(syscall3(SYS_READ, fd, (sysarg_t)buf, (sysarg_t)count));
 #endif
 }
 
@@ -196,7 +274,7 @@ int open(const char *pathname, int flags) {
     (void)flags;
     return handle_linux_stub();
 #else
-    return handle_forest_result(syscall3(SYS_OPEN, (int32)pathname, flags, 0));
+    return handle_forest_result(syscall3(SYS_OPEN, (sysarg_t)pathname, flags, 0));
 #endif
 }
 
@@ -235,7 +313,7 @@ int unlink(const char *pathname) {
     (void)pathname;
     return handle_linux_stub();
 #else
-    return handle_forest_result(syscall1(SYS_UNLINK, (int32)pathname));
+    return handle_forest_result(syscall1(SYS_UNLINK, (sysarg_t)pathname));
 #endif
 }
 
@@ -248,7 +326,7 @@ int time(int *tloc) {
     errno = 0;
     return value;
 #else
-    int value = syscall1(SYS_TIME, (int32)tloc);
+    int value = (int)syscall1(SYS_TIME, (sysarg_t)tloc);
     if (value < 0) {
         return assign_errno_and_fail(-value);
     }
@@ -264,7 +342,7 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
 #ifdef FOREST_USE_HOST_LIBC
     return handle_linux_result(::nanosleep(req, rem));
 #else
-    return handle_forest_result(syscall2(SYS_NANOSLEEP, (int32)req, (int32)rem));
+    return handle_forest_result(syscall2(SYS_NANOSLEEP, (sysarg_t)req, (sysarg_t)rem));
 #endif
 }
 
@@ -277,7 +355,7 @@ int uname(struct utsname *uts_buffer) {
     errno = 0;
     return 0;
 #else
-    return handle_forest_result(syscall1(SYS_UNAME, (int32)uts_buffer));
+    return handle_forest_result(syscall1(SYS_UNAME, (sysarg_t)uts_buffer));
 #endif
 }
 
@@ -285,7 +363,7 @@ int brk(void *addr) {
 #ifdef FOREST_USE_HOST_LIBC
     return handle_linux_result(::brk(addr));
 #else
-    return handle_forest_result(syscall1(SYS_BRK, (int32)addr));
+    return handle_forest_result(syscall1(SYS_BRK, (sysarg_t)addr));
 #endif
 }
 
@@ -316,7 +394,7 @@ int bind(int fd, const void *addr, int addrlen) {
     (void)addrlen;
     return handle_linux_stub();
 #else
-    return handle_forest_result(syscall3(SYS_BIND, fd, (int32)addr, addrlen));
+    return handle_forest_result(syscall3(SYS_BIND, fd, (sysarg_t)addr, addrlen));
 #endif
 }
 
@@ -331,8 +409,8 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
     (void)addrlen;
     return handle_linux_stub();
 #else
-    return handle_forest_result(syscall6(SYS_SENDTO, fd, (int32)buf, (int32)len, flags,
-                    (int32)addr, addrlen));
+    return handle_forest_result(syscall6(SYS_SENDTO, fd, (sysarg_t)buf, (sysarg_t)len, flags,
+                    (sysarg_t)addr, addrlen));
 #endif
 }
 
@@ -347,8 +425,8 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
     (void)addrlen;
     return handle_linux_stub();
 #else
-    return handle_forest_result(syscall6(SYS_RECVFROM, fd, (int32)buf, (int32)len, flags,
-                    (int32)addr, (int32)addrlen));
+    return handle_forest_result(syscall6(SYS_RECVFROM, fd, (sysarg_t)buf, (sysarg_t)len, flags,
+                    (sysarg_t)addr, (sysarg_t)addrlen));
 #endif
 }
 
@@ -358,7 +436,7 @@ int netinfo(net_socket_info_t* buffer, int max_entries) {
     (void)max_entries;
     return handle_linux_stub();
 #else
-    return handle_forest_result(syscall2(SYS_NETINFO, (int32)buffer, max_entries));
+    return handle_forest_result(syscall2(SYS_NETINFO, (sysarg_t)buffer, max_entries));
 #endif
 }
 
@@ -380,6 +458,22 @@ int reboot(int howto) {
 #endif
 }
 
+int user_syscall(int op, const char* user, const char* pass, const char* aux,
+                 void* out, int max_entries) {
+#ifdef FOREST_USE_HOST_LIBC
+    (void)op; (void)user; (void)pass; (void)aux; (void)out; (void)max_entries;
+    return handle_linux_stub();
+#else
+    return handle_forest_result(syscall6(SYS_USERCTL,
+                                         op,
+                                         (sysarg_t)user,
+                                         (sysarg_t)pass,
+                                         (sysarg_t)aux,
+                                         (sysarg_t)out,
+                                         max_entries));
+#endif
+}
+
 // Additional POSIX function implementations for Forest OS userspace
 int stat(const char *path, void *buf) {
 #ifdef FOREST_USE_HOST_LIBC
@@ -387,7 +481,7 @@ int stat(const char *path, void *buf) {
     (void)buf;
     return handle_linux_stub();
 #else
-    return handle_forest_result(syscall2(SYS_STAT, (int32)path, (int32)buf));
+    return handle_forest_result(syscall2(SYS_STAT, (sysarg_t)path, (sysarg_t)buf));
 #endif
 }
 
@@ -397,7 +491,7 @@ int fstat(int fd, void *buf) {
     (void)buf;
     return handle_linux_stub();
 #else
-    return handle_forest_result(syscall2(SYS_FSTAT, fd, (int32)buf));
+    return handle_forest_result(syscall2(SYS_FSTAT, fd, (sysarg_t)buf));
 #endif
 }
 
@@ -407,7 +501,7 @@ int access(const char *path, int mode) {
     (void)mode;
     return handle_linux_stub();
 #else
-    return handle_forest_result(syscall2(SYS_ACCESS, (int32)path, mode));
+    return handle_forest_result(syscall2(SYS_ACCESS, (sysarg_t)path, mode));
 #endif
 }
 
@@ -460,7 +554,7 @@ int ioctl(int fd, unsigned long request, ...) {
     // For simplicity, assume one argument
     va_list args;
     va_start(args, request);
-    int arg = va_arg(args, int);
+    sysarg_t arg = (sysarg_t)va_arg(args, unsigned long);
     va_end(args);
     return handle_forest_result(syscall3(SYS_IOCTL, fd, request, arg));
 #endif
@@ -475,7 +569,7 @@ int fcntl(int fd, int cmd, ...) {
     // For simplicity, assume one argument
     va_list args;
     va_start(args, cmd);
-    int arg = va_arg(args, int);
+    sysarg_t arg = (sysarg_t)va_arg(args, unsigned long);
     va_end(args);
     return handle_forest_result(syscall3(SYS_FCNTL, fd, cmd, arg));
 #endif

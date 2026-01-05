@@ -1,6 +1,7 @@
 #include "include/panicui_wm.h"
 #include "include/memory.h"
 #include "include/string.h"
+#include "include/mm.h"
 
 static panicui_window_t* g_windows[MAX_WINDOWS];
 static int g_window_count = 0;
@@ -17,7 +18,7 @@ panicui_window_t* panicui_wm_create_window(int x, int y, int width, int height, 
         return NULL;
     }
 
-    panicui_window_t* win = kmalloc(sizeof(panicui_window_t));
+    panicui_window_t* win = kmalloc(sizeof(panicui_window_t), GFP_KERNEL);
     if (!win) {
         return NULL;
     }

@@ -203,6 +203,10 @@ const acpi_mcfg_table_t* acpi_get_mcfg(void) {
     return g_mcfg;
 }
 
+const acpi_madt_header_t* acpi_get_madt(void) {
+    return (const acpi_madt_header_t*)acpi_find_table("APIC");
+}
+
 #define ACPI_LOG(msg) debuglog_write(msg)
 
 bool uacpi_init(void) {

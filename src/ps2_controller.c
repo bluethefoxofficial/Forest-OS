@@ -97,26 +97,26 @@ int ps2_controller_init(void) {
     
     print("[PS/2] Self-test passed\n");
     
-    // Test keyboard port
+    // Test keyboard port - but don't fail completely if it doesn't pass
+    // Some emulators and systems without keyboards will fail this test
+    // but still accept keyboard input fine
+    bool keyboard_port_ok = false;
     if (!ps2_controller_send_command(PS2_CMD_TEST_KEYBOARD_PORT)) {
-        print("[PS/2] Failed to send keyboard port test command\n");
-        return -1;
+        print("[PS/2] Warning: Failed to send keyboard port test command\n");
+    } else if (!ps2_controller_wait_output_ready()) {
+        print("[PS/2] Warning: Timeout waiting for keyboard port test result\n");
+    } else {
+        uint8 kbd_test_result = ps2_controller_read_data();
+        if (kbd_test_result != 0x00) {
+            print("[PS/2] Warning: Keyboard port test returned: 0x");
+            print_hex8(kbd_test_result);
+            print(" (continuing anyway)\n");
+        } else {
+            print("[PS/2] Keyboard port test passed\n");
+            keyboard_port_ok = true;
+        }
     }
-    
-    if (!ps2_controller_wait_output_ready()) {
-        print("[PS/2] Timeout waiting for keyboard port test result\n");
-        return -1;
-    }
-    
-    uint8 kbd_test_result = ps2_controller_read_data();
-    if (kbd_test_result != 0x00) {
-        print("[PS/2] Keyboard port test failed: 0x");
-        print_hex8(kbd_test_result);
-        print("\n");
-        return -1;
-    }
-    
-        print("[PS/2] Keyboard port test passed\n");
+    (void)keyboard_port_ok;  // We continue regardless
     
     // Enable keyboard port
     if (!ps2_controller_send_command(PS2_CMD_ENABLE_KEYBOARD_PORT)) {
@@ -339,4 +339,39 @@ bool ps2_keyboard_data_available(void) {
 bool ps2_mouse_data_available(void) {
     uint8 status = inportb(PS2_STATUS_PORT);
     return (status & PS2_STATUS_OUTPUT_BUFFER_FULL) && (status & PS2_STATUS_AUX_OUTPUT_BUFFER);
+}
+
+void ps2_controller_minimal_init(void) {
+    // Minimal initialization for keyboard fallback
+    // Just enable the keyboard port and interrupts without tests
+    print("[PS/2] Performing minimal keyboard initialization...\n");
+
+    // Flush output buffer
+    for (int i = 0; i < 10; i++) {
+        if (inportb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT_BUFFER_FULL) {
+            inportb(PS2_DATA_PORT);
+        }
+    }
+
+    // Try to enable keyboard port
+    ps2_controller_send_command(PS2_CMD_ENABLE_KEYBOARD_PORT);
+
+    // Try to read and modify config to enable keyboard interrupt
+    uint8 config = 0;
+    if (ps2_controller_read_config(&config)) {
+        config |= PS2_CONFIG_KEYBOARD_INTERRUPT;
+        config &= ~PS2_CONFIG_KEYBOARD_DISABLE;
+        ps2_controller_write_config(config);
+    } else {
+        // If we can't read config, try writing a reasonable default
+        // Enable keyboard interrupt, disable mouse, no translation
+        ps2_controller_send_command(PS2_CMD_WRITE_CONFIG_BYTE);
+        ps2_controller_send_data(PS2_CONFIG_KEYBOARD_INTERRUPT | PS2_CONFIG_SYSTEM_FLAG);
+    }
+
+    controller_status.keyboard_enabled = true;
+    controller_status.keyboard_interrupt_enabled = true;
+    controller_initialized = true;
+
+    print("[PS/2] Minimal keyboard initialization complete\n");
 }

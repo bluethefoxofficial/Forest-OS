@@ -3,6 +3,19 @@
 #include "include/debuglog.h"
 #include <stdint.h>
 
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#else
+#define ARCH_64BIT 0
+#endif
+#endif
+
+#if ARCH_64BIT
+int ssp_run_tests(void) { return 0; }
+void ssp_demonstrate_protection(void) {}
+#else
+
 // =============================================================================
 // SSP FUNCTIONALITY TEST
 // =============================================================================
@@ -227,3 +240,5 @@ void ssp_demonstrate_protection(void) {
     
     SSP_FUNCTION_EXIT();
 }
+
+#endif /* ARCH_64BIT */

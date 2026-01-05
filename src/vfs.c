@@ -4,6 +4,7 @@
 #include "include/screen.h"
 #include "include/util.h"
 #include "include/string.h"
+#include "include/debuglog.h"
 
 bool vfs_init(void) {
     // Currently the initrd is our root filesystem.
@@ -12,9 +13,25 @@ bool vfs_init(void) {
         return false;
     }
 
+    debuglog(DEBUG_INFO, "[VFS] Mounted initrd as root (%u entries)\n", ramdisk_file_count());
     print("[VFS] Mounted initrd as root (");
     print(int_to_string(ramdisk_file_count()));
     print(" entries)\n");
+
+    // Debug: List sample of files to verify parsing including around index 89 where shell.elf should be
+    debuglog(DEBUG_INFO, "[VFS] Sample files in initrd:\n");
+    uint32 count = ramdisk_file_count();
+    for (uint32 i = 0; i < count; i++) {
+        // Show first 5, around index 85-95 (where shell.elf should be), and last 3
+        if (i < 5 || (i >= 85 && i <= 95) || i >= count - 3) {
+            const ramdisk_file_t* file = ramdisk_get(i);
+            if (file && file->name) {
+                debuglog(DEBUG_INFO, "  [%u] '%s' %s size=%u\n", i, file->name,
+                         file->is_dir ? "[DIR]" : "[FILE]", file->size);
+            }
+        }
+    }
+
     return true;
 }
 
@@ -24,32 +41,32 @@ bool vfs_read_file(const char* path, const uint8** data, uint32* size) {
     }
 
     // Allow both "bin/file" and "/bin/file".
-    if (*path == '/') {
-        path++;
+    const char* lookup_path = path;
+    if (*lookup_path == '/') {
+        lookup_path++;
     }
 
-    const ramdisk_file_t* f = ramdisk_find(path);
+    debuglog(DEBUG_INFO, "[VFS] Looking up: '%s' (original: '%s')\n", lookup_path, path);
+
+    const ramdisk_file_t* f = ramdisk_find(lookup_path);
     if (!f || f->is_dir) {
-        // Debug: List all files when failing to find shell.elf
-        if (path && strstr(path, "shell.elf")) {
-            print("[VFS DEBUG] Failed to find: ");
-            print(path);
-            print("\n[VFS DEBUG] Available files:\n");
+        debuglog(DEBUG_ERROR, "[VFS] File not found: '%s'\n", lookup_path);
+
+        // Debug: List files containing the search term
+        if (lookup_path && strstr(lookup_path, "shell")) {
+            debuglog(DEBUG_INFO, "[VFS] Searching for files containing 'shell':\n");
             uint32 count = ramdisk_file_count();
             for (uint32 i = 0; i < count; i++) {
                 const ramdisk_file_t* file = ramdisk_get(i);
-                if (file && file->name) {
-                    print("  ");
-                    print(file->name);
-                    if (file->is_dir) {
-                        print(" [DIR]");
-                    }
-                    print("\n");
+                if (file && file->name && strstr(file->name, "shell")) {
+                    debuglog(DEBUG_INFO, "  Found: '%s' size=%u\n", file->name, file->size);
                 }
             }
         }
         return false;
     }
+
+    debuglog(DEBUG_INFO, "[VFS] Found: '%s' size=%u\n", f->name, f->size);
 
     if (data) {
         *data = f->data;

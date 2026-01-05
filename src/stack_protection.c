@@ -2,6 +2,25 @@
 #include "include/screen.h"
 #include "include/panic.h"
 
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#else
+#define ARCH_64BIT 0
+#endif
+#endif
+
+#if ARCH_64BIT
+void stack_protection_init(void) {}
+void stack_usage_snapshot(uint32_t* total_size, uint32_t* used_size, uint32_t* remaining) {
+    if (total_size) *total_size = 0;
+    if (used_size) *used_size = 0;
+    if (remaining) *remaining = 0;
+}
+void switch_to_emergency_stack(void) {}
+bool stack_quick_check(uint32_t esp) { (void)esp; return true; }
+#else
+
 // Direct VGA memory writing function for emergency situations
 static void write_string_direct(const char *str, int x, int y, uint8_t color) {
     uint16_t *vga_memory = (uint16_t*)0xB8000;
@@ -171,3 +190,5 @@ bool stack_quick_check(uint32_t esp) {
     // Quick bounds check without complex operations
     return (esp >= 0x00100000 && esp <= 0x00800000);
 }
+
+#endif /* ARCH_64BIT */

@@ -3,6 +3,14 @@
 #include "include/memory_safe.h"
 #include "include/hardware.h"
 
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#else
+#define ARCH_64BIT 0
+#endif
+#endif
+
 static size_t guarded_copy_span(const void* dest, const void* src, size_t length) {
     size_t dest_span = memory_is_user_pointer(dest) ? memory_probe_user_buffer(dest, length)
                                                     : memory_probe_buffer(dest, length);
@@ -152,17 +160,19 @@ void mmio_write32(volatile void* address, uint32 value) {
     *(volatile uint32*)address = value;
 }
 uint32 cpu_get_cr0(void) {
-    uint32 value;
+    unsigned long value;
     __asm__ __volatile__("mov %%cr0, %0" : "=r"(value));
-    return value;
+    return (uint32)value;
 }
 
 void cpu_set_cr0(uint32 value) {
-    __asm__ __volatile__("mov %0, %%cr0" : : "r"(value));
+    unsigned long val = value;
+    __asm__ __volatile__("mov %0, %%cr0" : : "r"(val));
 }
 
 void cpu_set_cr3(uint32 value) {
-    __asm__ __volatile__("mov %0, %%cr3" : : "r"(value));
+    unsigned long val = value;
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(val));
 }
 
 bool cpu_has_tsc(void) {

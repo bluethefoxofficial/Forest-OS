@@ -3,6 +3,35 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#else
+#define ARCH_64BIT 0
+#endif
+#endif
+
+#if ARCH_64BIT
+void tlb_manager_init(void) {}
+void tlb_invalidate_page(uint32_t virtual_addr) { (void)virtual_addr; }
+void tlb_invalidate_range(uint32_t start_addr, uint32_t end_addr) { (void)start_addr; (void)end_addr; }
+void tlb_flush_all(void) {}
+void tlb_flush_non_global(void) {}
+void tlb_invalidate_for_mapping(uint32_t virtual_addr, bool was_mapped) { (void)virtual_addr; (void)was_mapped; }
+void tlb_shootdown_page(uint32_t virtual_addr) { (void)virtual_addr; }
+void tlb_safe_heap_expand(uint32_t start_vaddr, uint32_t num_pages) { (void)start_vaddr; (void)num_pages; }
+void tlb_update_pmap_for_thread(uint32_t new_cr3) { (void)new_cr3; }
+void tlb_get_stats(uint32_t *flushes_single, uint32_t *flushes_all) {
+    if (flushes_single) *flushes_single = 0;
+    if (flushes_all) *flushes_all = 0;
+}
+bool tlb_has_invlpg(void) { return false; }
+bool tlb_has_global_pages(void) { return false; }
+bool tlb_has_pcid(void) { return false; }
+bool tlb_is_feature_available(const char* feature) { (void)feature; return false; }
+
+#else
+
 // Forward declaration
 void tlb_flush_all(void);
 
@@ -154,3 +183,5 @@ void tlb_get_stats(uint32_t *flushes_single, uint32_t *flushes_all) {
 bool tlb_has_invlpg(void) { return cpu_has_invlpg; }
 bool tlb_has_global_pages(void) { return cpu_has_global_pages; }
 bool tlb_has_pcid(void) { return cpu_has_pcid; }
+
+#endif /* ARCH_64BIT */

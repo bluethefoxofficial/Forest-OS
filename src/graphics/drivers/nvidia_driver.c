@@ -5,6 +5,7 @@
 #include "../../include/string.h"
 #include "../../include/graphics/graphics_manager.h"
 #include "../../include/debuglog.h"
+#include "../../include/mm.h"
 
 // NVIDIA GPU register offsets (based on open documentation)
 // These are simplified registers for basic operations
@@ -291,7 +292,7 @@ static graphics_result_t nvidia_enumerate_modes(graphics_device_t* device, video
     }
     
     *count = NVIDIA_MODE_COUNT;
-    *modes = kmalloc(sizeof(video_mode_t) * NVIDIA_MODE_COUNT);
+    *modes = kmalloc(sizeof(video_mode_t) * NVIDIA_MODE_COUNT, GFP_KERNEL);
     
     if (!*modes) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
@@ -387,7 +388,7 @@ static graphics_result_t nvidia_map_framebuffer(graphics_device_t* device, frame
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
     
-    framebuffer_t* framebuffer = kmalloc(sizeof(framebuffer_t));
+    framebuffer_t* framebuffer = kmalloc(sizeof(framebuffer_t), GFP_KERNEL);
     if (!framebuffer) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
     }
@@ -671,4 +672,10 @@ DRIVER_INIT_FUNCTION(nvidia) {
                          DRIVER_FLAG_SUPPORTS_VSYNC;
     
     return register_display_driver(&nvidia_driver);
+}
+
+// Driver exit function
+DRIVER_EXIT_FUNCTION(nvidia) {
+    debuglog(DEBUG_INFO, "Unregistering NVIDIA Graphics driver\n");
+    unregister_display_driver(&nvidia_driver);
 }

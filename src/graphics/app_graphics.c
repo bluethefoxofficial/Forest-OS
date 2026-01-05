@@ -6,6 +6,7 @@
 #include "../include/string.h"
 #include "../include/libc/stdlib.h"
 #include "../include/debuglog.h"
+#include "../include/mm.h"
 
 // Application graphics state
 static struct {
@@ -101,7 +102,7 @@ app_graphics_context_t* app_create_window(const app_window_params_t* params) {
     }
     
     // Create graphics context
-    app_graphics_context_t* ctx = kmalloc(sizeof(app_graphics_context_t));
+    app_graphics_context_t* ctx = kmalloc(sizeof(app_graphics_context_t), GFP_KERNEL);
     if (!ctx) {
         debuglog(DEBUG_ERROR, "Failed to allocate memory for graphics context\n");
         return NULL;

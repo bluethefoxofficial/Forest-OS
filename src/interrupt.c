@@ -5,7 +5,18 @@
 #include "include/timer.h"
 #include "include/util.h"
 #include "include/debuglog.h"
+#include "include/syscall.h"
 #include <stdint.h>
+
+#if ARCH_64BIT
+#define FRAME_IP(f)    ((f)->rip)
+#define FRAME_FLAGS(f) ((f)->rflags)
+#define FRAME_SP(f)    ((f)->rsp)
+#else
+#define FRAME_IP(f)    ((f)->eip)
+#define FRAME_FLAGS(f) ((f)->eflags)
+#define FRAME_SP(f)    ((f)->useresp)
+#endif
 
 // =============================================================================
 // GLOBAL STATE
@@ -32,15 +43,19 @@ uint16 g_kernel_data_selector = 0x10;
 static interrupt_handler_t interrupt_handlers[IDT_ENTRIES] = {0};
 
 // External assembly interrupt stub table
-extern uint32 interrupt_stub_table[];
+extern uintptr_t interrupt_stub_table[];
 
 // =============================================================================
 // LOW LEVEL HELPERS  
 // =============================================================================
 
 static inline bool cpu_interrupt_flag(void) {
-    uint32 flags;
+    unsigned long flags;
+#if ARCH_64BIT
+    __asm__ __volatile__("pushfq; popq %0" : "=r"(flags));
+#else
     __asm__ __volatile__("pushf; pop %0" : "=r"(flags));
+#endif
     return (flags & 0x200) != 0;
 }
 
@@ -159,12 +174,23 @@ uint16 pic_get_isr(void) {
 // HANDLER REGISTRATION
 // =============================================================================
 
+/* Legacy handler array for old-style handlers */
+static legacy_interrupt_handler_t legacy_handlers[IDT_ENTRIES] = {0};
+
 void interrupt_set_handler(uint8 int_num, interrupt_handler_t handler) {
     interrupt_handlers[int_num] = handler;
+    legacy_handlers[int_num] = NULL;  /* Clear legacy handler if setting new style */
+}
+
+/* Register a legacy handler with old signature (struct interrupt_frame*, uint32 error_code) */
+void interrupt_set_handler_legacy(uint8 int_num, legacy_interrupt_handler_t handler) {
+    interrupt_handlers[int_num] = NULL;  /* Clear new-style handler */
+    legacy_handlers[int_num] = handler;
 }
 
 void interrupt_clear_handler(uint8 int_num) {
     interrupt_handlers[int_num] = NULL;
+    legacy_handlers[int_num] = NULL;
 }
 
 interrupt_handler_t interrupt_get_handler(uint8 int_num) {
@@ -183,7 +209,7 @@ static bool handle_debug_exception(struct interrupt_frame* frame);
 // Handle debug exceptions caused by debug registers, single stepping, etc.
 static bool handle_debug_exception(struct interrupt_frame* frame) {
     static int exception_count = 0;
-    uint32_t dr6;
+    unsigned long dr6;
     __asm__ volatile("mov %%dr6, %0" : "=r"(dr6));
     
     // Prevent infinite loops by limiting exception handling
@@ -194,14 +220,15 @@ static bool handle_debug_exception(struct interrupt_frame* frame) {
     }
     
     // Clear all debug status and control registers to stop the cascade
-    __asm__ volatile("mov %0, %%dr6" : : "r"(0));
-    __asm__ volatile("mov %0, %%dr7" : : "r"(0));
+    unsigned long zero_debug = 0;
+    __asm__ volatile("mov %0, %%dr6" : : "r"(zero_debug));
+    __asm__ volatile("mov %0, %%dr7" : : "r"(zero_debug));
     
     // Clear the Trap Flag (TF) in EFLAGS to stop single stepping
-    frame->eflags &= ~0x100; // Clear TF bit
+    FRAME_FLAGS(frame) &= ~0x100; // Clear TF bit
     
     // Also clear Resume Flag (RF) and other debug-related flags
-    frame->eflags &= ~0x10000; // Clear RF bit
+    FRAME_FLAGS(frame) &= ~0x10000; // Clear RF bit
     
     print_colored("[DEBUG] Debug exception handled and debug state cleared\n", 0x0A, 0x00);
     
@@ -211,11 +238,11 @@ static bool handle_debug_exception(struct interrupt_frame* frame) {
 // Linux-style Invalid Opcode Handler
 // Like Linux, we only handle actual exceptions - let CPU execute valid opcodes naturally
 static bool handle_invalid_opcode(struct interrupt_frame* frame) {
-    uint8* instruction = (uint8*)frame->eip;
+    uint8* instruction = (uint8*)FRAME_IP(frame);
     uint8 opcode = *instruction;
     
     print_colored("[EXCEPTION] Invalid/Undefined Instruction (#UD) at EIP: 0x", 0x0C, 0x00);
-    print_hex(frame->eip);
+    print_hex(FRAME_IP(frame));
     print(", opcode: 0x");
     print_hex(opcode);
     print("\n");
@@ -235,9 +262,9 @@ static bool handle_invalid_opcode(struct interrupt_frame* frame) {
         print_colored("[KERNEL] Two-byte opcode detected\n", 0x0E, 0x00);
     }
     
-    frame->eip += skip_length;
+    FRAME_IP(frame) += skip_length;
     print_colored("[KERNEL] Skipped invalid instruction, continuing at EIP: 0x", 0x0A, 0x00);
-    print_hex(frame->eip);
+    print_hex(FRAME_IP(frame));
     print("\n");
     
     return true; // Always attempt recovery for now
@@ -246,16 +273,18 @@ static bool handle_invalid_opcode(struct interrupt_frame* frame) {
 // Default exception handler - Linux-style approach
 static void default_exception_handler(int int_no, struct interrupt_frame* frame, unsigned int error_code) {
     if (debuglog_is_ready()) {
-        uint32 cr2 = 0;
+        uintptr_t cr2 = 0;
+#if !ARCH_64BIT
         __asm__ __volatile__("mov %%cr2, %0" : "=r"(cr2));
+#endif
         debuglog_write("[EXCEPTION] vector=");
         debuglog_write_dec((uint32)int_no);
         debuglog_write(" err=");
         debuglog_write_hex(error_code);
         debuglog_write(" eip=");
-        debuglog_write_hex(frame->eip);
+        debuglog_write_hex((uint32)FRAME_IP(frame));
         debuglog_write(" cr2=");
-        debuglog_write_hex(cr2);
+        debuglog_write_hex((uint32)cr2);
         debuglog_write("\n");
     }
 
@@ -278,7 +307,7 @@ static void default_exception_handler(int int_no, struct interrupt_frame* frame,
     print_colored("[PANIC] Unhandled exception: ", 0x0C, 0x00);
     print_dec(int_no);
     print(" at EIP: ");
-    print_hex(frame->eip);
+    print_hex(FRAME_IP(frame));
     print(", error: ");
     print_hex(error_code);
     print("\n");
@@ -298,9 +327,37 @@ static void default_irq_handler(int int_no, struct interrupt_frame* frame, unsig
 // =============================================================================
 
 void interrupt_common_handler(int int_no, struct interrupt_frame* frame, unsigned int error_code) {
+    /* First check for new-style handlers */
     interrupt_handler_t handler = interrupt_handlers[int_no];
     if (handler) {
-        handler(frame, error_code);
+        /* Build a temporary interrupt_context for the new handler signature */
+        struct interrupt_context ctx = {0};
+        ctx.vector = int_no;
+    #if ARCH_64BIT
+        ctx.frame.rip = frame->rip;
+        ctx.frame.cs = frame->cs;
+        ctx.frame.rflags = frame->rflags;
+        ctx.frame.rsp = frame->rsp;
+        ctx.frame.ss = frame->ss;
+    #else
+        ctx.frame.eip = frame->eip;
+        ctx.frame.cs = frame->cs;
+        ctx.frame.eflags = frame->eflags;
+        ctx.frame.useresp = frame->useresp;
+        ctx.frame.ss = frame->ss;
+    #endif
+        ctx.frame.error_code = error_code;
+        /* Note: useresp/ss are only valid on privilege changes */
+        ctx.timestamp = 0;  /* TODO: Use TSC if available */
+
+        handler(int_no, &ctx);
+        return;
+    }
+
+    /* Check for legacy handlers */
+    legacy_interrupt_handler_t legacy_handler = legacy_handlers[int_no];
+    if (legacy_handler) {
+        legacy_handler(frame, error_code);
         return;
     }
 
@@ -316,15 +373,58 @@ void interrupt_common_handler(int int_no, struct interrupt_frame* frame, unsigne
 }
 
 // =============================================================================
+// 64-BIT DISPATCHER (USED BY NEW ASM STUBS)
+// =============================================================================
+
+void interrupt_dispatch_handler(struct interrupt_context *ctx) {
+    if (!ctx) {
+        return;
+    }
+
+#if ARCH_64BIT
+    /* Fast path for syscalls coming from the 0x80 interrupt gate */
+    if (ctx->vector == SYSCALL_VECTOR) {
+        syscall_frame_t frame = {0};
+        frame.rdi = ctx->regs.rdi;
+        frame.rsi = ctx->regs.rsi;
+        frame.rbp = ctx->regs.rbp;
+        frame.rbx = ctx->regs.rbx;
+        frame.rdx = ctx->regs.rdx;
+        frame.rcx = ctx->regs.rcx;
+        frame.rax = ctx->regs.rax;
+
+        syscall_handle(&frame);
+
+        /* Propagate return value back to userland */
+        ctx->regs.rax = frame.rax;
+        return;
+    }
+#endif
+
+    /* Fallback to the legacy/common handler path */
+    interrupt_common_handler((int)ctx->vector, &ctx->frame, (unsigned int)ctx->frame.error_code);
+}
+
+// =============================================================================
 // IDT MANAGEMENT
 // =============================================================================
 
-void idt_set_gate(uint8 num, uint32 handler, uint8 flags) {
+void idt_set_gate(uint8 num, uintptr_t handler, uint8 flags) {
+#if ARCH_64BIT
+    idt[num].offset_low = handler & 0xFFFF;
+    idt[num].selector = g_kernel_code_selector;
+    idt[num].ist = 0;
+    idt[num].flags = flags;
+    idt[num].offset_mid = (handler >> 16) & 0xFFFF;
+    idt[num].offset_high = (uint32_t)((uint64_t)handler >> 32);
+    idt[num].reserved = 0;
+#else
     idt[num].offset_low = handler & 0xFFFF;
     idt[num].selector = g_kernel_code_selector;
     idt[num].reserved = 0;
     idt[num].flags = flags;
     idt[num].offset_high = (handler >> 16) & 0xFFFF;
+#endif
 }
 
 // =============================================================================
@@ -339,7 +439,7 @@ void interrupt_early_init(void) {
     print_colored("[INIT] Setting up interrupt descriptor table...\n", 0x0A, 0x00);
     
     // Clear debug registers to prevent spurious debug exceptions
-    uint32 zero = 0;
+    unsigned long zero = 0;
     __asm__ volatile("mov %0, %%dr0" : : "r"(zero) : "memory");
     __asm__ volatile("mov %0, %%dr1" : : "r"(zero) : "memory");
     __asm__ volatile("mov %0, %%dr2" : : "r"(zero) : "memory");
@@ -349,7 +449,12 @@ void interrupt_early_init(void) {
     
     // Initialize IDT descriptor
     idtr.limit = sizeof(idt) - 1;
-    idtr.base = (uint32)&idt;
+    idtr.base =
+#if ARCH_64BIT
+        (uint64_t)&idt;
+#else
+        (uint32)&idt;
+#endif
     
     // Clear IDT
     for (int i = 0; i < IDT_ENTRIES; i++) {
@@ -390,6 +495,31 @@ void interrupt_full_init(void) {
 
     g_interrupt_state = INTERRUPT_STATE_FULL;
     interrupts_initialized = true;
-    
+
     print_colored("[INIT] Full interrupt system initialized\n", 0x0A, 0x00);
 }
+
+// =============================================================================
+// GLOBAL INTERRUPT MANAGER INSTANCE
+// =============================================================================
+
+/* Global interrupt manager - required by the advanced interrupt subsystem */
+struct interrupt_manager interrupt_mgr = {
+    .total_interrupts = ATOMIC64_INIT(0),
+    .spurious_interrupts = ATOMIC64_INIT(0),
+    .unhandled_interrupts = ATOMIC64_INIT(0),
+    .vector_lock = SPINLOCK_INIT("vector_lock"),
+    .early_init_done = ATOMIC_INIT(0),
+    .full_init_done = ATOMIC_INIT(0),
+    .controllers_ready = ATOMIC_INIT(0)
+};
+
+/* Global priority manager - required by interrupt priority subsystem */
+struct priority_manager priority_mgr = {
+    .global_priority_lock = SPINLOCK_INIT("priority_lock"),
+    .initialized = false
+};
+
+/* Global interrupt state variables */
+volatile bool interrupt_controllers_ready = false;
+volatile bool timer_subsystem_ready = false;

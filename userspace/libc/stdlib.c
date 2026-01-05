@@ -4,6 +4,14 @@
 #include "../../src/include/libc/string.h"
 #include "../../src/include/types.h"
 
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#else
+#define ARCH_64BIT 0
+#endif
+#endif
+
 static unsigned int rand_seed = 1;
 static uint8* heap_break = NULL;
 static char default_path_env[] = "PATH=/bin";
@@ -148,9 +156,11 @@ long atol(const char *str) {
     return (long)atoi(str);
 }
 
+#if !ARCH_64BIT
 double atof(const char *str) {
     return (double)atoi(str);
 }
+#endif
 
 long strtol(const char *nptr, char **endptr, int base) {
     const char *s = nptr;

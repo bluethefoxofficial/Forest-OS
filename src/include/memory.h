@@ -4,8 +4,24 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "errno_defs.h"
+#include "types.h"
 
 struct interrupt_frame;
+
+/* Common page size alias */
+#ifndef PAGE_SIZE
+#define PAGE_SIZE MEMORY_PAGE_SIZE
+#endif
+
+/* Memory allocation flags for kernel memory allocation */
+#ifndef GFP_KERNEL
+#define GFP_KERNEL      0x01    /* Kernel memory allocation */
+#define GFP_ATOMIC      0x02    /* Atomic allocation (no sleeping) */
+#define GFP_USER        0x04    /* User memory allocation */
+#define GFP_ZERO        0x08    /* Zero allocated memory */
+#define GFP_DMA         0x10    /* DMA-capable memory */
+#endif
 
 // =============================================================================
 // FOREST OS MEMORY MANAGEMENT SYSTEM v2.0
@@ -52,11 +68,13 @@ struct interrupt_frame;
 #define MEMORY_MAX_ADDR         0xFFFFF000  // Maximum addressable memory
 
 // Page flags for page table entries
-#define PAGE_PRESENT    0x001
-#define PAGE_WRITABLE   0x002
-#define PAGE_USER       0x004
-#define PAGE_ACCESSED   0x020
-#define PAGE_DIRTY      0x040
+#define PAGE_PRESENT        0x001
+#define PAGE_WRITABLE       0x002
+#define PAGE_USER           0x004
+#define PAGE_ACCESSED       0x020
+#define PAGE_DIRTY          0x040
+#define PAGE_CACHE_DISABLE  0x010
+#define PAGE_WRITE_THROUGH  0x008
 
 // Memory allocation flags
 #define ALLOC_ZERO      0x001   // Zero the allocated memory
@@ -84,6 +102,11 @@ typedef struct {
 // Page directory and table structures
 typedef page_entry_t page_table_t[1024];
 typedef page_entry_t page_directory_t[1024];
+
+// Helper to convert a page directory pointer to the physical address for CR3.
+static inline uintptr_t vmm_pdir_phys(page_directory_t* dir) {
+    return (uintptr_t)dir;
+}
 
 // Memory region types (multiboot/e820 compatible)
 #ifndef MEMORY_REGION_TYPE_T_DEFINED
@@ -171,6 +194,9 @@ uint32_t pmm_get_total_frames(void);
 // Get number of free frames
 uint32_t pmm_get_free_frames(void);
 
+// Reserve a range of physical memory (mark as used)
+void pmm_reserve_range(uint32_t start_addr, uint32_t end_addr);
+
 // =============================================================================
 // VIRTUAL MEMORY MANAGER (VMM)
 // =============================================================================
@@ -215,14 +241,14 @@ memory_result_t vmm_identity_map_range(page_directory_t* dir, uint32_t start, ui
 // Initialize kernel heap
 memory_result_t heap_init(uint32_t start_addr, uint32_t initial_size);
 
-// Allocate memory from heap
-void* kmalloc(size_t size);
+// Simple memory allocation functions (original Forest OS API)
+void* khalloc_simple(size_t size);      // Simple heap allocation
+void* khzalloc_simple(size_t size);     // Simple zeroed allocation
 
 // Allocate aligned memory from heap
 void* kmalloc_aligned(size_t size, uint32_t alignment);
 
-// Allocate zeroed memory from heap
-void* kzalloc(size_t size);
+// Note: For full Linux-compatible memory management, include mm.h instead
 
 // Free memory to heap
 void kfree(void* ptr);
@@ -264,9 +290,16 @@ void page_fault_handler(struct interrupt_frame* frame, uint32_t error_code);
 uint32_t memory_align_up(uint32_t addr, uint32_t align);
 uint32_t memory_align_down(uint32_t addr, uint32_t align);
 bool memory_is_aligned(uint32_t addr, uint32_t align);
+uint32_t memory_get_cached_initrd_start(void);
+uint32_t memory_get_cached_initrd_end(void);
 
 // Get comprehensive memory statistics
 memory_stats_t memory_get_stats(void);
+
+// Dynamic layout helpers (PMM/heap base can shift if modules overlap defaults)
+uint32 memory_get_pmm_start(void);
+uint32 memory_get_pmm_size(void);
+uint32 memory_get_kernel_heap_start(void);
 
 // Dump memory information
 void memory_dump_info(void);

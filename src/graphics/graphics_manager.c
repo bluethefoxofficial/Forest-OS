@@ -6,6 +6,7 @@
 #include "../include/memory.h"
 #include "../include/string.h"
 #include "../include/debuglog.h"
+#include "../include/mm.h"
 
 // Graphics system state
 static struct {
@@ -859,7 +860,7 @@ graphics_result_t graphics_create_surface(uint32_t width, uint32_t height,
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
 
-    graphics_surface_t* surf = kmalloc(sizeof(graphics_surface_t));
+    graphics_surface_t* surf = kmalloc(sizeof(graphics_surface_t), GFP_KERNEL);
     if (!surf) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
     }
@@ -875,7 +876,7 @@ graphics_result_t graphics_create_surface(uint32_t width, uint32_t height,
     uint32_t pitch = width * bytes_per_pixel;
     size_t buffer_size = (size_t)pitch * height;
 
-    void* pixels = kmalloc(buffer_size);
+    void* pixels = kmalloc(buffer_size, GFP_KERNEL);
     if (!pixels) {
         kfree(surf);
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
@@ -947,7 +948,7 @@ graphics_result_t graphics_enable_double_buffering(bool enable) {
     if (enable) {
         if (!fb->back_buffer) {
             size_t buffer_size = fb->size ? fb->size : (size_t)fb->pitch * fb->height;
-            fb->back_buffer = kmalloc(buffer_size);
+            fb->back_buffer = kmalloc(buffer_size, GFP_KERNEL);
             if (!fb->back_buffer) {
                 return GRAPHICS_ERROR_OUT_OF_MEMORY;
             }

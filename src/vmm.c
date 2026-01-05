@@ -234,6 +234,14 @@ memory_result_t vmm_map_page(page_directory_t* dir, uint32 vaddr, uint32 paddr, 
         return MEMORY_ERROR_INVALID_ADDR;
     }
 
+    // Ensure the page directory entry allows user-mode access when requested.
+    uint32 page_num = vaddr / MEMORY_PAGE_SIZE;
+    uint32 pd_index = page_num / 1024;
+    if (pd_index >= 1024) {
+        return MEMORY_ERROR_INVALID_ADDR;
+    }
+    page_entry_t* pde = &(*dir)[pd_index];
+
     page_entry_t* page = get_page_entry(vaddr, true, dir);
     if (page == NULL) {
         print("[VMM_DBG] vmm_map_page: get_page_entry returned NULL. Out of memory for page table. Returning OUT_OF_MEMORY.\n");
@@ -249,6 +257,9 @@ memory_result_t vmm_map_page(page_directory_t* dir, uint32 vaddr, uint32 paddr, 
     page->present = (flags & PAGE_PRESENT) ? 1 : 0;
     page->writable = (flags & PAGE_WRITABLE) ? 1 : 0;
     page->user = (flags & PAGE_USER) ? 1 : 0;
+    if (flags & PAGE_USER) {
+        pde->user = 1; // Without this, ring 3 cannot access the PTE even if page->user is set.
+    }
     // Copy other flags like accessed, dirty, global, etc.
     page->accessed = (flags & PAGE_ACCESSED) ? 1 : 0;
     page->dirty = (flags & PAGE_DIRTY) ? 1 : 0;
@@ -513,9 +524,26 @@ page_directory_t* vmm_create_page_directory(void) {
     if (!dir_phys) {
         return NULL;
     }
+
+    // Ensure the newly allocated directory frame is accessible in the current
+    // address space (identity map). Without this, dir_phys (which is above the
+    // early identity window) would fault when we memset/ memcpy it.
+    vmm_map_page(vmm_state.current_directory,
+                 dir_phys,
+                 dir_phys,
+                 PAGE_PRESENT | PAGE_WRITABLE);
+
     page_directory_t* new_dir = (page_directory_t*)dir_phys;
     memset(new_dir, 0, MEMORY_PAGE_SIZE);
     memcpy(new_dir, vmm_state.kernel_directory, MEMORY_PAGE_SIZE);
+
+    // Also ensure the new directory maps itself while it is active, so kernel
+    // writes through the new CR3 (during ELF load) don't fault when touching
+    // the page directory memory.
+    vmm_identity_map_range(new_dir,
+                           dir_phys,
+                           dir_phys + MEMORY_PAGE_SIZE,
+                           PAGE_WRITABLE);
     return new_dir;
 }
 

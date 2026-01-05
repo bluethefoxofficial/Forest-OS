@@ -17,6 +17,7 @@ DEFAULT_MEMORY="1024"
 DEFAULT_TIMEOUT="3600"
 DEFAULT_ISO=""
 DEFAULT_MODE="graphics"
+DEFAULT_ARCH="64"
 
 # Function to print colored output
 print_info() {
@@ -42,6 +43,7 @@ show_usage() {
     echo ""
     echo "Options:"
     echo "  -h, --help           Show this help message"
+    echo "  -a, --arch 32|64     Set architecture (default: ${DEFAULT_ARCH})"
     echo "  -i, --iso FILE       Specify ISO file (default: auto-detect latest)"
     echo "  -m, --memory MB      Set memory size in MB (default: ${DEFAULT_MEMORY})"
     echo "  -t, --timeout SEC    Set timeout in seconds (default: ${DEFAULT_TIMEOUT})"
@@ -54,26 +56,35 @@ show_usage() {
     echo "  --build              Build before running"
     echo ""
     echo "Examples:"
-    echo "  $0                           # Run with default settings"
+    echo "  $0                           # Run 64-bit with default settings"
+    echo "  $0 -a 32                     # Run 32-bit version"
     echo "  $0 --build                   # Build then run"
     echo "  $0 --debug --serial boot.log # Debug mode with log"
     echo "  $0 --gdb --nographic        # GDB debugging, no graphics"
-    echo "  $0 -m 1024 -t 120           # 1GB RAM, 2 min timeout"
+    echo "  $0 -a 32 -m 512             # 32-bit with 512MB RAM"
 }
 
 # Function to find latest ISO
 find_latest_iso() {
+    local arch="$1"
     local iso_file=""
-    
-    # Look for ISO files matching our naming pattern
-    if ls forest_nightly_*.iso >/dev/null 2>&1; then
+
+    # Look for ISO files in dist/ directory matching our naming pattern
+    if ls dist/forestos_${arch}bit_bios_*.iso >/dev/null 2>&1; then
+        iso_file=$(ls -t dist/forestos_${arch}bit_bios_*.iso | head -n1)
+    elif ls dist/forestos_${arch}bit_*.iso >/dev/null 2>&1; then
+        iso_file=$(ls -t dist/forestos_${arch}bit_*.iso | head -n1)
+    # Fallback to old naming conventions
+    elif ls forest_nightly_*.iso >/dev/null 2>&1; then
         iso_file=$(ls -t forest_nightly_*.iso | head -n1)
     elif [ -f "forest.iso" ]; then
         iso_file="forest.iso"
+    elif ls dist/*.iso >/dev/null 2>&1; then
+        iso_file=$(ls -t dist/*.iso | head -n1)
     elif ls *.iso >/dev/null 2>&1; then
         iso_file=$(ls -t *.iso | head -n1)
     fi
-    
+
     echo "$iso_file"
 }
 
@@ -114,23 +125,36 @@ run_qemu() {
     local serial_file="$6"
     local enable_gdb="$7"
     local enable_monitor="$8"
-    
+    local arch="$9"
+
     print_info "Starting Forest-OS in QEMU..."
     print_info "Configuration:"
+    print_info "  Architecture: ${arch}-bit"
     print_info "  ISO: $iso_file"
     print_info "  Memory: ${memory}MB"
     print_info "  Mode: $mode"
     print_info "  Timeout: ${timeout_val}s"
-    
+
+    # Select QEMU binary and CPU based on architecture
+    local qemu_bin
+    local cpu_type
+    if [ "$arch" = "64" ]; then
+        qemu_bin="qemu-system-x86_64"
+        cpu_type="qemu64"
+    else
+        qemu_bin="qemu-system-i386"
+        cpu_type="qemu32"
+    fi
+
     # Build QEMU command
-    local qemu_cmd="timeout ${timeout_val} qemu-system-i386"
-    
+    local qemu_cmd="timeout ${timeout_val} ${qemu_bin}"
+
     # Basic system configuration
     qemu_cmd="$qemu_cmd -m ${memory}M"
     qemu_cmd="$qemu_cmd -cdrom $iso_file"
-    
+
     # CPU and acceleration
-    qemu_cmd="$qemu_cmd -cpu qemu32"
+    qemu_cmd="$qemu_cmd -cpu ${cpu_type}"
     if [ -r /dev/kvm ]; then
         qemu_cmd="$qemu_cmd -enable-kvm"
         print_info "  KVM acceleration: enabled"
@@ -202,6 +226,7 @@ memory="$DEFAULT_MEMORY"
 timeout_val="$DEFAULT_TIMEOUT"
 iso_file="$DEFAULT_ISO"
 mode="$DEFAULT_MODE"
+arch="$DEFAULT_ARCH"
 debug="false"
 serial_file=""
 enable_gdb="false"
@@ -213,6 +238,14 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             show_usage
             exit 0
+            ;;
+        -a|--arch)
+            arch="$2"
+            if [ "$arch" != "32" ] && [ "$arch" != "64" ]; then
+                print_error "Invalid architecture: $arch (must be 32 or 64)"
+                exit 1
+            fi
+            shift 2
             ;;
         -i|--iso)
             iso_file="$2"
@@ -265,9 +298,9 @@ done
 # Main execution
 main() {
     print_info "Forest-OS QEMU Runner v1.0"
-    print_info "Framebuffer TTY Edition"
+    print_info "Framebuffer TTY Edition (${arch}-bit)"
     echo ""
-    
+
     # Build if requested
     if [ "$should_build" = "true" ]; then
         if ! build_os; then
@@ -275,25 +308,28 @@ main() {
         fi
         echo ""
     fi
-    
+
     # Find ISO file if not specified
     if [ -z "$iso_file" ]; then
-        iso_file=$(find_latest_iso)
+        iso_file=$(find_latest_iso "$arch")
         if [ -z "$iso_file" ]; then
-            print_error "No ISO file found. Build the OS first with: make"
+            print_error "No ${arch}-bit ISO file found."
+            print_info "Build with: ./build-helper.sh ${arch}-bios-debug"
+            print_info "Available ISOs in dist/:"
+            ls -la dist/*.iso 2>/dev/null || echo "  No ISO files found"
             exit 1
         fi
     fi
-    
+
     # Check if ISO exists
     if ! check_iso "$iso_file"; then
         exit 1
     fi
-    
+
     echo ""
-    
+
     # Run QEMU
-    run_qemu "$iso_file" "$memory" "$timeout_val" "$mode" "$debug" "$serial_file" "$enable_gdb" "$enable_monitor"
+    run_qemu "$iso_file" "$memory" "$timeout_val" "$mode" "$debug" "$serial_file" "$enable_gdb" "$enable_monitor" "$arch"
     exit $?
 }
 

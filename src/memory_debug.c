@@ -2,6 +2,7 @@
 #include "include/screen.h"
 #include "include/panic.h"
 #include "include/string.h"
+#include "include/mm.h"
 
 static void print_hex_byte(uint8 byte);
 static void print_char(char c);
@@ -86,9 +87,9 @@ void memory_debug_report_fault(uint32 fault_addr, uint32 error_code) {
     
     if (fault_addr < MEMORY_KERNEL_START) {
         print("Cause: Access to low memory (null pointer?)\n");
-    } else if (fault_addr >= MEMORY_KERNEL_START && fault_addr < MEMORY_KERNEL_HEAP_START) {
+    } else if (fault_addr >= MEMORY_KERNEL_START && fault_addr < memory_get_kernel_heap_start()) {
         print("Cause: Access to kernel code area\n");
-    } else if (fault_addr >= MEMORY_KERNEL_HEAP_START && fault_addr < MEMORY_USER_START) {
+    } else if (fault_addr >= memory_get_kernel_heap_start() && fault_addr < MEMORY_USER_START) {
         print("Cause: Access to kernel heap area\n");
         
         if (!vmm_is_mapped(current_dir, fault_addr)) {
@@ -295,7 +296,7 @@ bool memory_check_integrity(void) {
     }
     
     // Test heap functionality with a small allocation
-    void* test_ptr = kmalloc(64);
+    void* test_ptr = kmalloc(64, GFP_KERNEL);
     if (!test_ptr) {
         print("[MEM] ERROR: Failed to allocate test memory\n");
         all_good = false;
@@ -365,7 +366,7 @@ void memory_trace_allocation(void* ptr) {
     // Determine memory region
     if ((uint32)ptr < MEMORY_KERNEL_START) {
         print("  Region: Low memory\n");
-    } else if ((uint32)ptr < MEMORY_KERNEL_HEAP_START) {
+    } else if ((uint32)ptr < memory_get_kernel_heap_start()) {
         print("  Region: Kernel code/data\n");
     } else if ((uint32)ptr < MEMORY_USER_START) {
         print("  Region: Kernel heap\n");

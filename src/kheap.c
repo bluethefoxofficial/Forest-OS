@@ -106,7 +106,6 @@ static uint32 align_size(uint32 size) {
 
 // Add block to free list in address-sorted order and coalesce
 static void add_to_free_list(heap_block_t* block) {
-    print("[HEAP] add_to_free_list: addr=0x"); print_hex((uint32)block); print(", size="); print_dec(block->size); print("\n");
     block->status = BLOCK_FREE;
 
     heap_block_t *current = heap_state.free_list;
@@ -141,7 +140,6 @@ static void add_to_free_list(heap_block_t* block) {
     // Coalesce with the next block if it's adjacent and free
     if (block->next != NULL && is_valid_block(block->next) && 
         (uint32)block + block->size == (uint32)block->next) {
-        print("[HEAP] Coalesce next\n");
         heap_block_t* next_block = block->next;
         block->size += next_block->size;
         block->next = next_block->next;
@@ -154,7 +152,6 @@ static void add_to_free_list(heap_block_t* block) {
     // Coalesce with the previous block if it's adjacent and free
     if (block->prev != NULL && is_valid_block(block->prev) && 
         (uint32)block->prev + block->prev->size == (uint32)block) {
-        print("[HEAP] Coalesce prev\n");
         heap_block_t* prev_block = block->prev;
         prev_block->size += block->size;
         prev_block->next = block->next;
@@ -167,8 +164,6 @@ static void add_to_free_list(heap_block_t* block) {
 
 // Remove block from free list
 static void remove_from_free_list(heap_block_t* block) {
-    print("[HEAP] remove_from_free_list: addr=0x"); print_hex((uint32)block); print("\n");
-    
     if (!is_valid_block(block)) {
         print("[HEAP] ERROR: Attempting to remove invalid block\n");
         return;
@@ -199,13 +194,6 @@ static void remove_from_free_list(heap_block_t* block) {
 
 // Find free block of at least given size
 static heap_block_t* find_free_block(uint32 size) {
-    // Reduced debugging - only print for large allocations or errors
-    static uint32 debug_counter = 0;
-    bool should_debug = (size > 1024 || (debug_counter++ % 100) == 0);
-    
-    if (should_debug) {
-        print("[HEAP] find_free_block: looking for size="); print_dec(size); print("\n");
-    }
     heap_block_t* block = heap_state.free_list;
     
     int i = 0;
@@ -226,16 +214,8 @@ static heap_block_t* find_free_block(uint32 size) {
             print("[HEAP] ERROR: Block outside heap range at 0x"); print_hex((uint32)block); print("\n");
             return NULL;
         }
-        
-        if (should_debug && i < 3) {
-            print("       block "); print_dec(i); print(": 0x"); print_hex((uint32)block);
-            print(" next: 0x"); print_hex((uint32)block->next); print("\n");
-        }
 
         if (block->size >= size) {
-            if (should_debug) {
-                print("       found suitable block\n");
-            }
             return block;
         }
         block = block->next;
@@ -247,8 +227,6 @@ static heap_block_t* find_free_block(uint32 size) {
             return NULL;
         }
     }
-    
-    print("       find_free_block returning NULL\n");
     return NULL;
 }
 
@@ -301,7 +279,6 @@ static memory_result_t expand_heap(uint32 needed_size) {
         return MEMORY_ERROR_OUT_OF_MEMORY; // Hit heap size limit
     }
     
-    print("[HEAP] Expanding heap by "); print_dec(expand_size/1024); print(" KB\n");
     
     // Ensure TLB entries for this range are clean before mapping
     tlb_safe_heap_expand(heap_state.current_end, pages_needed);
@@ -351,8 +328,6 @@ static memory_result_t expand_heap(uint32 needed_size) {
 // =============================================================================
 
 memory_result_t heap_init(uint32 start_addr, uint32 initial_size) {
-    print("[HEAP] Initializing kernel heap...\n");
-    
     // Validate parameters
     if (start_addr == 0 || (start_addr & MEMORY_PAGE_MASK) != 0) {
         return MEMORY_ERROR_INVALID_ADDR;
@@ -377,12 +352,6 @@ memory_result_t heap_init(uint32 start_addr, uint32 initial_size) {
     heap_state.first_block = NULL;
     heap_state.free_list = NULL;
     
-    print("[HEAP] Heap start: 0x");
-    print_hex(start_addr);
-    print(", initial size: ");
-    print_dec(initial_size / 1024);
-    print(" KB\n");
-    
     // Allocate initial heap space
     memory_result_t result = expand_heap(initial_size);
     if (result != MEMORY_OK) {
@@ -392,8 +361,6 @@ memory_result_t heap_init(uint32 start_addr, uint32 initial_size) {
     // The first block is already set up by expand_heap() and added to free_list
     heap_state.first_block = heap_state.free_list;
     heap_state.initialized = true;
-    
-    print("[HEAP] Initialization complete\n");
     
     return MEMORY_OK;
 }

@@ -752,6 +752,12 @@ static const panic_memory_region_t g_memory_regions[MAX_MEMORY_REGIONS] = {
 // =============================================================================
 
 static void capture_cpu_state_atomic(cpu_state_t* state) {
+#if ARCH_64BIT
+    if (!state) {
+        return;
+    }
+    memory_set((uint8*)state, 0, sizeof(*state));
+#else
     // Safety check - prevent accessing NULL or invalid pointers
     if (!state) {
         return;
@@ -819,6 +825,7 @@ static void capture_cpu_state_atomic(cpu_state_t* state) {
     
     // Restore interrupts
     __asm__ __volatile__("popf");
+#endif
 }
 
 // =============================================================================

@@ -5,6 +5,7 @@
 #include "../../include/string.h"
 #include "../../include/graphics/graphics_manager.h"
 #include "../../include/debuglog.h"
+#include "../../include/mm.h"
 
 // Intel HD Graphics register offsets (simplified subset)
 #define INTEL_GMCH_CTRL         0x50    // Graphics Mode Control
@@ -231,7 +232,7 @@ static graphics_result_t intel_hd_enumerate_modes(graphics_device_t* device, vid
     }
     
     *count = INTEL_HD_MODE_COUNT;
-    *modes = kmalloc(sizeof(video_mode_t) * INTEL_HD_MODE_COUNT);
+    *modes = kmalloc(sizeof(video_mode_t) * INTEL_HD_MODE_COUNT, GFP_KERNEL);
     
     if (!*modes) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
@@ -323,7 +324,7 @@ static graphics_result_t intel_hd_map_framebuffer(graphics_device_t* device, fra
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
     
-    framebuffer_t* framebuffer = kmalloc(sizeof(framebuffer_t));
+    framebuffer_t* framebuffer = kmalloc(sizeof(framebuffer_t), GFP_KERNEL);
     if (!framebuffer) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
     }
@@ -583,4 +584,10 @@ DRIVER_INIT_FUNCTION(intel_hd) {
                            DRIVER_FLAG_SUPPORTS_VSYNC;
     
     return register_display_driver(&intel_hd_driver);
+}
+
+// Driver exit function
+DRIVER_EXIT_FUNCTION(intel_hd) {
+    debuglog(DEBUG_INFO, "Unregistering Intel HD Graphics driver\n");
+    unregister_display_driver(&intel_hd_driver);
 }

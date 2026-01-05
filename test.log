@@ -1,0 +1,171 @@
+[BOOT][ OK ] Hardware detection (CPUID)
+[BOOT][ OK ] Driver core
+[BOOT][ OK ] Memory validation system
+[INFO] [MEM] Moving PMM/heap above initrd: initrd 0x0038c000-0x01912000, new PMM base 0x01912000
+[INFO] [MEM] Reserved Multiboot2 info region: 0x01912000 - 0x01912000
+[INFO] [MEM] Checking multiboot magic: 0x36d76289 (expected MB1: 0x2BADB002)
+[INFO] [MEM] Reserving initrd in memory.c: 0x0038c000 - 0x01912000
+[BOOT][ OK ] Memory subsystem
+[INFO] Initializing graphics subsystem...
+[INFO] Registering graphics drivers for framebuffer TTY...
+[INFO] Registering Bochs BGA driver
+[INFO] Registering display driver: bochs_bga
+[INFO] Successfully registered Bochs BGA driver
+[INFO] Registering VESA driver
+[INFO] Registering display driver: vesa
+[INFO] Successfully registered VESA driver
+[INFO] Starting graphics hardware detection...
+[INFO] Found graphics device: 1234:1111 at 00:02.0
+[INFO] Enabled graphics device Bochs BGA
+[INFO] Detected 1 PCI graphics devices
+[INFO] Graphics hardware detection complete. Found 1 devices
+[INFO] Looking for driver for device Bochs BGA (recommended: bochs_bga)
+[INFO] Found recommended driver: bochs_bga
+[INFO] Loaded driver bochs_bga for device Bochs BGA
+[INFO] Initializing Bochs BGA driver for device Bochs BGA
+[INFO] BGA: Detected version 0xb0c5
+[INFO] BGA: Successfully mapped and validated framebuffer 0xfd000000-0xfe000000 (size: 16 MB)
+[INFO] BGA: Driver initialized successfully
+[WARN] Failed to set default text mode
+[INFO] Graphics subsystem initialized successfully
+[BOOT][ OK ] Graphics subsystem
+[INFO] BGA: Setting mode 800x600x32
+[INFO] TTY: framebuffer console with enhanced ANSI support enabled
+[INFO] Initializing font renderer...
+[INFO] Created built-in 8x8 font
+[INFO] Font renderer initialized successfully
+Forest OS kernel v1.0 boot sequence started
+Initializing subsystems...
+[BOOT][ OK ] Framebuffer TTY with truecolor support
+[BOOT][ OK ] Memory region manager
+[BOOT][ OK ] Page fault recovery system
+[BOOT][ OK ] Bitmap physical memory manager
+[BOOT][ OK ] Bitmap PMM tests
+[BOOT][ OK ] TLB management
+[BOOT][ OK ] SMEP/SMAP hardware protection
+[BOOT][ OK ] Stack overflow protection
+[BOOT][ OK ] Stack smashing protection
+[SSP-TEST] Starting safe tests
+[SSP-TEST] buffer
+[SSP-TEST] canary mgmt
+[SSP-TEST] stats
+[SSP-TEST] controlled corruption
+[BOOT][ OK ] SSP functionality tests
+[BOOT][ OK ] Secure virtual memory manager
+[BOOT][ OK ] Memory corruption detection
+[BOOT][ OK ] Memory corruption tests
+[BOOT][ OK ] Enhanced heap allocator
+[BOOT][ OK ] Enhanced heap tests
+[BOOT][FAIL] ACPI discovery
+[BOOT][FAIL] ACPI power management
+[BOOT][ OK ] PCI/PCIe configuration
+[BOOT][ OK ] Network core
+[INFO] [RAMDISK] Initrd base=0x0038c000 end=0x01912000 size=22568960 bytes (5510 pages)
+[INFO] [RAMDISK] vmm_identity_map_range result: 0
+[INFO] [RAMDISK] Starting tar parse at 0x1a62000, size 22568960
+[INFO] [RAMDISK] [0] cursor=0x01a62000 name='' size=0 dir=1
+[WARN] [RAMDISK]   RAW hdr[0-7]: 2e 2f 00 00 00 00 00 00
+[INFO] [RAMDISK] [1] cursor=0x01a62200 name='boot' size=0 dir=1
+[INFO] [RAMDISK] [2] cursor=0x01a62400 name='boot/grub' size=0 dir=1
+[INFO] [RAMDISK] [3] cursor=0x01a62600 name='boot/initrd' size=0 dir=1
+[INFO] [RAMDISK] [4] cursor=0x01a62800 name='lib64' size=0 dir=1
+[INFO] [RAMDISK] [5] cursor=0x01a62a00 name='home' size=0 dir=1
+[INFO] [RAMDISK] [6] cursor=0x01a62c00 name='etc' size=0 dir=1
+[INFO] [RAMDISK] [7] cursor=0x01a62e00 name='etc/shadow' size=86 dir=0
+[INFO] [RAMDISK] [8] cursor=0x01a63200 name='bin' size=0 dir=1
+[INFO] [RAMDISK] [9] cursor=0x01a63400 name='bin/ed.elf' size=79316 dir=0
+[INFO] [RAMDISK] [10] cursor=0x01a76c00 name='bin/curl.elf' size=64068 dir=0
+[INFO] [RAMDISK] [11] cursor=0x01a86a00 name='bin/killall.elf' size=68896 dir=0
+[INFO] [RAMDISK] [12] cursor=0x01a97a00 name='bin/ftp.elf' size=64188 dir=0
+[INFO] [RAMDISK] [13] cursor=0x01aa7800 name='bin/diff.elf' size=79320 dir=0
+[INFO] [RAMDISK] [14] cursor=0x01abb000 name='bin/clang.elf' size=79320 dir=0
+[INFO] [RAMDISK] [15] cursor=0x01ace800 name='bin/service.elf' size=79324 dir=0
+[INFO] [RAMDISK] [16] cursor=0x01ae2000 name='bin/chmod.elf' size=68944 dir=0
+[INFO] [RAMDISK] [17] cursor=0x01af3000 name='bin/fdisk.elf' size=79320 dir=0
+[INFO] [RAMDISK] [18] cursor=0x01b06800 name='bin/at.elf' size=79316 dir=0
+[INFO] [RAMDISK] [19] cursor=0x01b1a000 name='bin/ls.elf' size=68712 dir=0
+[INFO] [RAMDISK] [20] cursor=0x01b2b000 name='bin/htop.elf' size=79320 dir=0
+[INFO] [RAMDISK] [21] cursor=0x01b3e800 name='bin/hostname.elf' size=64168 dir=0
+[INFO] [RAMDISK] [22] cursor=0x01b4e600 name='bin/man.elf' size=79316 dir=0
+[INFO] [RAMDISK] [23] cursor=0x01b61e00 name='bin/xz.elf' size=69108 dir=0
+[INFO] [RAMDISK] [24] cursor=0x01b72e00 name='bin/pkg_config.elf' size=79332 dir=0
+[INFO] [RAMDISK] Resizing: 32 -> 64 at entry 32
+[INFO] [RAMDISK] Resizing: 64 -> 128 at entry 64
+[INFO] [RAMDISK] [85] cursor=0x01fc0200 name='bin/syslog.elf' size=79324 dir=0
+[INFO] [RAMDISK] [86] cursor=0x01fd3a00 name='bin/gpg.elf' size=79316 dir=0
+[INFO] [RAMDISK] [87] cursor=0x01fe7200 name='bin/ss.elf' size=68484 dir=0
+[INFO] [RAMDISK] [88] cursor=0x01ff8000 name='bin/env.elf' size=64000 dir=0
+[INFO] [RAMDISK] [89] cursor=0x02007c00 name='bin/file.elf' size=79320 dir=0
+[INFO] [RAMDISK] [90] cursor=0x0201b400 name='bin/printenv.elf' size=64016 dir=0
+[INFO] [RAMDISK] [91] cursor=0x0202b200 name='bin/shell.elf' size=71124 dir=0
+[INFO] [RAMDISK] [92] cursor=0x0203ca00 name='bin/ld.elf' size=79316 dir=0
+[INFO] [RAMDISK] [93] cursor=0x02050200 name='bin/grep.elf' size=69632 dir=0
+[INFO] [RAMDISK] [94] cursor=0x02061400 name='bin/find.elf' size=68900 dir=0
+[INFO] [RAMDISK] [95] cursor=0x02072400 name='bin/date.elf' size=63968 dir=0
+[INFO] [RAMDISK] Resizing: 128 -> 256 at entry 128
+[INFO] [RAMDISK] Resizing: 256 -> 512 at entry 256
+[INFO] [RAMDISK] Reached tar terminator after 294 entries at cursor=0x02fe7c00
+[INFO] [RAMDISK] Parsed 294 tar entries
+[BOOT][ OK ] Initrd presence + parsing
+[INFO] [VFS] Mounted initrd as root (312 entries)
+[INFO] [VFS] Sample files in initrd:
+[INFO]   [0] '' [DIR] size=0
+[INFO]   [1] 'boot' [DIR] size=0
+[INFO]   [2] 'boot/grub' [DIR] size=0
+[INFO]   [3] 'boot/initrd' [DIR] size=0
+[INFO]   [4] 'lib64' [DIR] size=0
+[INFO]   [85] 'bin/syslog.elf' [FILE] size=79324
+[INFO]   [86] 'bin/gpg.elf' [FILE] size=79316
+[INFO]   [87] 'bin/ss.elf' [FILE] size=68484
+[INFO]   [88] 'bin/env.elf' [FILE] size=64000
+[INFO]   [89] 'bin/file.elf' [FILE] size=79320
+[INFO]   [90] 'bin/printenv.elf' [FILE] size=64016
+[INFO]   [91] 'bin/shell.elf' [FILE] size=71124
+[INFO]   [92] 'bin/ld.elf' [FILE] size=79316
+[INFO]   [93] 'bin/grep.elf' [FILE] size=69632
+[INFO]   [94] 'bin/find.elf' [FILE] size=68900
+[INFO]   [95] 'bin/date.elf' [FILE] size=63968
+[INFO]   [309] 'var/log' [DIR] size=0
+[INFO]   [310] 'var/spool' [DIR] size=0
+[INFO]   [311] 'var/lib' [DIR] size=0
+[BOOT][ OK ] Virtual filesystem mount
+[BOOT][ OK ] PS/2 controller reset + self-test
+[BOOT][ OK ] PS/2 keyboard driver
+[BOOT][ OK ] PS/2 mouse driver
+[BOOT][ OK ] Timer and task scheduling
+[BOOT][FAIL] Sound subsystem
+[BOOT][ OK ] Lock debugging
+[BOOT][ OK ] Login/session manager
+[INFO] [VFS] Looking up: 'etc/shadow' (original: '/etc/shadow')
+[INFO] [VFS] Found: 'etc/shadow' size=86
+[INFO] [KB] ps2 emit 'r' (scancode=0x2d)
+[INFO] [KB] ps2 char 'r' (0x72)
+[INFO] [KB] ps2 emit 'o' (scancode=0x44)
+[INFO] [KB] ps2 char 'o' (0x6f)
+[INFO] [KB] ps2 emit 'o' (scancode=0x44)
+[INFO] [KB] ps2 char 'o' (0x6f)
+[INFO] [KB] ps2 emit 't' (scancode=0x2c)
+[INFO] [KB] ps2 char 't' (0x74)
+[INFO] [KB] ps2 emit '
+' (scancode=0x5a)
+[INFO] [KB] ps2 char '
+' (0x0a)
+[INFO] [KB] ps2 emit 'r' (scancode=0x2d)
+[INFO] [KB] ps2 char 'r' (0x72)
+[INFO] [KB] ps2 emit 'o' (scancode=0x44)
+[INFO] [KB] ps2 char 'o' (0x6f)
+[INFO] [KB] ps2 emit 'o' (scancode=0x44)
+[INFO] [KB] ps2 char 'o' (0x6f)
+[INFO] [KB] ps2 emit 't' (scancode=0x2c)
+[INFO] [KB] ps2 char 't' (0x74)
+[INFO] [KB] ps2 emit '
+' (scancode=0x5a)
+[INFO] [KB] ps2 char '
+' (0x0a)
+[INFO] [SESSION] Launching shell for user 'root'
+[INFO] [SHELL] Loading shell from /bin/shell.elf
+[INFO] [VFS] Looking up: 'bin/shell.elf' (original: '/bin/shell.elf')
+[INFO] [VFS] Found: 'bin/shell.elf' size=71124
+[INFO] [SHELL] Read shell ELF: data=0x202b400, size=71124
+[INFO] [SHELL] ELF validated, creating shell task through scheduler
+[INFO] [SHELL] Shell task created successfully with ID: 3

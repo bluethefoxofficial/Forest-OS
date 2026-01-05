@@ -1,0 +1,685 @@
+#include "../../include/graphics/display_driver.h"
+#include "../../include/graphics/graphics_types.h"
+#include "../../include/hardware.h"
+#include "../../include/memory.h"
+#include "../../include/string.h"
+#include "../../include/debuglog.h"
+#include "../../include/io_ports.h"
+#include "../../include/tlb_manager.h"
+
+// AMD/ATI Graphics driver framework supporting modern RDNA and legacy Radeon cards
+// This covers both discrete Radeon GPUs and APU integrated graphics
+
+// AMD PCI vendor ID
+#define AMD_VENDOR_ID               0x1002
+
+// AMD GPU architecture detection
+typedef enum {
+    AMD_ARCH_UNKNOWN = 0,
+    AMD_ARCH_R100,          // Radeon 7000 series
+    AMD_ARCH_R200,          // Radeon 8000/9000 series
+    AMD_ARCH_R300,          // Radeon 9500-9800
+    AMD_ARCH_R400,          // Radeon X series
+    AMD_ARCH_R500,          // Radeon X1000 series
+    AMD_ARCH_R600,          // Radeon HD 2000/3000
+    AMD_ARCH_R700,          // Radeon HD 4000
+    AMD_ARCH_EVERGREEN,     // Radeon HD 5000/6000
+    AMD_ARCH_NORTHERN_ISLANDS, // Radeon HD 6000
+    AMD_ARCH_SOUTHERN_ISLANDS, // Radeon HD 7000
+    AMD_ARCH_SEA_ISLANDS,   // Radeon R7/R9 200/300 series
+    AMD_ARCH_VOLCANIC_ISLANDS, // Radeon R9 Fury
+    AMD_ARCH_ARCTIC_ISLANDS, // Radeon RX 400/500 series (Polaris)
+    AMD_ARCH_VEGA,          // Radeon RX Vega series
+    AMD_ARCH_NAVI,          // Radeon RX 5000 series (RDNA)
+    AMD_ARCH_NAVI2,         // Radeon RX 6000 series (RDNA2)
+    AMD_ARCH_NAVI3          // Radeon RX 7000 series (RDNA3)
+} amd_arch_t;
+
+// AMD GPU classes and features
+typedef struct {
+    uint16_t device_id_min;
+    uint16_t device_id_max;
+    amd_arch_t architecture;
+    const char* arch_name;
+    bool supports_vulkan;
+    bool supports_freesync;
+    bool supports_rdna_features;
+    bool has_hardware_rt;
+    uint32_t base_vram_mb;
+    uint32_t compute_units;
+} amd_gpu_info_t;
+
+// AMD GPU database
+static const amd_gpu_info_t amd_gpu_db[] = {
+    // RDNA3 (RX 7000 series)
+    {0x7440, 0x74FF, AMD_ARCH_NAVI3, "RDNA3", true, true, true, true, 8192, 64},
+    
+    // RDNA2 (RX 6000 series)
+    {0x73A0, 0x73FF, AMD_ARCH_NAVI2, "RDNA2", true, true, true, true, 6144, 40},
+    
+    // RDNA (RX 5000 series)
+    {0x7310, 0x73FF, AMD_ARCH_NAVI, "RDNA", true, true, true, false, 4096, 36},
+    
+    // Vega series
+    {0x6860, 0x69FF, AMD_ARCH_VEGA, "Vega", true, true, false, false, 4096, 32},
+    
+    // Polaris (RX 400/500 series)
+    {0x6600, 0x685F, AMD_ARCH_ARCTIC_ISLANDS, "Polaris", true, true, false, false, 2048, 24},
+    
+    // Volcanic Islands (R9 Fury)
+    {0x6900, 0x695F, AMD_ARCH_VOLCANIC_ISLANDS, "Volcanic Islands", true, false, false, false, 2048, 28},
+    
+    // Legacy GPUs
+    {0x1300, 0x65FF, AMD_ARCH_SOUTHERN_ISLANDS, "Southern Islands", false, false, false, false, 1024, 16},
+    {0x6000, 0x6899, AMD_ARCH_EVERGREEN, "Evergreen", false, false, false, false, 512, 12},
+};
+
+#define AMD_GPU_DB_SIZE (sizeof(amd_gpu_db) / sizeof(amd_gpu_db[0]))
+
+// AMD driver state
+static struct {
+    bool initialized;
+    graphics_device_t* device;
+    amd_arch_t detected_arch;
+    const amd_gpu_info_t* gpu_info;
+    
+    // Basic framebuffer info
+    void* framebuffer;
+    uintptr_t framebuffer_phys;
+    size_t framebuffer_size;
+    uint32_t current_width;
+    uint32_t current_height;
+    uint32_t current_bpp;
+    
+    // GPU features
+    bool vulkan_supported;
+    bool freesync_supported;
+    bool rdna_features;
+    bool hardware_rt_supported;
+    uint32_t vram_size_mb;
+    uint32_t compute_units;
+    
+    // MMIO regions
+    void* mmio_base;
+    size_t mmio_size;
+} amd_state = {
+    .initialized = false,
+    .device = NULL,
+    .detected_arch = AMD_ARCH_UNKNOWN,
+    .gpu_info = NULL,
+    .framebuffer = NULL,
+    .framebuffer_phys = 0,
+    .framebuffer_size = 0,
+    .current_width = 0,
+    .current_height = 0,
+    .current_bpp = 0,
+    .vulkan_supported = false,
+    .freesync_supported = false,
+    .rdna_features = false,
+    .hardware_rt_supported = false,
+    .vram_size_mb = 0,
+    .compute_units = 0,
+    .mmio_base = NULL,
+    .mmio_size = 0
+};
+
+// Common AMD/ATI display modes
+static const video_mode_t amd_ati_modes[] = {
+    {640, 480, 16, 640*2, PIXEL_FORMAT_RGB_565, 60, false, 0, NULL},
+    {640, 480, 24, 640*3, PIXEL_FORMAT_RGB_888, 60, false, 0, NULL},
+    {640, 480, 32, 640*4, PIXEL_FORMAT_RGBA_8888, 60, false, 0, NULL},
+    {800, 600, 16, 800*2, PIXEL_FORMAT_RGB_565, 60, false, 0, NULL},
+    {800, 600, 24, 800*3, PIXEL_FORMAT_RGB_888, 60, false, 0, NULL},
+    {800, 600, 32, 800*4, PIXEL_FORMAT_RGBA_8888, 60, false, 0, NULL},
+    {1024, 768, 16, 1024*2, PIXEL_FORMAT_RGB_565, 60, false, 0, NULL},
+    {1024, 768, 24, 1024*3, PIXEL_FORMAT_RGB_888, 60, false, 0, NULL},
+    {1024, 768, 32, 1024*4, PIXEL_FORMAT_RGBA_8888, 60, false, 0, NULL},
+    {1280, 1024, 16, 1280*2, PIXEL_FORMAT_RGB_565, 60, false, 0, NULL},
+    {1280, 1024, 24, 1280*3, PIXEL_FORMAT_RGB_888, 60, false, 0, NULL},
+    {1280, 1024, 32, 1280*4, PIXEL_FORMAT_RGBA_8888, 60, false, 0, NULL},
+    {1600, 1200, 24, 1600*3, PIXEL_FORMAT_RGB_888, 60, false, 0, NULL},
+    {1920, 1080, 24, 1920*3, PIXEL_FORMAT_RGB_888, 60, false, 0, NULL},
+};
+
+#define AMD_ATI_MODE_COUNT (sizeof(amd_ati_modes) / sizeof(amd_ati_modes[0]))
+
+// Driver operation implementations
+static graphics_result_t amd_ati_initialize(graphics_device_t* device);
+static graphics_result_t amd_ati_shutdown(graphics_device_t* device);
+static graphics_result_t amd_ati_reset(graphics_device_t* device);
+static graphics_result_t amd_ati_enumerate_modes(graphics_device_t* device, video_mode_t** modes, uint32_t* count);
+static graphics_result_t amd_ati_set_mode(graphics_device_t* device, const video_mode_t* mode);
+static graphics_result_t amd_ati_get_current_mode(graphics_device_t* device, video_mode_t* mode);
+static graphics_result_t amd_ati_map_framebuffer(graphics_device_t* device, framebuffer_t** fb);
+static graphics_result_t amd_ati_clear_screen(graphics_device_t* device, graphics_color_t color);
+static graphics_result_t amd_ati_hw_fill_rect(graphics_device_t* device, const graphics_rect_t* rect, graphics_color_t color);
+static graphics_result_t amd_ati_hw_copy_rect(graphics_device_t* device, const graphics_rect_t* src, int32_t dst_x, int32_t dst_y);
+static graphics_result_t amd_ati_wait_for_vsync(graphics_device_t* device);
+
+// Helper functions
+static graphics_result_t amd_ati_detect_family(graphics_device_t* device);
+static graphics_result_t amd_ati_setup_crtc(const video_mode_t* mode);
+static graphics_result_t amd_ati_init_2d_engine(void);
+static graphics_result_t amd_ati_wait_for_idle(void);
+static uint32_t amd_ati_read_reg(uint32_t offset);
+static void amd_ati_write_reg(uint32_t offset, uint32_t value);
+static uint32_t amd_ati_bpp_to_pixel_width(uint32_t bpp);
+
+// AMD/ATI driver operations structure
+static display_driver_ops_t amd_ati_ops = {
+    .name = "amd",
+    .version = 1,
+    .initialize = amd_ati_initialize,
+    .shutdown = amd_ati_shutdown,
+    .reset = amd_ati_reset,
+    .enumerate_modes = amd_ati_enumerate_modes,
+    .set_mode = amd_ati_set_mode,
+    .get_current_mode = amd_ati_get_current_mode,
+    .map_framebuffer = amd_ati_map_framebuffer,
+    .unmap_framebuffer = NULL,
+    .clear_screen = amd_ati_clear_screen,
+    .draw_pixel = NULL,  // Use software fallback
+    .draw_rect = NULL,   // Use software fallback
+    .blit_surface = NULL,
+    .set_cursor = NULL,
+    .move_cursor = NULL,
+    .show_cursor = NULL,
+    .write_char = NULL,
+    .write_string = NULL,
+    .scroll_screen = NULL,
+    .set_cursor_pos = NULL,
+    .set_power_state = NULL,
+    .hw_fill_rect = amd_ati_hw_fill_rect,
+    .hw_copy_rect = amd_ati_hw_copy_rect,
+    .hw_line = NULL,
+    .wait_for_vsync = amd_ati_wait_for_vsync,
+    .page_flip = NULL,
+    .read_edid = NULL,
+    .ioctl = NULL
+};
+
+// Driver structure
+DECLARE_DISPLAY_DRIVER(amd_ati, amd_ati_ops);
+
+static graphics_result_t amd_ati_initialize(graphics_device_t* device) {
+    if (!device) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    debuglog(DEBUG_INFO, "Initializing AMD/ATI Graphics driver for device %04x:%04x\n",
+            device->vendor_id, device->device_id);
+    
+    amd_state.device = device;
+    
+    // Detect GPU family
+    graphics_result_t result = amd_ati_detect_family(device);
+    if (result != GRAPHICS_SUCCESS) {
+        debuglog(DEBUG_WARN, "Could not detect AMD/ATI GPU family\n");
+    }
+    
+    // Map MMIO space
+    if (device->mmio_base && device->mmio_size) {
+        amd_state.mmio_base = (void*)device->mmio_base;
+        amd_state.mmio_size = device->mmio_size;
+        debuglog(DEBUG_INFO, "AMD/ATI MMIO mapped at 0x%08X (size: %u KB)\n",
+                (uint32_t)device->mmio_base, device->mmio_size / 1024);
+    } else {
+        debuglog(DEBUG_ERROR, "AMD/ATI Graphics: No MMIO region found\n");
+        return GRAPHICS_ERROR_HARDWARE_FAULT;
+    }
+    
+    // Map framebuffer
+    if (device->framebuffer_base && device->framebuffer_size) {
+        amd_state.framebuffer_base = (void*)device->framebuffer_base;
+        amd_state.vram_size = device->framebuffer_size;
+        debuglog(DEBUG_INFO, "AMD/ATI framebuffer at 0x%08X (size: %u MB)\n",
+                (uint32_t)device->framebuffer_base, device->framebuffer_size / (1024*1024));
+    } else {
+        debuglog(DEBUG_ERROR, "AMD/ATI Graphics: No framebuffer region found\n");
+        return GRAPHICS_ERROR_HARDWARE_FAULT;
+    }
+    
+    // Reset hardware
+    amd_ati_reset(device);
+    
+    // Initialize 2D acceleration engine if supported
+    if (amd_state.has_2d_accel) {
+        result = amd_ati_init_2d_engine();
+        if (result != GRAPHICS_SUCCESS) {
+            debuglog(DEBUG_WARN, "Failed to initialize 2D acceleration\n");
+            amd_state.has_2d_accel = false;
+        }
+    }
+    
+    // Set device capabilities
+    device->caps.supports_2d_accel = amd_state.has_2d_accel;
+    device->caps.supports_3d_accel = amd_state.has_3d_accel;
+    device->caps.supports_hw_cursor = true;
+    device->caps.supports_page_flipping = true;
+    device->caps.supports_vsync = true;
+    device->caps.supports_multiple_heads = amd_state.supports_dualhead;
+    device->caps.max_resolution_x = 1920;
+    device->caps.max_resolution_y = 1200;
+    device->caps.video_memory_size = amd_state.vram_size;
+    
+    amd_state.initialized = true;
+    debuglog(DEBUG_INFO, "AMD/ATI Graphics driver initialized successfully\n");
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_shutdown(graphics_device_t* device) {
+    debuglog(DEBUG_INFO, "Shutting down AMD/ATI Graphics driver\n");
+    
+    if (amd_state.initialized) {
+        // Disable CRTC
+        if (amd_state.crtc_enabled) {
+            uint32_t crtc_gen_cntl = amd_ati_read_reg(ATI_CRTC_GEN_CNTL);
+            crtc_gen_cntl &= ~ATI_CRTC_EN;
+            amd_ati_write_reg(ATI_CRTC_GEN_CNTL, crtc_gen_cntl);
+            amd_state.crtc_enabled = false;
+        }
+        
+        amd_state.initialized = false;
+        amd_state.device = NULL;
+    }
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_reset(graphics_device_t* device) {
+    if (!device || !amd_state.mmio_base) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    debuglog(DEBUG_INFO, "Resetting AMD/ATI Graphics hardware\n");
+    
+    // Disable CRTC
+    uint32_t crtc_gen_cntl = amd_ati_read_reg(ATI_CRTC_GEN_CNTL);
+    crtc_gen_cntl &= ~ATI_CRTC_EN;
+    amd_ati_write_reg(ATI_CRTC_GEN_CNTL, crtc_gen_cntl);
+    amd_state.crtc_enabled = false;
+    
+    // Reset display registers
+    amd_ati_write_reg(ATI_CRTC_OFFSET, 0);
+    amd_ati_write_reg(ATI_CRTC_PITCH, 0);
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_enumerate_modes(graphics_device_t* device, video_mode_t** modes, uint32_t* count) {
+    if (!device || !modes || !count) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    *count = AMD_ATI_MODE_COUNT;
+    *modes = kmalloc(sizeof(video_mode_t) * AMD_ATI_MODE_COUNT);
+    
+    if (!*modes) {
+        return GRAPHICS_ERROR_OUT_OF_MEMORY;
+    }
+    
+    // Copy supported modes
+    memcpy(*modes, amd_ati_modes, sizeof(video_mode_t) * AMD_ATI_MODE_COUNT);
+    
+    debuglog(DEBUG_INFO, "AMD/ATI Graphics enumerated %u display modes\n", *count);
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_set_mode(graphics_device_t* device, const video_mode_t* mode) {
+    if (!device || !mode || !amd_state.initialized) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    if (mode->is_text_mode) {
+        debuglog(DEBUG_WARN, "AMD/ATI Graphics doesn't support text modes\n");
+        return GRAPHICS_ERROR_INVALID_MODE;
+    }
+    
+    debuglog(DEBUG_INFO, "AMD/ATI Graphics setting mode: %ux%ux%u\n",
+            mode->width, mode->height, mode->bpp);
+    
+    // Validate mode
+    bool mode_supported = false;
+    for (uint32_t i = 0; i < AMD_ATI_MODE_COUNT; i++) {
+        if (amd_ati_modes[i].width == mode->width &&
+            amd_ati_modes[i].height == mode->height &&
+            amd_ati_modes[i].bpp == mode->bpp) {
+            mode_supported = true;
+            break;
+        }
+    }
+    
+    if (!mode_supported) {
+        debuglog(DEBUG_ERROR, "Unsupported mode: %ux%ux%u\n", mode->width, mode->height, mode->bpp);
+        return GRAPHICS_ERROR_INVALID_MODE;
+    }
+    
+    // Disable CRTC before mode change
+    uint32_t crtc_gen_cntl = amd_ati_read_reg(ATI_CRTC_GEN_CNTL);
+    crtc_gen_cntl &= ~ATI_CRTC_EN;
+    amd_ati_write_reg(ATI_CRTC_GEN_CNTL, crtc_gen_cntl);
+    amd_state.crtc_enabled = false;
+    
+    // Setup CRTC for new mode
+    graphics_result_t result = amd_ati_setup_crtc(mode);
+    if (result != GRAPHICS_SUCCESS) {
+        debuglog(DEBUG_ERROR, "Failed to setup AMD/ATI CRTC\n");
+        return result;
+    }
+    
+    // Update state
+    amd_state.display_width = mode->width;
+    amd_state.display_height = mode->height;
+    amd_state.display_bpp = mode->bpp;
+    amd_state.display_format = mode->format;
+    amd_state.display_pitch = mode->pitch;
+    
+    // Update device current mode
+    device->current_mode = *mode;
+    
+    // Enable CRTC
+    crtc_gen_cntl = amd_ati_read_reg(ATI_CRTC_GEN_CNTL);
+    crtc_gen_cntl |= ATI_CRTC_EN | ATI_CRTC_DISP_REQ_EN;
+    amd_ati_write_reg(ATI_CRTC_GEN_CNTL, crtc_gen_cntl);
+    amd_state.crtc_enabled = true;
+    
+    debuglog(DEBUG_INFO, "AMD/ATI Graphics mode set successfully\n");
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_get_current_mode(graphics_device_t* device, video_mode_t* mode) {
+    if (!device || !mode || !amd_state.initialized) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    mode->width = amd_state.display_width;
+    mode->height = amd_state.display_height;
+    mode->bpp = amd_state.display_bpp;
+    mode->format = amd_state.display_format;
+    mode->refresh_rate = 60;
+    mode->is_text_mode = false;
+    mode->pitch = amd_state.display_pitch;
+    mode->mode_number = 0;
+    mode->hw_data = NULL;
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_map_framebuffer(graphics_device_t* device, framebuffer_t** fb) {
+    if (!device || !fb || !amd_state.initialized) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    framebuffer_t* framebuffer = kmalloc(sizeof(framebuffer_t));
+    if (!framebuffer) {
+        return GRAPHICS_ERROR_OUT_OF_MEMORY;
+    }
+    
+    framebuffer->physical_addr = (uintptr_t)amd_state.framebuffer_base;
+    framebuffer->virtual_addr = amd_state.framebuffer_base;
+    framebuffer->size = amd_state.display_pitch * amd_state.display_height;
+    framebuffer->width = amd_state.display_width;
+    framebuffer->height = amd_state.display_height;
+    framebuffer->pitch = amd_state.display_pitch;
+    framebuffer->format = amd_state.display_format;
+    framebuffer->bpp = amd_state.display_bpp;
+    framebuffer->double_buffered = false;
+    framebuffer->back_buffer = NULL;
+    framebuffer->hw_cursor_available = true;
+    framebuffer->cursor_data = NULL;
+    
+    *fb = framebuffer;
+    
+    debuglog(DEBUG_INFO, "AMD/ATI framebuffer mapped at 0x%08X, size: %u bytes\n",
+            (uint32_t)framebuffer->physical_addr, framebuffer->size);
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_clear_screen(graphics_device_t* device, graphics_color_t color) {
+    if (!device || !amd_state.initialized) {
+        return GRAPHICS_ERROR_GENERIC;
+    }
+    
+    graphics_rect_t full_screen = {
+        0, 0, amd_state.display_width, amd_state.display_height
+    };
+    
+    return amd_ati_hw_fill_rect(device, &full_screen, color);
+}
+
+static graphics_result_t amd_ati_hw_fill_rect(graphics_device_t* device, const graphics_rect_t* rect, graphics_color_t color) {
+    if (!device || !rect || !amd_state.initialized) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    if (!amd_state.has_2d_accel) {
+        // Fall back to software implementation
+        return GRAPHICS_ERROR_NOT_SUPPORTED;
+    }
+    
+    // Wait for 2D engine to be idle
+    amd_ati_wait_for_idle();
+    
+    uint32_t pixel_value = graphics_color_to_pixel(color, amd_state.display_format);
+    
+    // Setup 2D engine for solid fill
+    amd_ati_write_reg(ATI_DP_FRGD_CLR, pixel_value);
+    amd_ati_write_reg(ATI_DP_MIX, 0x00070003); // SRCCOPY ROP
+    amd_ati_write_reg(ATI_DP_SRC, 0x00000100);  // Foreground color as source
+    
+    // Set destination coordinates and size
+    amd_ati_write_reg(ATI_DST_Y_X, (rect->y << 16) | rect->x);
+    amd_ati_write_reg(ATI_DST_HEIGHT_WIDTH, (rect->height << 16) | rect->width);
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_hw_copy_rect(graphics_device_t* device, const graphics_rect_t* src, int32_t dst_x, int32_t dst_y) {
+    if (!device || !src || !amd_state.initialized) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    if (!amd_state.has_2d_accel) {
+        return GRAPHICS_ERROR_NOT_SUPPORTED;
+    }
+    
+    // Wait for 2D engine to be idle
+    amd_ati_wait_for_idle();
+    
+    // Setup 2D engine for screen-to-screen blit
+    amd_ati_write_reg(ATI_DP_MIX, 0x00070003); // SRCCOPY ROP
+    amd_ati_write_reg(ATI_DP_SRC, 0x00000200);  // Video memory as source
+    
+    // Set source and destination coordinates
+    uint32_t src_y_x = (src->y << 16) | src->x;
+    uint32_t dst_y_x = (dst_y << 16) | dst_x;
+    
+    // Determine blit direction to handle overlapping regions
+    uint32_t direction = 0;
+    if (dst_y > src->y || (dst_y == src->y && dst_x > src->x)) {
+        direction = 0; // Left-to-right, top-to-bottom
+    } else {
+        direction = 1; // Right-to-left, bottom-to-top
+        src_y_x = ((src->y + src->height - 1) << 16) | (src->x + src->width - 1);
+        dst_y_x = ((dst_y + src->height - 1) << 16) | (dst_x + src->width - 1);
+    }
+    
+    amd_ati_write_reg(ATI_SRC_CNTL, direction);
+    amd_ati_write_reg(ATI_DST_Y_X, dst_y_x);
+    amd_ati_write_reg(ATI_DST_HEIGHT_WIDTH, (src->height << 16) | src->width);
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_wait_for_vsync(graphics_device_t* device) {
+    if (!device || !amd_state.initialized) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Simple vsync wait implementation
+    // In a real implementation, you'd wait for vsync interrupt
+    uint32_t timeout = 100000;
+    while (timeout-- > 0) {
+        // Simple delay
+        for (volatile int i = 0; i < 1000; i++);
+    }
+    
+    return GRAPHICS_SUCCESS;
+}
+
+// Helper function implementations
+static graphics_result_t amd_ati_detect_family(graphics_device_t* device) {
+    if (!device) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    uint16_t device_id = device->device_id;
+    
+    // Detect GPU family based on device ID ranges
+    if (device_id >= 0x4150 && device_id <= 0x4170) {
+        amd_state.family = ATI_FAMILY_R100;
+        amd_state.has_2d_accel = true;
+        amd_state.has_3d_accel = false;
+    } else if (device_id >= 0x4966 && device_id <= 0x4990) {
+        amd_state.family = ATI_FAMILY_R200;
+        amd_state.has_2d_accel = true;
+        amd_state.has_3d_accel = true;
+    } else if (device_id >= 0x4144 && device_id <= 0x4155) {
+        amd_state.family = ATI_FAMILY_R300;
+        amd_state.has_2d_accel = true;
+        amd_state.has_3d_accel = true;
+        amd_state.supports_dualhead = true;
+    } else if (device_id >= 0x5460 && device_id <= 0x5470) {
+        amd_state.family = ATI_FAMILY_R400;
+        amd_state.has_2d_accel = true;
+        amd_state.has_3d_accel = true;
+        amd_state.supports_dualhead = true;
+    } else if (device_id >= 0x7100 && device_id <= 0x7200) {
+        amd_state.family = ATI_FAMILY_R500;
+        amd_state.has_2d_accel = true;
+        amd_state.has_3d_accel = true;
+        amd_state.supports_dualhead = true;
+    } else {
+        amd_state.family = ATI_FAMILY_UNKNOWN;
+        amd_state.has_2d_accel = false;
+        amd_state.has_3d_accel = false;
+    }
+    
+    const char* family_names[] = {
+        "Unknown", "R100", "R200", "R300", "R400", "R500", 
+        "R600", "R700", "Evergreen", "Southern Islands"
+    };
+    
+    debuglog(DEBUG_INFO, "Detected AMD/ATI GPU family: %s (Device ID: 0x%04X)\n",
+            family_names[amd_state.family], device_id);
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_setup_crtc(const video_mode_t* mode) {
+    if (!mode || !amd_state.mmio_base) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Calculate timing values (simplified)
+    uint32_t h_total = mode->width + 160;  // Simplified horizontal total
+    uint32_t v_total = mode->height + 45;  // Simplified vertical total
+    
+    // Set horizontal timing
+    uint32_t h_total_disp = ((h_total - 1) << 16) | (mode->width - 1);
+    amd_ati_write_reg(ATI_CRTC_H_TOTAL_DISP, h_total_disp);
+    
+    // Set vertical timing
+    uint32_t v_total_disp = ((v_total - 1) << 16) | (mode->height - 1);
+    amd_ati_write_reg(ATI_CRTC_V_TOTAL_DISP, v_total_disp);
+    
+    // Set framebuffer offset and pitch
+    amd_ati_write_reg(ATI_CRTC_OFFSET, 0); // Start at beginning of framebuffer
+    amd_ati_write_reg(ATI_CRTC_PITCH, mode->pitch / 8); // Pitch in 8-byte units
+    
+    // Set pixel format
+    uint32_t crtc_gen_cntl = amd_ati_read_reg(ATI_CRTC_GEN_CNTL);
+    crtc_gen_cntl &= ~ATI_CRTC_PIX_WIDTH_MASK;
+    crtc_gen_cntl |= amd_ati_bpp_to_pixel_width(mode->bpp);
+    amd_ati_write_reg(ATI_CRTC_GEN_CNTL, crtc_gen_cntl);
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_init_2d_engine(void) {
+    if (!amd_state.mmio_base) {
+        return GRAPHICS_ERROR_GENERIC;
+    }
+    
+    // Initialize 2D acceleration engine
+    amd_ati_write_reg(ATI_DST_CNTL, 0x00000003); // Enable destination
+    amd_ati_write_reg(ATI_SRC_CNTL, 0x00000000); // Reset source control
+    amd_ati_write_reg(ATI_HOST_CNTL, 0x00000000); // Reset host control
+    
+    // Set default clipping to full screen
+    amd_ati_write_reg(ATI_SC_LEFT_RIGHT, (amd_state.display_width << 16) | 0);
+    amd_ati_write_reg(ATI_SC_TOP_BOTTOM, (amd_state.display_height << 16) | 0);
+    
+    debuglog(DEBUG_INFO, "AMD/ATI 2D acceleration engine initialized\n");
+    return GRAPHICS_SUCCESS;
+}
+
+static graphics_result_t amd_ati_wait_for_idle(void) {
+    if (!amd_state.mmio_base) {
+        return GRAPHICS_ERROR_GENERIC;
+    }
+    
+    // Wait for graphics engine to be idle
+    uint32_t timeout = 100000;
+    while (timeout-- > 0) {
+        // In a real implementation, you'd read a status register
+        // For now, just add a delay
+        for (volatile int i = 0; i < 100; i++);
+    }
+    
+    return GRAPHICS_SUCCESS;
+}
+
+static uint32_t amd_ati_read_reg(uint32_t offset) {
+    if (!amd_state.mmio_base) {
+        return 0;
+    }
+    
+    volatile uint32_t* reg = (volatile uint32_t*)((uint8_t*)amd_state.mmio_base + offset);
+    return *reg;
+}
+
+static void amd_ati_write_reg(uint32_t offset, uint32_t value) {
+    if (!amd_state.mmio_base) {
+        return;
+    }
+    
+    volatile uint32_t* reg = (volatile uint32_t*)((uint8_t*)amd_state.mmio_base + offset);
+    *reg = value;
+}
+
+static uint32_t amd_ati_bpp_to_pixel_width(uint32_t bpp) {
+    switch (bpp) {
+        case 4:  return ATI_CRTC_PIX_WIDTH_4BPP;
+        case 8:  return ATI_CRTC_PIX_WIDTH_8BPP;
+        case 15: return ATI_CRTC_PIX_WIDTH_15BPP;
+        case 16: return ATI_CRTC_PIX_WIDTH_16BPP;
+        case 24: return ATI_CRTC_PIX_WIDTH_24BPP;
+        case 32: return ATI_CRTC_PIX_WIDTH_32BPP;
+        default: return ATI_CRTC_PIX_WIDTH_8BPP;
+    }
+}
+
+// Driver initialization function
+DRIVER_INIT_FUNCTION(amd_ati) {
+    debuglog(DEBUG_INFO, "Registering AMD/ATI Graphics driver\n");
+    
+    // Set driver flags
+    amd_ati_driver.flags = DRIVER_FLAG_SUPPORTS_GRAPHICS_MODE | 
+                          DRIVER_FLAG_SUPPORTS_HW_CURSOR |
+                          DRIVER_FLAG_SUPPORTS_VSYNC;
+    
+    return register_display_driver(&amd_ati_driver);
+}

@@ -2,6 +2,7 @@
 #include "include/libc/string.h"
 #include "include/task.h"
 #include "include/interrupt.h"  // Use new safe interrupt functions
+#include "include/tty.h"
 
 static uint32 cursorX = 0, cursorY = 0;
 uint16 screen_width = 80, screen_height = 25;
@@ -375,6 +376,12 @@ void print(const char* message) {
 }
 
 void printch(char c) {
+    // If the framebuffer TTY is active and ready, delegate to it so output remains visible
+    if (tty_is_ready() && tty_uses_graphics_backend()) {
+        tty_putc(c);
+        return;
+    }
+
     console_lock_acquire();
     
     if (c == '\n') {

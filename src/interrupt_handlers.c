@@ -14,7 +14,7 @@ void interrupt_install_all_stubs(void) {
     for (uint16 vector = 0; vector < IDT_ENTRIES; ++vector) {
         verify_vector_present(vector);
         idt_set_gate(vector,
-                     (uint32)interrupt_stub_table[vector],
+                     (uintptr_t)interrupt_stub_table[vector],
                      IDT_GATE_INTERRUPT32);
     }
 }

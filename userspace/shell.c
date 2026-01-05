@@ -4,6 +4,7 @@
 #include "../src/include/libc/stdlib.h"
 #include "../src/include/libc/string.h"
 #include "../src/include/libc/unistd.h"
+#include "../src/include/libc/auth.h"
 
 #define MAX_INPUT 128
 
@@ -24,6 +25,11 @@ static void handle_help(void) {
     printf("  uname       - print kernel identity\n");
     printf("  time        - show fake system time\n");
     printf("  catreadme   - dump /README.txt\n");
+    printf("  whoami      - show active user\n");
+    printf("  login       - switch user\n");
+    printf("  signup      - create a new user (root only)\n");
+    printf("  passwd      - change your password\n");
+    printf("  logout      - exit back to login screen\n");
     printf("  echo <text> - display text\n");
     printf("  shutdown    - request ACPI poweroff\n");
     printf("  reboot      - request ACPI reboot\n");
@@ -81,14 +87,83 @@ static int read_line(char* buffer, size_t max_len) {
     return 1;
 }
 
+static void refresh_user(auth_user_info_t* info) {
+    if (userdb_current(info) != 0) {
+        memset(info, 0, sizeof(*info));
+        strcpy(info->name, "root");
+    }
+}
+
+static void handle_whoami(const auth_user_info_t* info) {
+    printf("%s (uid %u gid %u)\n",
+           info->name[0] ? info->name : "unknown",
+           info->uid,
+           info->gid);
+}
+
+static void handle_login_command(auth_user_info_t* current_user) {
+    char username[AUTH_NAME_LEN];
+    char password[64];
+    printf("login as: ");
+    if (!read_line(username, sizeof(username))) {
+        return;
+    }
+    printf("password: ");
+    if (!read_line(password, sizeof(password))) {
+        return;
+    }
+    if (userdb_login(username, password, current_user) == 0) {
+        printf("Logged in as %s\n", current_user->name);
+    } else {
+        printf("Login failed.\n");
+    }
+}
+
+static void handle_signup_command(void) {
+    char username[AUTH_NAME_LEN];
+    char password[64];
+    printf("new username: ");
+    if (!read_line(username, sizeof(username))) {
+        return;
+    }
+    printf("new password: ");
+    if (!read_line(password, sizeof(password))) {
+        return;
+    }
+    if (userdb_signup(username, password, "users") == 0) {
+        printf("User %s created.\n", username);
+    } else {
+        printf("Signup failed (root login may be required).\n");
+    }
+}
+
+static void handle_passwd_command(const auth_user_info_t* current_user) {
+    char password[64];
+    const char* target = current_user->name[0] ? current_user->name : "root";
+    printf("new password for %s: ", target);
+    if (!read_line(password, sizeof(password))) {
+        return;
+    }
+    if (userdb_change_password(target, password) == 0) {
+        printf("Password updated.\n");
+    } else {
+        printf("Password change failed.\n");
+    }
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    printf("Forest Shell (userspace)\nType 'help' for a list of commands.\n");
+    auth_user_info_t current_user;
+    refresh_user(&current_user);
+    printf("Forest Shell (userspace) - logged in as %s\n",
+           current_user.name[0] ? current_user.name : "root");
+    printf("Type 'help' for a list of commands.\n");
     char line[MAX_INPUT];
 
     while (1) {
-        printf("forest> ");
+        const char* prompt_user = current_user.name[0] ? current_user.name : "user";
+        printf("%s@forest> ", prompt_user);
         if (!read_line(line, sizeof(line))) {
             continue;
         }
@@ -101,6 +176,19 @@ int main(int argc, char **argv) {
             handle_time();
         } else if (strcmp(line, "catreadme") == 0) {
             handle_catreadme();
+        } else if (strcmp(line, "whoami") == 0) {
+            handle_whoami(&current_user);
+        } else if (strcmp(line, "login") == 0) {
+            handle_login_command(&current_user);
+        } else if (strcmp(line, "signup") == 0) {
+            handle_signup_command();
+            refresh_user(&current_user);
+        } else if (strcmp(line, "passwd") == 0) {
+            handle_passwd_command(&current_user);
+        } else if (strcmp(line, "logout") == 0) {
+            userdb_logout();
+            printf("logout\n");
+            return 0;
         } else if (strcmp(line, "shutdown") == 0) {
             printf("Requesting shutdown...\n");
             if (poweroff() != 0) {
@@ -112,6 +200,7 @@ int main(int argc, char **argv) {
                 printf("Reboot syscall failed.\n");
             }
         } else if (strcmp(line, "exit") == 0) {
+            userdb_logout();
             printf("logout\n");
             return 0;
         } else if (starts_with(line, "echo ")) {

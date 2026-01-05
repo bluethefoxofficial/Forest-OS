@@ -63,6 +63,15 @@ enter_usermode_asm:
 ; Assumes the stack is already set up with IRET frame followed by saved registers
 global task_start_usermode_asm
 task_start_usermode_asm:
+    ; Ensure user data segments are active before dropping to ring 3.
+    ; Leaving ring 0 data selectors loaded would trigger a #GP as soon as
+    ; user code touches memory because their DPL=0 while CPL becomes 3.
+    mov ax, 0x23                ; GDT_USER_DATA_SELECTOR (ring 3 data)
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     ; Pop general purpose registers (in reverse order of PUSHA)
     popa
     ; Pop flags

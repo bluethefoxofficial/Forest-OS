@@ -1,8 +1,10 @@
-#define TOOL_NAME "logout"
-#include "forest_toolbox.h"
+#include "../src/include/libc/stdio.h"
+#include "../src/include/libc/auth.h"
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    ftb_run_tool(TOOL_NAME);
+    userdb_logout();
+    printf("Session marked for logout. Close the shell to return to login screen.\n");
     return 0;
 }

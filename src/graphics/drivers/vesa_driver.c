@@ -4,6 +4,7 @@
 #include "../../include/memory.h"
 #include "../../include/string.h"
 #include "../../include/debuglog.h"
+#include "../../include/mm.h"
 
 // VESA BIOS Extension constants
 #define VESA_SIGNATURE          0x4F
@@ -174,7 +175,7 @@ static graphics_result_t vesa_enumerate_modes(graphics_device_t* device, video_m
     }
     
     *count = NUM_STANDARD_MODES;
-    *modes = kmalloc(sizeof(video_mode_t) * NUM_STANDARD_MODES);
+    *modes = kmalloc(sizeof(video_mode_t) * NUM_STANDARD_MODES, GFP_KERNEL);
     
     if (!*modes) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
@@ -268,7 +269,7 @@ static graphics_result_t vesa_map_framebuffer(graphics_device_t* device, framebu
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
     
-    framebuffer_t* framebuffer = kmalloc(sizeof(framebuffer_t));
+    framebuffer_t* framebuffer = kmalloc(sizeof(framebuffer_t), GFP_KERNEL);
     if (!framebuffer) {
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
     }

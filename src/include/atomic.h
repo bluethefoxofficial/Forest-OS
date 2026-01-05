@@ -11,6 +11,19 @@ typedef struct {
     volatile uint8 value;
 } atomic8_t;
 
+typedef struct {
+    volatile uint64 value;
+} atomic64_t;
+
+/* Common atomic type aliases */
+typedef atomic32_t atomic_t;  /* Default atomic type for compatibility */
+
+/* Atomic initialization macros */
+#define ATOMIC32_INIT(val) { .value = (val) }
+#define ATOMIC8_INIT(val) { .value = (val) }
+#define ATOMIC64_INIT(val) { .value = (val) }
+#define ATOMIC_INIT(val) ATOMIC32_INIT(val)
+
 static inline void memory_barrier(void) {
     __asm__ volatile ("" ::: "memory");
 }
@@ -127,5 +140,108 @@ static inline void atomic_store8(atomic8_t* ptr, uint8 value) {
 
 #define ATOMIC32_INIT(val) { .value = (val) }
 #define ATOMIC8_INIT(val) { .value = (val) }
+
+/* Compatibility functions for existing code */
+static inline void atomic_set(atomic_t *ptr, uint32 value) {
+    atomic_store32(ptr, value);
+}
+
+static inline uint32 atomic_read(const atomic_t *ptr) {
+    return atomic_load32(ptr);
+}
+
+static inline void atomic_inc(atomic_t *ptr) {
+    atomic_increment32(ptr);
+}
+
+static inline void atomic_dec(atomic_t *ptr) {
+    atomic_decrement32(ptr);
+}
+
+/* Additional atomic operations for Linux compatibility */
+static inline int atomic_dec_and_test(atomic_t *ptr) {
+    return atomic_decrement32(ptr) == 0;
+}
+
+static inline int atomic_inc_return(atomic_t *ptr) {
+    return atomic_fetch_add32(ptr, 1) + 1;
+}
+
+static inline int atomic_dec_return(atomic_t *ptr) {
+    return atomic_fetch_sub32(ptr, 1) - 1;
+}
+
+static inline int atomic_add_return(int i, atomic_t *ptr) {
+    return atomic_fetch_add32(ptr, i) + i;
+}
+
+static inline int atomic_sub_return(int i, atomic_t *ptr) {
+    return atomic_fetch_sub32(ptr, (uint32)i) - i;
+}
+
+static inline void atomic_add(int i, atomic_t *ptr) {
+    atomic_fetch_add32(ptr, i);
+}
+
+static inline void atomic_sub(int i, atomic_t *ptr) {
+    atomic_fetch_sub32(ptr, (uint32)i);
+}
+
+static inline int atomic_sub_and_test(int i, atomic_t *ptr) {
+    return atomic_sub_return(i, ptr) == 0;
+}
+
+static inline int atomic_inc_and_test(atomic_t *ptr) {
+    return atomic_inc_return(ptr) == 0;
+}
+
+static inline int atomic_add_negative(int i, atomic_t *ptr) {
+    return atomic_add_return(i, ptr) < 0;
+}
+
+static inline int atomic_cmpxchg(atomic_t *ptr, int old, int new) {
+    int ret = old;
+    atomic_compare_and_swap32(ptr, (uint32)old, (uint32)new);
+    return ret;
+}
+
+/* 64-bit atomic operations (simplified for 32-bit systems) */
+static inline void atomic64_set(atomic64_t *ptr, uint64 value) {
+    __asm__ volatile (
+        "movl %2, %0\n\t"
+        "movl %3, %1"
+        : "=m" (((volatile uint32*)ptr)[0]),
+          "=m" (((volatile uint32*)ptr)[1])
+        : "r" ((uint32)value),
+          "r" ((uint32)(value >> 32))
+        : "memory"
+    );
+}
+
+static inline uint64 atomic64_read(const atomic64_t *ptr) {
+    uint64 result;
+    __asm__ volatile (
+        "movl %1, %%eax\n\t"
+        "movl %2, %%edx"
+        : "=A" (result)
+        : "m" (((const volatile uint32*)ptr)[0]),
+          "m" (((const volatile uint32*)ptr)[1])
+        : "memory"
+    );
+    return result;
+}
+
+static inline void atomic64_inc(atomic64_t *ptr) {
+    __asm__ volatile (
+        "lock; incl %0\n\t"
+        "jnz 1f\n\t"
+        "lock; incl %1\n"
+        "1:"
+        : "+m" (((volatile uint32*)ptr)[0]),
+          "+m" (((volatile uint32*)ptr)[1])
+        : 
+        : "memory", "cc"
+    );
+}
 
 #endif // ATOMIC_H

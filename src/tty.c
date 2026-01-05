@@ -6,7 +6,7 @@
 #include "include/libc/stdio.h"
 #include "include/string.h"
 #include "include/memory.h"
-#include <string.h>
+#include "include/mm.h"
 
 typedef enum {
     TTY_BACKEND_FRAMEBUFFER = 0
@@ -115,6 +115,11 @@ static struct {
 // Extended 256-color palette
 static graphics_color_t tty_palette_256[256];
 static bool palette_initialized = false;
+
+// Software cursor tracking (for devices without hardware cursor support)
+static bool cursor_drawn = false;
+static uint16_t cursor_drawn_x = 0;
+static uint16_t cursor_drawn_y = 0;
 
 static void tty_init_256_palette(void) {
     if (palette_initialized) return;
@@ -258,12 +263,54 @@ static void tty_update_dimensions_from_graphics(void) {
     }
 }
 
+static void tty_render_cell(uint16_t x, uint16_t y, char ch, uint8_t attr);
+static void tty_update_cursor_visual(void);
+
 static void tty_apply_cursor(void) {
     graphics_set_cursor_pos(tty_state.cursor_x, tty_state.cursor_y);
+    tty_update_cursor_visual();
 }
 
 static inline size_t tty_cell_index(uint16_t x, uint16_t y) {
     return (size_t)y * (size_t)tty_state.cols + x;
+}
+
+static void tty_redraw_cell_at(uint16_t x, uint16_t y) {
+    if (!tty_state.cells || x >= tty_state.cols || y >= tty_state.rows) {
+        return;
+    }
+    size_t idx = tty_cell_index(x, y);
+    tty_cell_t cell = tty_state.cells[idx];
+    tty_render_cell(x, y, cell.ch, cell.attr);
+}
+
+static void tty_update_cursor_visual(void) {
+    if (!tty_state.initialized || !tty_state.cells) {
+        return;
+    }
+
+    // Restore previous cursor cell if needed
+    if (cursor_drawn) {
+        tty_redraw_cell_at(cursor_drawn_x, cursor_drawn_y);
+        cursor_drawn = false;
+    }
+
+    if (!tty_state.cursor_visible ||
+        tty_state.cursor_x >= tty_state.cols ||
+        tty_state.cursor_y >= tty_state.rows) {
+        return;
+    }
+
+    size_t idx = tty_cell_index(tty_state.cursor_x, tty_state.cursor_y);
+    tty_cell_t cell = tty_state.cells[idx];
+    uint8_t fg = cell.attr & 0x0F;
+    uint8_t bg = (cell.attr >> 4) & 0x0F;
+    uint8_t block_attr = (fg << 4) | bg; // swap fg/bg to show a solid block
+    tty_render_cell(tty_state.cursor_x, tty_state.cursor_y, cell.ch ? cell.ch : ' ', block_attr);
+
+    cursor_drawn_x = tty_state.cursor_x;
+    cursor_drawn_y = tty_state.cursor_y;
+    cursor_drawn = true;
 }
 
 static void tty_render_cell_framebuffer(uint16_t x, uint16_t y, char ch, uint8_t attr) {
@@ -413,7 +460,7 @@ static bool tty_set_dimensions(uint16_t cols, uint16_t rows) {
         return true;
     }
 
-    tty_cell_t* new_cells = (tty_cell_t*)kzalloc(new_count * sizeof(tty_cell_t));
+    tty_cell_t* new_cells = (tty_cell_t*)kzalloc(new_count * sizeof(tty_cell_t), GFP_KERNEL);
     if (!new_cells) {
         return false;
     }
@@ -1224,24 +1271,31 @@ bool tty_init(void) {
 }
 
 void tty_clear(void) {
+    // Always reset cursor position first
     tty_state.cursor_x = 0;
     tty_state.cursor_y = 0;
 
     uint8_t attr = tty_current_attr();
 
-    if (tty_state.cells || tty_set_dimensions(tty_state.cols, tty_state.rows)) {
+    // Ensure cell buffer exists
+    if (!tty_state.cells) {
+        tty_set_dimensions(tty_state.cols, tty_state.rows);
+    }
+
+    // Clear cell buffer if it exists
+    if (tty_state.cells) {
         for (size_t i = 0; i < tty_state.cell_count; i++) {
             tty_state.cells[i].ch = ' ';
             tty_state.cells[i].attr = attr;
         }
         tty_flush_screen();
-        return;
+    } else {
+        // Fallback: use graphics subsystem for clearing
+        graphics_color_t bg = tty_color_from_nibble((attr >> 4) & 0x0F);
+        graphics_clear_screen(bg);
     }
 
-    // Always use graphics subsystem for clearing
-    graphics_color_t bg = tty_color_from_nibble((attr >> 4) & 0x0F);
-    graphics_clear_screen(bg);
-
+    // Always apply cursor position after clearing
     tty_apply_cursor();
 }
 
@@ -1285,4 +1339,8 @@ bool tty_uses_graphics_backend(void) {
 bool tty_try_enable_graphics_backend(void) {
     // Graphics backend is always enabled in framebuffer-only TTY
     return graphics_is_initialized();
+}
+
+bool tty_is_ready(void) {
+    return tty_state.initialized && graphics_is_initialized();
 }

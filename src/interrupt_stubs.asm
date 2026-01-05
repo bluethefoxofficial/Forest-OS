@@ -4,6 +4,7 @@ section .text
 
 extern interrupt_common_handler
 extern g_kernel_data_selector
+extern isr128
 
 ; -----------------------------------------------------------------------------
 ; Common interrupt entry point. Expects stack layout:
@@ -72,7 +73,14 @@ isr_stub_%1:
 
 %assign vec 0
 %rep 256
-    DEFINE_ISR vec
+    %if vec = 128
+        ; Override syscall vector to use dedicated syscall stub so we keep registers
+        global isr_stub_128
+isr_stub_128:
+        jmp isr128
+    %else
+        DEFINE_ISR vec
+    %endif
 %assign vec vec+1
 %endrep
 
@@ -82,6 +90,10 @@ global interrupt_stub_table
 interrupt_stub_table:
 %assign vec 0
 %rep 256
-    dd isr_stub_%+vec
+    %if vec = 128
+        dd isr_stub_128
+    %else
+        dd isr_stub_%+vec
+    %endif
 %assign vec vec+1
 %endrep

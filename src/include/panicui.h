@@ -39,6 +39,7 @@
 #define PANICUI_COLOR_INFO          ((graphics_color_t){80,  160, 255, 255})  // Blue
 #define PANICUI_COLOR_HIGHLIGHT     ((graphics_color_t){100, 150, 255, 255})  // Light blue
 #define PANICUI_COLOR_SELECTION     ((graphics_color_t){60,  120, 200, 128})  // Semi-transparent blue
+#define COLOR_TRANSPARENT           ((graphics_color_t){0, 0, 0, 0})          // Transparent
 
 // Font settings
 #define PANICUI_FONT_SIZE_LARGE  16
@@ -55,6 +56,7 @@ typedef enum {
     PANICUI_PANEL_MEMORY,
     PANICUI_PANEL_STACK,
     PANICUI_PANEL_SYSTEM,
+    PANICUI_PANEL_COLORS,
     PANICUI_PANEL_RECOVERY,
     PANICUI_PANEL_COUNT
 } panicui_panel_type_t;
@@ -177,6 +179,17 @@ typedef struct {
             bool can_reboot;
             bool can_debug;
         } recovery;
+        
+        struct {
+            uint32_t hsv_square_size;
+            uint32_t selected_color;
+            float hue;
+            float saturation;
+            float value;
+            bool show_ansi_colors;
+            bool interactive_mode;
+            graphics_color_t color_palette[256];
+        } colors;
     } content;
 } panicui_panel_t;
 
@@ -312,7 +325,37 @@ void panicui_draw_registers_panel(void* content, graphics_rect_t area);
 void panicui_draw_memory_panel(void* content, graphics_rect_t area);
 void panicui_draw_stack_panel(void* content, graphics_rect_t area);
 void panicui_draw_system_panel(void* content, graphics_rect_t area);
+void panicui_draw_colors_panel(void* content, graphics_rect_t area);
 void panicui_draw_recovery_panel(void* content, graphics_rect_t area);
+
+// Color visualization functions
+void panicui_draw_hsv_square(graphics_rect_t bounds, float hue, float* selected_s, float* selected_v);
+void panicui_draw_hue_bar(graphics_rect_t bounds, float* selected_hue);
+void panicui_draw_ansi_color_grid(graphics_rect_t bounds);
+void panicui_draw_color_preview(graphics_rect_t bounds, graphics_color_t color);
+graphics_color_t panicui_hsv_to_rgb(float h, float s, float v);
+void panicui_rgb_to_hsv(graphics_color_t rgb, float* h, float* s, float* v);
+void panicui_generate_ansi_palette(graphics_color_t* palette);
+
+// Enhanced visual effects
+void panicui_draw_glow_effect(graphics_rect_t bounds, graphics_color_t color, uint32_t radius);
+void panicui_draw_gradient_rect(graphics_rect_t bounds, graphics_color_t start, graphics_color_t end, bool vertical);
+void panicui_draw_animated_background(void);
+void panicui_draw_particle_system(void);
+void panicui_init_effects(void);
+void panicui_add_sparkle_effect(int32_t x, int32_t y);
+void panicui_draw_sparkles(void);
+void panicui_draw_scanlines(void);
+void panicui_draw_vignette(void);
+void panicui_render_enhanced_frame(void);
+
+// Color panel interaction
+void panicui_handle_color_panel_click(int32_t x, int32_t y);
+void panicui_init_colors_panel(void);
+
+// Help overlay
+void panicui_show_help_overlay(void);
+void panicui_draw_help_overlay(void);
 
 // Global context access
 panicui_context_t* panicui_get_context(void);

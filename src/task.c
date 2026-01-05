@@ -9,6 +9,10 @@
 #include "include/spinlock.h"
 #include "include/string.h"
 #include "include/timer.h"
+#include "include/mm.h"
+#include "include/debuglog.h"
+#include "include/auth.h"
+#include <stddef.h>
 
 // Explicit forward declaration to help compiler resolve implicit declaration
 extern page_directory_t* vmm_get_current_page_directory(void);
@@ -45,45 +49,76 @@ static void idle_task_function(void) {
 extern void task_start_usermode_asm(void);
 
 static void setup_initial_cpu_state(task_t* task, uint32 entry_point, uint32 user_stack_top, uint32 kernel_stack_top) {
-    // The kernel stack for the new task will look like this (from high address to low):
-    // ...
-    // [iret frame] -- pushed by hardware if interrupt, or simulated here
-    // [general purpose registers] -- pushed by pusha, or simulated here
-    // The task->kernel_stack will point to the saved ESP of general purpose regs.
+    // The kernel stack for the new task must match what task_switch_asm expects.
+    //
+    // task_switch_asm does: popa, popf, pop ebp, ret
+    // Then task_start_usermode_asm does: popa, popf, iret
+    //
+    // Stack layout from HIGH to LOW address (stack grows down):
+    // [kernel_stack_top]
+    //   --- IRET frame (for task_start_usermode_asm's iret) ---
+    //   SS, ESP, EFLAGS, CS, EIP
+    //   EFLAGS (for task_start_usermode_asm's popf) <-- MUST be here, after IRET frame
+    //   --- POPA frame for task_start_usermode_asm ---
+    //   EAX, ECX, EDX, EBX, ESP(dummy), EBP, ESI, EDI
+    //   --- Frame for task_switch_asm ---
+    //   Return address (task_start_usermode_asm)
+    //   Saved EBP (for pop ebp)
+    //   EFLAGS (for popf)
+    //   EAX, ECX, EDX, EBX, ESP(dummy), EBP, ESI, EDI (for popa)
+    // [task->kernel_stack points here]
 
-    // Start with the highest address of the allocated kernel stack
     uint32* stack_ptr = (uint32*)kernel_stack_top;
 
-    // Simulate the IRET frame (pushed last, popped first by IRET)
+    // === IRET frame (for privilege level change to ring 3) ===
+    // IRET pops: EIP, CS, EFLAGS, then ESP, SS (when changing privilege)
     *(--stack_ptr) = GDT_USER_DATA_SELECTOR;  // SS (user data segment, ring 3)
     *(--stack_ptr) = user_stack_top;          // ESP (user stack pointer)
-    *(--stack_ptr) = 0x202;                   // EFLAGS (enable interrupts, bit 2 is always 1)
+    *(--stack_ptr) = 0x202;                   // EFLAGS (IF=1, reserved bit 1=1)
     *(--stack_ptr) = GDT_USER_CODE_SELECTOR;  // CS (user code segment, ring 3)
     *(--stack_ptr) = entry_point;             // EIP (entry point of the ELF)
 
-    // Simulate the PUSHA-saved general purpose registers
-    // (order: EDI, ESI, EBP, ESP (old), EBX, EDX, ECX, EAX)
-    // The ESP pushed by PUSHA is the stack pointer *before* PUSHA.
-    // We can put an arbitrary value here, it won't be used for iret.
-    // But it makes the stack frame consistent.
-    *(--stack_ptr) = 0; // EDI
-    *(--stack_ptr) = 0; // ESI
-    *(--stack_ptr) = 0; // EBP
-    *(--stack_ptr) = 0; // ESP (value before PUSHA; dummy value)
-    *(--stack_ptr) = 0; // EBX
-    *(--stack_ptr) = 0; // EDX
-    *(--stack_ptr) = 0; // ECX
-    *(--stack_ptr) = 0; // EAX
+    // EFLAGS for task_start_usermode_asm's popf
+    // IMPORTANT: This must come BEFORE the POPA frame because task_start_usermode_asm
+    // does popa THEN popf. Stack grows down, so popf needs the higher address.
+    *(--stack_ptr) = 0x202;
 
-    // Add a fake EFLAGS and return address for the context switch
-    // When task_switch_asm does popf, it will restore these flags
-    *(--stack_ptr) = 0x202; // EFLAGS (interrupts enabled)
-    
-    // This return address is where task_switch_asm will jump to after popa/popf/ret
+    // === POPA frame for task_start_usermode_asm ===
+    // POPA pops: EDI, ESI, EBP, (skip ESP), EBX, EDX, ECX, EAX
+    // Push in reverse order (EAX first, EDI last)
+    *(--stack_ptr) = 0; // EAX
+    *(--stack_ptr) = 0; // ECX
+    *(--stack_ptr) = 0; // EDX
+    *(--stack_ptr) = 0; // EBX
+    *(--stack_ptr) = 0; // ESP (dummy, skipped by POPA)
+    *(--stack_ptr) = 0; // EBP
+    *(--stack_ptr) = 0; // ESI
+    *(--stack_ptr) = 0; // EDI
+
+    // === Frame for task_switch_asm ===
+    // task_switch_asm does: popa, popf, pop ebp, ret
+
+    // Return address - where 'ret' will jump to
     *(--stack_ptr) = (uint32)task_start_usermode_asm;
 
-    // The task->kernel_stack should now point to this location
-    // which is the top of the simulated stack frame for context switching.
+    // Saved EBP for 'pop ebp'
+    *(--stack_ptr) = 0;
+
+    // EFLAGS for 'popf'
+    *(--stack_ptr) = 0x202;
+
+    // POPA frame for task_switch_asm
+    // Push in reverse order (EAX first, EDI last)
+    *(--stack_ptr) = 0; // EAX
+    *(--stack_ptr) = 0; // ECX
+    *(--stack_ptr) = 0; // EDX
+    *(--stack_ptr) = 0; // EBX
+    *(--stack_ptr) = 0; // ESP (dummy, skipped by POPA)
+    *(--stack_ptr) = 0; // EBP
+    *(--stack_ptr) = 0; // ESI
+    *(--stack_ptr) = 0; // EDI
+
+    // task->kernel_stack points to where task_switch_asm will load ESP
     task->kernel_stack = (uint32)stack_ptr;
 }
 
@@ -91,14 +126,25 @@ static uint32* prepare_kernel_task_stack(void (*entry_point)(void), uint32* stac
     if (!stack_top) {
         return NULL;
     }
-    
+
     uint32* sp = stack_top;
-    
+
+    // task_switch_asm does: popa, popf, pop ebp, ret
+    // Stack layout from HIGH to LOW:
+    //   Return address (entry_point)
+    //   Saved EBP (for pop ebp)
+    //   EFLAGS (for popf)
+    //   EAX, ECX, EDX, EBX, ESP(dummy), EBP, ESI, EDI (for popa)
+
     // Return address for the final RET in task_switch_asm
     *(--sp) = (uint32)entry_point;
+
+    // Saved EBP for 'pop ebp'
+    *(--sp) = 0;
+
     // EFLAGS to be restored by POPF (keep IF set)
     *(--sp) = 0x202;
-    
+
     // Values consumed by POPA (push in reverse order so that the first POPA writes EDI)
     *(--sp) = 0; // EAX
     *(--sp) = 0; // ECX
@@ -108,14 +154,14 @@ static uint32* prepare_kernel_task_stack(void (*entry_point)(void), uint32* stac
     *(--sp) = 0; // EBP
     *(--sp) = 0; // ESI
     *(--sp) = 0; // EDI
-    
+
     return sp;
 }
 
 
 // Helper function to create a kernel task with a function pointer
 static task_t* create_kernel_task(void (*entry_point)(void), const char* name) {
-    task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
+    task_t* new_task = (task_t*)kmalloc(sizeof(task_t), GFP_KERNEL);
     if (!new_task) {
         print_colored("[TASK] Failed to allocate memory for kernel task: ", 0x0C, 0x00);
         print(name);
@@ -123,13 +169,22 @@ static task_t* create_kernel_task(void (*entry_point)(void), const char* name) {
         return 0;
     }
 
+    strncpy(new_task->name, name, 31);
+    new_task->name[31] = '\0';
     new_task->id = next_task_id++;
     new_task->state = TASK_STATE_READY;
     new_task->page_directory = vmm_get_current_page_directory(); // Use current kernel PD
     new_task->priority = 1; // Default priority
     new_task->ticks_left = 0; // Will be set by scheduler
     new_task->pending_signals = 0;
+    new_task->last_active_tick = 0;
     new_task->next = 0;
+    new_task->exit_code = 0;
+    memory_set((uint8*)new_task->exit_reason, 0, sizeof(new_task->exit_reason));
+    new_task->exit_reason[0] = '\0';
+    new_task->uid = 0;
+    new_task->gid = 0;
+    new_task->groups_mask = 1; // root group bit
 
     // No ELF info for kernel tasks
     memory_set((uint8*)&new_task->elf_info, 0, sizeof(elf_load_info_t));
@@ -170,11 +225,13 @@ void tasks_init(void) {
 
     // Create the first task for the currently running kernel.
     // This task will be "current_task" from now on.
-    task_t* kernel_task = (task_t*)kmalloc(sizeof(task_t));
+    task_t* kernel_task = (task_t*)kmalloc(sizeof(task_t), GFP_KERNEL);
     if (!kernel_task) {
         kernel_panic("Failed to allocate memory for kernel task");
     }
 
+    strncpy(kernel_task->name, "kernel", 31);
+    kernel_task->name[31] = '\0';
     kernel_task->id = next_task_id++;
     kernel_task->state = TASK_STATE_RUNNING;
     kernel_task->page_directory = vmm_get_current_page_directory(); // Use current kernel PD
@@ -188,7 +245,13 @@ void tasks_init(void) {
     kernel_task->priority = 1;
     kernel_task->ticks_left = 0;
     kernel_task->pending_signals = 0;
+    kernel_task->last_active_tick = 0;
     kernel_task->next = 0;
+    kernel_task->exit_code = 0;
+    memory_set((uint8*)kernel_task->exit_reason, 0, sizeof(kernel_task->exit_reason));
+    kernel_task->uid = 0;
+    kernel_task->gid = 0;
+    kernel_task->groups_mask = 1;
     gdt_set_kernel_stack(kernel_task->kernel_stack);
 
     // No ELF info for the kernel task itself
@@ -202,6 +265,8 @@ void tasks_init(void) {
     if (!idle_task) {
         kernel_panic("Failed to create idle task");
     }
+    // Keep idle out of the runnable pool unless explicitly needed
+    idle_task->state = TASK_STATE_WAITING;
     
     // Add idle task to ready queue (circular list)
     kernel_task->next = idle_task;
@@ -221,8 +286,9 @@ void tasks_init(void) {
 task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name) {
     spinlock_acquire(&task_scheduler_lock);
     
-    task_t* new_task = (task_t*)kmalloc(sizeof(task_t));
+    task_t* new_task = (task_t*)kmalloc(sizeof(task_t), GFP_KERNEL);
     if (!new_task) {
+        debuglog(DEBUG_ERROR, "[TASK] kmalloc failed while creating task '%s'\n", name ? name : "(null)");
         print_colored("[TASK] Failed to allocate memory for new task: ", 0x0C, 0x00);
         print(name);
         print("\n");
@@ -230,16 +296,26 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
         return 0;
     }
 
+    strncpy(new_task->name, name, 31);
+    new_task->name[31] = '\0';
     new_task->id = next_task_id++;
     new_task->state = TASK_STATE_READY;
     new_task->priority = 1; // Default priority
     new_task->ticks_left = 0; // Will be set by scheduler
     new_task->next = 0; // Will be added to ready queue later
+    new_task->exit_code = 0;
+    memory_set((uint8*)new_task->exit_reason, 0, sizeof(new_task->exit_reason));
+    new_task->uid = auth_active_uid();
+    new_task->gid = auth_active_gid();
+    new_task->groups_mask = auth_active_groups_mask();
+    new_task->last_active_tick = 0;
 
     // 1. Load ELF into a new page directory
     elf_load_info_t elf_info;
     int status = elf_load_executable(elf_data, elf_size, &elf_info);
     if (status != 0 || !elf_info.valid || elf_info.entry_point == 0) {
+        debuglog(DEBUG_ERROR, "[TASK] elf_load_executable failed for '%s' (status=%d, valid=%u, entry=0x%x)\n",
+                 name ? name : "(null)", status, elf_info.valid, elf_info.entry_point);
         print_colored("[TASK] Failed to load ELF for task: ", 0x0C, 0x00);
         print(name);
         print(" (status: ");
@@ -259,23 +335,34 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
     // So, we just need to ensure the correct page directory is active.
     page_directory_t* current_pd_ptr = vmm_get_current_page_directory();
     vmm_switch_page_directory((page_directory_t*)elf_info.page_directory);
+    uint32 stack_frames[USER_STACK_SIZE];
+    int stack_pages_mapped = 0;
     for (int i = 0; i < USER_STACK_SIZE; i++) {
         uint32 p_addr = pmm_alloc_frame();
         if (!p_addr) {
+            debuglog(DEBUG_ERROR, "[TASK] User stack frame allocation failed for '%s' at page %d\n",
+                     name ? name : "(null)", i);
             print_colored("[TASK] Failed to allocate user stack frame for task: ", 0x0C, 0x00);
             print(name);
             print("\n");
-            // Need to clean up previously allocated frames and page directory
-            vmm_switch_page_directory(current_pd_ptr);
-            vmm_destroy_page_directory((page_directory_t*)elf_info.page_directory);
-            kfree(new_task);
-            spinlock_release(&task_scheduler_lock);
-            return 0;
+            goto stack_fail;
         }
-        vmm_map_page((page_directory_t*)elf_info.page_directory,
-                     USER_STACK_TOP - (i + 1) * MEMORY_PAGE_SIZE,
-                     p_addr,
-                     PAGE_USER | PAGE_WRITABLE);
+
+        memory_result_t map_res = vmm_map_page((page_directory_t*)elf_info.page_directory,
+                                               USER_STACK_TOP - (i + 1) * MEMORY_PAGE_SIZE,
+                                               p_addr,
+                                               PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE);
+        if (map_res != MEMORY_OK) {
+            debuglog(DEBUG_ERROR, "[TASK] Failed to map user stack page %d for '%s' (res=%d)\n",
+                     i, name ? name : "(null)", map_res);
+            print_colored("[TASK] Failed to map user stack page for task: ", 0x0C, 0x00);
+            print(name);
+            print("\n");
+            pmm_free_frame(p_addr);
+            goto stack_fail;
+        }
+
+        stack_frames[stack_pages_mapped++] = p_addr;
     }
     vmm_switch_page_directory(current_pd_ptr);
 
@@ -283,6 +370,7 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
     // We need 2 pages for the kernel stack (8KB)
     uint32 kernel_stack_vaddr = (uint32)kmalloc_aligned(KERNEL_STACK_SIZE, MEMORY_PAGE_SIZE); // Allocate 8KB aligned
     if (!kernel_stack_vaddr) {
+        debuglog(DEBUG_ERROR, "[TASK] Kernel stack allocation failed for '%s'\n", name ? name : "(null)");
         print_colored("[TASK] Failed to allocate kernel stack for task: ", 0x0C, 0x00);
         print(name);
         print("\n");
@@ -339,6 +427,16 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
 
     spinlock_release(&task_scheduler_lock);
     return new_task;
+
+stack_fail:
+    vmm_switch_page_directory(current_pd_ptr);
+    vmm_destroy_page_directory((page_directory_t*)elf_info.page_directory);
+    for (int j = 0; j < stack_pages_mapped; j++) {
+        pmm_free_frame(stack_frames[j]);
+    }
+    kfree(new_task);
+    spinlock_release(&task_scheduler_lock);
+    return 0;
 }
 
 // Defined in assembly (src/context_switch.asm)
@@ -368,13 +466,34 @@ void task_switch(task_t* next_task) {
     task_t* prev_task = current_task;
     current_task = next_task;
 
+    // Debug: log a few initial context switches to confirm user tasks run
+    static int switch_debug_budget = 8;
+    if (switch_debug_budget > 0) {
+        print("[TASK] Switch: ");
+        print(int_to_string(prev_task ? prev_task->id : 0));
+        print(" -> ");
+        print(int_to_string(next_task->id));
+        print(" (state=");
+        switch (next_task->state) {
+            case TASK_STATE_RUNNING: print("RUNNING"); break;
+            case TASK_STATE_READY: print("READY"); break;
+            case TASK_STATE_WAITING: print("WAITING"); break;
+            case TASK_STATE_TERMINATED: print("TERMINATED"); break;
+            default: print("UNKNOWN"); break;
+        }
+        print(")\n");
+        switch_debug_budget--;
+    }
+
     gdt_set_kernel_stack(next_task->kernel_stack_base + KERNEL_STACK_SIZE);
 
     // Call assembly to perform context switch
     // - Save prev_task's kernel ESP into &prev_task->kernel_stack
     // - Load current_task's kernel ESP from current_task->kernel_stack
     // - Load current_task's page directory (already physical address from vmm_create_page_directory)
-    task_switch_asm(&prev_task->kernel_stack, current_task->kernel_stack, (uint32)current_task->page_directory);
+    task_switch_asm(&prev_task->kernel_stack,
+                    current_task->kernel_stack,
+                    vmm_pdir_phys(current_task->page_directory));
 }
 
 // Helper function to validate the ready queue integrity
@@ -415,6 +534,46 @@ static int count_runnable_tasks(void) {
     } while (current && current != ready_queue_head);
     
     return count;
+}
+
+bool task_exists(uint32 pid) {
+    if (!ready_queue_head) {
+        return false;
+    }
+    task_t* current = ready_queue_head;
+    do {
+        if (current && current->id == pid) {
+            return true;
+        }
+        current = current->next;
+    } while (current && current != ready_queue_head);
+    return false;
+}
+
+uint32 task_get_last_active_tick(uint32 pid) {
+    uint32 tick = 0;
+    spinlock_acquire(&task_scheduler_lock);
+
+    if (ready_queue_head) {
+        task_t* current = ready_queue_head;
+        do {
+            if (current && current->id == pid) {
+                tick = current->last_active_tick;
+                break;
+            }
+            current = current->next;
+        } while (current && current != ready_queue_head);
+    }
+
+    spinlock_release(&task_scheduler_lock);
+    return tick;
+}
+
+void task_mark_active(void) {
+    if (!current_task) {
+        return;
+    }
+    current_task->last_active_tick = timer_get_ticks();
 }
 
 // Debug function to print the current state of the ready queue
@@ -602,6 +761,19 @@ void task_destroy(task_t* task) {
         return;
     }
 
+    // Emit a final notice about the task's termination context.
+    print("[TASK] PID ");
+    print(int_to_string(task->id));
+    print(" terminated");
+    if (task->exit_reason[0]) {
+        print(" (");
+        print(task->exit_reason);
+        print(")");
+    }
+    print(" with code ");
+    print(int_to_string(task->exit_code));
+    print("\n");
+
     print("[TASK] Destroying task ID: ");
     print(int_to_string(task->id));
     print("\n");
@@ -748,5 +920,73 @@ void task_shutdown_all(void) {
         if (!ready_queue_head) {
             break;
         }
+    }
+}
+
+void task_terminate_current(int signal) {
+    (void)signal;  /* Signal type for future use */
+
+    if (!current_task) {
+        print("[TASK] Cannot terminate - no current task\n");
+        return;
+    }
+
+    print("[TASK] Terminating current task (ID: ");
+    print(int_to_string(current_task->id));
+    print(") with signal ");
+    print(int_to_string(signal));
+    print("\n");
+
+    /* Mark the task for termination */
+    current_task->state = TASK_STATE_TERMINATED;
+    current_task->pending_signals |= SIGKILL;
+
+    /* Reschedule to allow another task to run */
+    task_schedule();
+
+    /* If we return here, halt (shouldn't happen) */
+    while (1) {
+        __asm__ volatile("hlt");
+    }
+}
+
+// Graceful task exit with a reason and code. This is intended to be called
+// from sys_exit or any fatal user-mode path to surface the failure on the
+// TTY instead of silently halting.
+void task_exit(int code, const char* reason) {
+    if (!current_task) {
+        print("[TASK] task_exit called with no current task\n");
+        return;
+    }
+
+    // Record exit details
+    current_task->exit_code = code;
+    memory_set((uint8*)current_task->exit_reason, 0, sizeof(current_task->exit_reason));
+    if (reason) {
+        // Truncate to fit
+        for (size_t i = 0; i + 1 < sizeof(current_task->exit_reason) && reason[i]; i++) {
+            current_task->exit_reason[i] = reason[i];
+        }
+    }
+
+    print("[TASK] PID ");
+    print(int_to_string(current_task->id));
+    print(" exiting with code ");
+    print(int_to_string(code));
+    if (current_task->exit_reason[0]) {
+        print(" (");
+        print(current_task->exit_reason);
+        print(")");
+    }
+    print("\n");
+
+    // Mark and reschedule; scheduler will reclaim resources
+    current_task->state = TASK_STATE_TERMINATED;
+    current_task->pending_signals |= SIGKILL;
+    task_schedule();
+
+    // Should not return; if it does, halt to avoid running a dead task.
+    while (1) {
+        __asm__ __volatile__("hlt");
     }
 }

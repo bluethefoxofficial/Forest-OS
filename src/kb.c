@@ -1,6 +1,11 @@
 #include "include/kb.h"
 #include "include/ps2_keyboard.h"
 #include "include/keyboard_layout.h"
+#include "include/debuglog.h"
+#include "include/interrupt.h"
+#include "include/cpu_ops.h"
+#include "include/task.h"
+#include "include/signal.h"
 
 #ifndef USERSPACE_BUILD
 #include "include/panic.h"
@@ -56,6 +61,7 @@ static bool legacy_dequeue_char(char* out_char) {
     }
     *out_char = legacy_ascii_buffer[legacy_ascii_tail];
     legacy_ascii_tail = (legacy_ascii_tail + 1) % LEGACY_ASCII_BUFFER_SIZE;
+    debuglog(DEBUG_INFO, "[KB] legacy char '%c' (0x%02x)\n", *out_char, (uint8)*out_char);
     return true;
 }
 
@@ -116,6 +122,7 @@ static bool legacy_read_char(char* out_char) {
 
     bool release = (scancode & 0x80U) != 0;
     scancode &= 0x7F;
+    debuglog(DEBUG_INFO, "[KB] legacy scancode 0x%02x (%s)\n", scancode, release ? "release" : "press");
 
     key_code_t key_code = keyboard_scancode_set1_lookup(scancode, legacy_extended_scancode);
     legacy_extended_scancode = false;
@@ -147,6 +154,7 @@ static bool legacy_read_char(char* out_char) {
 
     for (uint8 i = 0; i < emitted; ++i) {
         legacy_enqueue_char(seq[i]);
+        debuglog(DEBUG_INFO, "[KB] legacy emit '%c' (scancode=0x%02x)\n", seq[i], scancode);
     }
 
     return legacy_dequeue_char(out_char);
@@ -162,7 +170,20 @@ bool keyboard_poll_char(char* out_char) {
     }
 
     if (current_driver_mode == KEYBOARD_DRIVER_PS2) {
-        return ps2_read_char(out_char);
+        if (ps2_read_char(out_char)) {
+            return true;
+        }
+        // Fallback to legacy polling if PS/2 path didn't deliver a character.
+        // This mirrors the old direct-port reader the user reported working.
+        static bool warned = false;
+        if (legacy_read_char(out_char)) {
+            if (!warned) {
+                debuglog(DEBUG_WARN, "[KB] PS/2 read empty; falling back to legacy scancode polling\n");
+                warned = true;
+            }
+            return true;
+        }
+        return false;
     }
 
     return legacy_read_char(out_char);
@@ -182,6 +203,13 @@ string readStr() {
     uint8 i = 0;
     buffstr[0] = '\0';
 
+    // Allow keyboard IRQs to fire while we wait for user input so the TTY
+    // actually receives characters when running inside a syscall.
+    bool interrupts_were_enabled = irq_are_enabled();
+    if (!interrupts_were_enabled) {
+        irq_enable_safe();
+    }
+
     while (1) {
         char ch = 0;
         bool have_char = false;
@@ -193,7 +221,13 @@ string readStr() {
         }
 
         if (!have_char) {
+            // Let CPU sleep until the next interrupt to keep input responsive.
+            __asm__ __volatile__("hlt");
             continue;
+        }
+
+        if (ch == '\r') {
+            ch = '\n';
         }
 
         if (ch == '\b') {
@@ -205,10 +239,20 @@ string readStr() {
             continue;
         }
 
+        // Ctrl+C (ASCII ETX) - terminate current task with SIGINT to mimic shell interrupt.
+        if ((uint8)ch == 0x03) {
+            print("\n^C\n");
+            if (current_task) {
+                task_exit(SIGINT, "SIGINT");
+            }
+            buffstr[0] = '\0';
+            break;
+        }
+
         if (ch == '\n') {
             printch('\n');
             buffstr[i] = '\0';
-            return buffstr;
+            break;
         }
 
         if (i < KB_BUFFER_MAX - 1) {
@@ -217,7 +261,13 @@ string readStr() {
             buffstr[i] = '\0';
         } else {
             buffstr[KB_BUFFER_MAX - 1] = '\0';
-            return buffstr;
+            break;
         }
     }
+
+    if (!interrupts_were_enabled) {
+        irq_disable_safe();
+    }
+
+    return buffstr;
 }

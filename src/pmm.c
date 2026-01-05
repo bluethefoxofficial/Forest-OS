@@ -182,7 +182,7 @@ memory_result_t pmm_init(memory_region_t* regions, uint32 region_count) {
     }
     
     // Place bitmap in its dedicated memory region
-    uint32 bitmap_addr = memory_align_up(MEMORY_PMM_START, MEMORY_PAGE_SIZE);
+    uint32 bitmap_addr = memory_align_up(memory_get_pmm_start(), MEMORY_PAGE_SIZE);
     pmm_state.bitmap = (uint32*)bitmap_addr;
     
     print("[PMM] Bitmap at 0x");
@@ -464,4 +464,20 @@ uint32 pmm_get_total_frames(void) {
 
 uint32 pmm_get_free_frames(void) {
     return pmm_state.free_frames;
+}
+
+// Reserve a range of physical memory (mark as used)
+// Used to protect regions like initrd from being allocated
+void pmm_reserve_range(uint32 start_addr, uint32 end_addr) {
+    if (!pmm_state.initialized) {
+        return;
+    }
+
+    // Align to page boundaries
+    uint32 start_frame = addr_to_frame(start_addr & ~(MEMORY_PAGE_SIZE - 1));
+    uint32 end_frame = addr_to_frame((end_addr + MEMORY_PAGE_SIZE - 1) & ~(MEMORY_PAGE_SIZE - 1));
+
+    for (uint32 frame = start_frame; frame < end_frame && frame < pmm_state.total_frames; frame++) {
+        mark_frame_used(frame);
+    }
 }

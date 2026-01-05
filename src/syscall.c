@@ -9,8 +9,15 @@
 #include "include/task.h"
 #include "include/net.h"
 #include "include/power.h"
+#include "include/auth.h"
 
+#if ARCH_64BIT
+extern void syscall_handler(void);  // From interrupt_stubs.s
+typedef uint64 sys_arg_t;
+#else
 extern void isr128(void);  // Assembly stub in syscall_stubs.asm
+typedef uint32 sys_arg_t;
+#endif
 
 #define MAX_VFS_HANDLES 16
 #define USER_HEAP_BASE  0x01800000
@@ -39,7 +46,8 @@ static uint32 fake_unix_epoch = 1730000000; // Fake epoch for time()
 #define SYSCALL_EMFILE  (-24)
 
 // System call function pointer type
-typedef int32 (*syscall_func_t)(uint32 arg1, uint32 arg2, uint32 arg3, uint32 arg4, uint32 arg5, uint32 arg6);
+typedef int32 (*syscall_func_t)(sys_arg_t arg1, sys_arg_t arg2, sys_arg_t arg3,
+                                sys_arg_t arg4, sys_arg_t arg5, sys_arg_t arg6);
 
 typedef struct {
     syscall_func_t func;
@@ -50,10 +58,11 @@ static syscall_entry_t syscall_table[SYS_MAX];
 static bool syscall_warned[SYS_MAX];
 
 // Forward declarations
-static int32 sys_dup(uint32 fd);
-static int32 sys_dup2(uint32 oldfd, uint32 newfd);
+static int32 sys_dup(sys_arg_t fd);
+static int32 sys_dup2(sys_arg_t oldfd, sys_arg_t newfd);
 
-static int32 sys_unimplemented(uint32 arg1, uint32 arg2, uint32 arg3, uint32 arg4, uint32 arg5, uint32 arg6) {
+static int32 sys_unimplemented(sys_arg_t arg1, sys_arg_t arg2, sys_arg_t arg3,
+                               sys_arg_t arg4, sys_arg_t arg5, sys_arg_t arg6) {
     (void)arg1;
     (void)arg2;
     (void)arg3;
@@ -71,7 +80,7 @@ static void syscall_register(uint32 num, syscall_func_t func) {
     syscall_table[num].implemented = (func != 0 && func != sys_unimplemented);
 }
 
-static int32 sys_write(uint32 fd, uint32 buf_ptr, uint32 len) {
+static int32 sys_write(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len) {
     if (!buf_ptr || len == 0) {
         return 0;
     }
@@ -89,7 +98,7 @@ static int32 sys_write(uint32 fd, uint32 buf_ptr, uint32 len) {
     return SYSCALL_EBADF;
 }
 
-static int32 sys_read(uint32 fd, uint32 buf_ptr, uint32 len) {
+static int32 sys_read(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len) {
     if (!buf_ptr || len == 0) {
         return 0;
     }
@@ -137,7 +146,7 @@ static int32 sys_read(uint32 fd, uint32 buf_ptr, uint32 len) {
     return (int32)to_copy;
 }
 
-static int32 sys_open(uint32 path_ptr, uint32 flags, uint32 mode) {
+static int32 sys_open(sys_arg_t path_ptr, sys_arg_t flags, sys_arg_t mode) {
     (void)flags;
     (void)mode;
 
@@ -173,7 +182,7 @@ static int32 sys_open(uint32 path_ptr, uint32 flags, uint32 mode) {
     return SYSCALL_EBADF;
 }
 
-static int32 sys_close(uint32 fd) {
+static int32 sys_close(sys_arg_t fd) {
     if (fd < 3) {
         return 0;
     }
@@ -192,7 +201,7 @@ static int32 sys_close(uint32 fd) {
     return 0;
 }
 
-static int32 sys_lseek(uint32 fd, uint32 offset, uint32 whence) {
+static int32 sys_lseek(sys_arg_t fd, sys_arg_t offset, sys_arg_t whence) {
     if (fd < 3) {
         return SYSCALL_EBADF;
     }
@@ -227,13 +236,16 @@ static int32 sys_getpid(void) {
     return 0;
 }
 
-static int32 sys_time(uint32 user_ptr) {
-    (void)user_ptr;
+static int32 sys_time(sys_arg_t user_ptr) {
     fake_unix_epoch++;
+    if (user_ptr) {
+        uint32* t = (uint32*)user_ptr;
+        *t = fake_unix_epoch;
+    }
     return (int32)fake_unix_epoch;
 }
 
-static int32 sys_brk(uint32 new_break) {
+static int32 sys_brk(sys_arg_t new_break) {
     if (new_break == 0) {
         return (int32)program_break;
     }
@@ -258,7 +270,7 @@ static void busy_wait(uint32 iterations) {
     }
 }
 
-static int32 sys_nanosleep(uint32 req_ptr, uint32 rem_ptr) {
+static int32 sys_nanosleep(sys_arg_t req_ptr, sys_arg_t rem_ptr) {
     (void)rem_ptr;
 
     if (!req_ptr) {
@@ -279,7 +291,7 @@ typedef struct {
     char machine[32];
 } utsname_t;
 
-static int32 sys_uname(uint32 user_ptr) {
+static int32 sys_uname(sys_arg_t user_ptr) {
     if (!user_ptr) {
         return SYSCALL_EINVAL;
     }
@@ -303,21 +315,17 @@ static int32 sys_uname(uint32 user_ptr) {
     return 0;
 }
 
-static int32 sys_exit(uint32 code) {
-    print("[SYSCALL] exit(");
-    print_dec(code);
-    print(") - halting task\n");
-    while (1) {
-        __asm__ __volatile__("hlt");
-    }
-    return 0;
+static int32 sys_exit(sys_arg_t code) {
+    // Gracefully terminate the current task and switch away.
+    task_exit((int)code, "exit()");
+    return 0; // Not reached
 }
 
-static int32 sys_socket(uint32 domain, uint32 type, uint32 protocol) {
+static int32 sys_socket(sys_arg_t domain, sys_arg_t type, sys_arg_t protocol) {
     return net_socket_create(domain, type, protocol);
 }
 
-static int32 sys_bind(uint32 fd, uint32 addr_ptr, uint32 addr_len) {
+static int32 sys_bind(sys_arg_t fd, sys_arg_t addr_ptr, sys_arg_t addr_len) {
     if (!addr_ptr || addr_len < sizeof(sockaddr_in_t)) {
         return SYSCALL_EINVAL;
     }
@@ -333,8 +341,8 @@ static int32 sys_bind(uint32 fd, uint32 addr_ptr, uint32 addr_len) {
     return net_bind(fd, port);
 }
 
-static int32 sys_sendto(uint32 fd, uint32 buf_ptr, uint32 len, uint32 flags,
-                        uint32 addr_ptr, uint32 addr_len) {
+static int32 sys_sendto(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len, sys_arg_t flags,
+                        sys_arg_t addr_ptr, sys_arg_t addr_len) {
     (void)flags;
 
     if (!buf_ptr || len == 0) {
@@ -360,8 +368,8 @@ static int32 sys_sendto(uint32 fd, uint32 buf_ptr, uint32 len, uint32 flags,
     return net_send_datagram(fd, (const uint8*)buf_ptr, len, dest_addr, dest_port);
 }
 
-static int32 sys_recvfrom(uint32 fd, uint32 buf_ptr, uint32 len, uint32 flags,
-                          uint32 addr_ptr, uint32 addr_len_ptr) {
+static int32 sys_recvfrom(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len, sys_arg_t flags,
+                          sys_arg_t addr_ptr, sys_arg_t addr_len_ptr) {
     (void)flags;
 
     if (!buf_ptr || len == 0) {
@@ -392,7 +400,7 @@ static int32 sys_recvfrom(uint32 fd, uint32 buf_ptr, uint32 len, uint32 flags,
     return received;
 }
 
-static int32 sys_netinfo(uint32 buffer_ptr, uint32 max_entries) {
+static int32 sys_netinfo(sys_arg_t buffer_ptr, sys_arg_t max_entries) {
     if (!buffer_ptr || max_entries == 0) {
         return SYSCALL_EINVAL;
     }
@@ -400,14 +408,19 @@ static int32 sys_netinfo(uint32 buffer_ptr, uint32 max_entries) {
 }
 
 // File system operations
-static int32 sys_stat(uint32 path_ptr, uint32 stat_ptr) {
+static int32 sys_stat(sys_arg_t path_ptr, sys_arg_t stat_ptr) {
     // Basic stat implementation - all files report as regular files
     if (!path_ptr || !stat_ptr) {
         return SYSCALL_EFAULT;
     }
     
     const char* path = (const char*)path_ptr;
-    (void)path; // Use path for file lookup if VFS supports it
+    const uint8* fdata = 0;
+    uint32 fsize = 0;
+    if (!vfs_read_file(path, &fdata, &fsize)) {
+        return SYSCALL_ENOENT;
+    }
+    (void)fdata; // Data not needed beyond existence/size
     
     // Simple stat structure (compatible with POSIX)
     struct {
@@ -434,9 +447,9 @@ static int32 sys_stat(uint32 path_ptr, uint32 stat_ptr) {
     stat_buf->st_uid = 0;
     stat_buf->st_gid = 0;
     stat_buf->st_rdev = 0;
-    stat_buf->st_size = 1024;
+    stat_buf->st_size = fsize;
     stat_buf->st_blksize = 4096;
-    stat_buf->st_blocks = 1;
+    stat_buf->st_blocks = (fsize + stat_buf->st_blksize - 1) / stat_buf->st_blksize;
     stat_buf->st_atime = fake_unix_epoch;
     stat_buf->st_mtime = fake_unix_epoch;
     stat_buf->st_ctime = fake_unix_epoch;
@@ -444,11 +457,11 @@ static int32 sys_stat(uint32 path_ptr, uint32 stat_ptr) {
     return 0;
 }
 
-static int32 sys_fstat(uint32 fd, uint32 stat_ptr) {
-    if (fd > 2 || !stat_ptr) { // Only stdin, stdout, stderr
-        return SYSCALL_EBADF;
+static int32 sys_fstat(sys_arg_t fd, sys_arg_t stat_ptr) {
+    if (!stat_ptr) {
+        return SYSCALL_EFAULT;
     }
-    
+
     // Same structure as sys_stat
     struct {
         uint32 st_dev, st_ino, st_mode, st_nlink;
@@ -456,50 +469,87 @@ static int32 sys_fstat(uint32 fd, uint32 stat_ptr) {
         uint32 st_blksize, st_blocks;
         uint32 st_atime, st_mtime, st_ctime;
     }* stat_buf = (void*)stat_ptr;
-    
-    // TTY device for standard streams
+
+    if (fd < 3 || net_is_fd(fd)) {
+        // Treat stdio and sockets as character devices
+        stat_buf->st_dev = 1;
+        stat_buf->st_ino = (uint32)(fd + 1);
+        stat_buf->st_mode = 0020666; // Character device, rw-rw-rw-
+        stat_buf->st_nlink = 1;
+        stat_buf->st_uid = 0;
+        stat_buf->st_gid = 0;
+        stat_buf->st_rdev = 1;
+        stat_buf->st_size = 0;
+        stat_buf->st_blksize = 1;
+        stat_buf->st_blocks = 0;
+        stat_buf->st_atime = fake_unix_epoch;
+        stat_buf->st_mtime = fake_unix_epoch;
+        stat_buf->st_ctime = fake_unix_epoch;
+        return 0;
+    }
+
+    uint32 slot = fd - 3;
+    if (slot >= MAX_VFS_HANDLES || !vfs_handles[slot].used) {
+        return SYSCALL_EBADF;
+    }
+
+    const vfs_handle_t* handle = &vfs_handles[slot];
     stat_buf->st_dev = 1;
-    stat_buf->st_ino = fd + 1;
-    stat_buf->st_mode = 0020666; // Character device, rw-rw-rw-
+    stat_buf->st_ino = (uint32)(fd + 1);
+    stat_buf->st_mode = 0100644; // Regular file, rw-r--r--
     stat_buf->st_nlink = 1;
     stat_buf->st_uid = 0;
     stat_buf->st_gid = 0;
-    stat_buf->st_rdev = 1;
-    stat_buf->st_size = 0;
-    stat_buf->st_blksize = 1;
-    stat_buf->st_blocks = 0;
+    stat_buf->st_rdev = 0;
+    stat_buf->st_size = handle->size;
+    stat_buf->st_blksize = 4096;
+    stat_buf->st_blocks = (handle->size + stat_buf->st_blksize - 1) / stat_buf->st_blksize;
     stat_buf->st_atime = fake_unix_epoch;
     stat_buf->st_mtime = fake_unix_epoch;
     stat_buf->st_ctime = fake_unix_epoch;
-    
+
     return 0;
 }
 
-static int32 sys_access(uint32 path_ptr, uint32 mode) {
+static int32 sys_access(sys_arg_t path_ptr, sys_arg_t mode) {
     if (!path_ptr) {
         return SYSCALL_EFAULT;
     }
     
-    // For now, assume all files exist and are accessible
     (void)mode;
-    return 0;
+    if (!vfs_read_file((const char*)path_ptr, 0, 0)) {
+        return SYSCALL_ENOENT;
+    }
+    return 0; // Read-only filesystem; treat as accessible if present
 }
 
 // Process operations
 static int32 sys_getuid(void) {
-    return 0; // Root user
+    if (current_task) {
+        return (int32)current_task->uid;
+    }
+    return 0;
 }
 
 static int32 sys_getgid(void) {
-    return 0; // Root group
+    if (current_task) {
+        return (int32)current_task->gid;
+    }
+    return 0;
 }
 
 static int32 sys_geteuid(void) {
-    return 0; // Root user (effective)
+    if (current_task) {
+        return (int32)current_task->uid;
+    }
+    return 0;
 }
 
 static int32 sys_getegid(void) {
-    return 0; // Root group (effective)
+    if (current_task) {
+        return (int32)current_task->gid;
+    }
+    return 0;
 }
 
 static int32 sys_getppid(void) {
@@ -507,7 +557,7 @@ static int32 sys_getppid(void) {
 }
 
 // I/O control and misc
-static int32 sys_ioctl(uint32 fd, uint32 request, uint32 arg) {
+static int32 sys_ioctl(sys_arg_t fd, sys_arg_t request, sys_arg_t arg) {
     if (fd > 2) {
         return SYSCALL_EBADF;
     }
@@ -528,7 +578,7 @@ static int32 sys_ioctl(uint32 fd, uint32 request, uint32 arg) {
     }
 }
 
-static int32 sys_fcntl(uint32 fd, uint32 cmd, uint32 arg) {
+static int32 sys_fcntl(sys_arg_t fd, sys_arg_t cmd, sys_arg_t arg) {
     if (fd > MAX_VFS_HANDLES) {
         return SYSCALL_EBADF;
     }
@@ -555,7 +605,7 @@ static int32 sys_fcntl(uint32 fd, uint32 cmd, uint32 arg) {
     }
 }
 
-static int32 sys_dup(uint32 fd) {
+static int32 sys_dup(sys_arg_t fd) {
     if (fd > MAX_VFS_HANDLES) {
         return SYSCALL_EBADF;
     }
@@ -571,7 +621,7 @@ static int32 sys_dup(uint32 fd) {
     return SYSCALL_EMFILE; // Too many open files
 }
 
-static int32 sys_dup2(uint32 oldfd, uint32 newfd) {
+static int32 sys_dup2(sys_arg_t oldfd, sys_arg_t newfd) {
     if (oldfd > MAX_VFS_HANDLES || newfd > MAX_VFS_HANDLES) {
         return SYSCALL_EBADF;
     }
@@ -590,7 +640,7 @@ static int32 sys_dup2(uint32 oldfd, uint32 newfd) {
     return newfd;
 }
 
-static int32 sys_power(uint32 request) {
+static int32 sys_power(sys_arg_t request) {
     if (request == POWER_ACTION_REBOOT) {
         power_reboot();
     } else {
@@ -601,9 +651,77 @@ static int32 sys_power(uint32 request) {
     return SYSCALL_EPERM;
 }
 
+static int32 sys_user(sys_arg_t op, sys_arg_t arg2, sys_arg_t arg3, sys_arg_t arg4, sys_arg_t arg5, sys_arg_t arg6) {
+    const char* user = (const char*)arg2;
+    const char* pass = (const char*)arg3;
+    const char* aux  = (const char*)arg4;
+    auth_user_info_t* out_info = (auth_user_info_t*)arg5;
+    uint32 extra = arg6;
+    auth_result_t res = AUTH_ERR_INVALID;
+
+    switch (op) {
+        case USER_OP_LOGIN: {
+            auth_user_info_t info = {0};
+            res = auth_login(user, pass, &info);
+            if (res == AUTH_OK && current_task) {
+                current_task->uid = info.uid;
+                current_task->gid = info.gid;
+                current_task->groups_mask = info.groups_mask;
+            }
+            if (out_info) {
+                memory_copy((const char*)&info, (char*)out_info, sizeof(auth_user_info_t));
+            }
+            break;
+        }
+        case USER_OP_SIGNUP:
+            res = auth_signup(user, pass, aux, false);
+            break;
+        case USER_OP_PASSWD:
+            res = auth_change_password(user, pass);
+            break;
+        case USER_OP_GROUP:
+            res = auth_add_group(aux, 0);
+            break;
+        case USER_OP_CURRENT:
+            res = auth_get_current(out_info);
+            break;
+        case USER_OP_LIST:
+            res = auth_list(out_info, extra, (uint32*)aux);
+            break;
+        case USER_OP_LOGOUT:
+            res = auth_logout();
+            if (current_task) {
+                current_task->uid = 0;
+                current_task->gid = 0;
+                current_task->groups_mask = 1;
+            }
+            break;
+        default:
+            return SYSCALL_EINVAL;
+    }
+    return (int32)res;
+}
+
+static int32 sys_unlink(sys_arg_t path_ptr) {
+    if (!path_ptr) {
+        return SYSCALL_EFAULT;
+    }
+    const char* path = (const char*)path_ptr;
+    if (!vfs_read_file(path, 0, 0)) {
+        return SYSCALL_ENOENT;
+    }
+    // Initrd is read-only, so unlink is not supported yet.
+    return SYSCALL_EPERM;
+}
+
 void syscall_init(void) {
-    set_idt_gate_flags(SYSCALL_VECTOR, (uint32)isr128, 0xEE);
+#if ARCH_64BIT
+    set_idt_gate_flags(SYSCALL_VECTOR, (uintptr_t)syscall_handler, IDT_GATE_USER_INT);
+    print("[SYSCALL] Installed 64-bit software interrupt handler at 0x80\n");
+#else
+    set_idt_gate_flags(SYSCALL_VECTOR, (uintptr_t)isr128, IDT_GATE_USER_INT);
     print("[SYSCALL] Installed software interrupt handler at 0x80\n");
+#endif
 }
 
 void syscall_handle(syscall_frame_t* frame) {
@@ -611,13 +729,26 @@ void syscall_handle(syscall_frame_t* frame) {
         return;
     }
 
-    uint32 num = frame->eax;
-    uint32 arg1 = frame->ebx;  // First argument
-    uint32 arg2 = frame->ecx;  // Second argument  
-    uint32 arg3 = frame->edx;  // Third argument
-    uint32 arg4 = frame->esi;  // Fourth argument
-    uint32 arg5 = frame->edi;  // Fifth argument
-    uint32 arg6 = frame->ebp;  // Sixth argument
+    // Note the syscall as activity for watchdogs/debugging.
+    task_mark_active();
+
+#if ARCH_64BIT
+    sys_arg_t num  = frame->rax;
+    sys_arg_t arg1 = frame->rbx;  // First argument
+    sys_arg_t arg2 = frame->rcx;  // Second argument
+    sys_arg_t arg3 = frame->rdx;  // Third argument
+    sys_arg_t arg4 = frame->rsi;  // Fourth argument
+    sys_arg_t arg5 = frame->rdi;  // Fifth argument
+    sys_arg_t arg6 = frame->rbp;  // Sixth argument
+#else
+    sys_arg_t num  = frame->eax;
+    sys_arg_t arg1 = frame->ebx;  // First argument
+    sys_arg_t arg2 = frame->ecx;  // Second argument  
+    sys_arg_t arg3 = frame->edx;  // Third argument
+    sys_arg_t arg4 = frame->esi;  // Fourth argument
+    sys_arg_t arg5 = frame->edi;  // Fifth argument
+    sys_arg_t arg6 = frame->ebp;  // Sixth argument
+#endif
     int32 result = SYSCALL_ENOSYS;
 
     switch (num) {
@@ -633,6 +764,7 @@ void syscall_handle(syscall_frame_t* frame) {
         case SYS_UNAME:      result = sys_uname(arg1); break;
         case SYS_EXIT:       result = sys_exit(arg1); break;
         case SYS_EXIT_GROUP: result = sys_exit(arg1); break;  // Same as exit for now
+        case SYS_UNLINK:     result = sys_unlink(arg1); break;
         case SYS_SOCKET:     result = sys_socket(arg1, arg2, arg3); break;
         case SYS_BIND:       result = sys_bind(arg1, arg2, arg3); break;
         case SYS_SENDTO:     result = sys_sendto(arg1, arg2, arg3, arg4, arg5, arg6); break;
@@ -658,9 +790,14 @@ void syscall_handle(syscall_frame_t* frame) {
         case SYS_FCNTL:      result = sys_fcntl(arg1, arg2, arg3); break;
         case SYS_DUP:        result = sys_dup(arg1); break;
         case SYS_DUP2:       result = sys_dup2(arg1, arg2); break;
+        case SYS_USERCTL:    result = sys_user(arg1, arg2, arg3, arg4, arg5, arg6); break;
         
         default:             result = SYSCALL_ENOSYS; break;
     }
 
+#if ARCH_64BIT
+    frame->rax = (sys_arg_t)result;
+#else
     frame->eax = (uint32)result;
+#endif
 }

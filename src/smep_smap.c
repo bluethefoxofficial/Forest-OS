@@ -29,17 +29,17 @@ static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax, uint32_t *ebx,
 
 // Set bit in CR4 register
 static void cpu_cr4_set_bit(int bit) {
-    uint32_t cr4;
+    unsigned long cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1U << bit);
+    cr4 |= (1UL << bit);
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
 }
 
 // Clear bit in CR4 register
 static void cpu_cr4_clear_bit(int bit) {
-    uint32_t cr4;
+    unsigned long cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 &= ~(1U << bit);
+    cr4 &= ~(1UL << bit);
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
 }
 

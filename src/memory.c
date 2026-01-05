@@ -4,6 +4,7 @@
 #include "include/panic.h"
 #include "include/multiboot.h"
 #include "include/interrupt.h"
+#include "include/debuglog.h"
 
 // =============================================================================
 // MEMORY DETECTION AND INITIALIZATION
@@ -22,6 +23,29 @@ static struct {
     uint32 total_memory_kb;
     uint32 usable_memory_kb;
 } memory_info = {0};
+
+// PMM/heap layout (can be nudged upward if boot modules overlap defaults)
+static uint32 pmm_bitmap_base = MEMORY_PMM_START;
+static const uint32 pmm_bitmap_size = MEMORY_PMM_SIZE;
+
+uint32 memory_get_pmm_start(void) {
+    return pmm_bitmap_base;
+}
+
+uint32 memory_get_pmm_size(void) {
+    return pmm_bitmap_size;
+}
+
+uint32 memory_get_kernel_heap_start(void) {
+    return pmm_bitmap_base + pmm_bitmap_size;
+}
+
+static void memory_set_pmm_layout(uint32 start) {
+    pmm_bitmap_base = memory_align_up(start, MEMORY_PAGE_SIZE);
+    if (pmm_bitmap_base < MEMORY_KERNEL_START) {
+        pmm_bitmap_base = MEMORY_KERNEL_START;
+    }
+}
 
 static void memory_panic_stage(const char* stage, memory_result_t result) {
     static char panic_message[192];
@@ -52,6 +76,11 @@ static void print_basic_memory(uint32 lower_mem, uint32 upper_mem);
 static memory_result_t unmap_identity_range(page_directory_t* dir, uint32 start, uint32 end);
 static void memory_page_fault_wrapper(struct interrupt_frame* frame, uint32 error_code);
 
+// Remember the last detected initrd range so later subsystems (like ramdisk
+// parsing) can fall back if multiboot structures become inaccessible.
+static uint32 cached_initrd_start = 0;
+static uint32 cached_initrd_end = 0;
+
 // =============================================================================
 // UTILITY FUNCTIONS
 // =============================================================================
@@ -75,6 +104,61 @@ bool memory_is_aligned(uint32 addr, uint32 align) {
         return false; // Invalid alignment
     }
     return (addr & (align - 1)) == 0;
+}
+
+uint32 memory_get_cached_initrd_start(void) {
+    return cached_initrd_start;
+}
+
+uint32 memory_get_cached_initrd_end(void) {
+    return cached_initrd_end;
+}
+
+static void detect_initrd_bounds(uint32 multiboot_magic, uint32 multiboot_info,
+                                 uint32* out_start, uint32* out_end) {
+    if (!out_start || !out_end) {
+        return;
+    }
+    *out_start = 0;
+    *out_end = 0;
+
+    if (multiboot_info == 0) {
+        return;
+    }
+
+    if (multiboot_magic == MULTIBOOT_BOOTLOADER_MAGIC) {
+        multiboot_info_t* mbi = (multiboot_info_t*)multiboot_info;
+        if (mbi->mods_count > 0 && mbi->mods_addr != 0) {
+            multiboot_module_t* mod = (multiboot_module_t*)mbi->mods_addr;
+            *out_start = mod->mod_start;
+            *out_end = mod->mod_end;
+        }
+    } else if (multiboot_magic == MULTIBOOT2_BOOTLOADER_MAGIC) {
+        uint8* tag_ptr = (uint8*)multiboot_info + 8;
+        uint32 total_size = *(uint32*)multiboot_info;
+        uint8* end_ptr = (uint8*)multiboot_info + total_size;
+        while (tag_ptr < end_ptr) {
+            uint32 tag_type = *(uint32*)tag_ptr;
+            uint32 tag_size = *(uint32*)(tag_ptr + 4);
+            if (tag_type == 0 || tag_size < 8) {
+                break;
+            }
+            if (tag_type == 3) { // Module tag
+                uint32 mod_start = *(uint32*)(tag_ptr + 8);
+                uint32 mod_end = *(uint32*)(tag_ptr + 12);
+                *out_start = mod_start;
+                *out_end = mod_end;
+                break;
+            }
+            tag_ptr += (tag_size + 7) & ~7;
+        }
+    }
+
+    // Cache for later fallback use
+    if (*out_start != 0 && *out_end != 0 && *out_end > *out_start) {
+        cached_initrd_start = *out_start;
+        cached_initrd_end = *out_end;
+    }
 }
 
 const char* memory_result_to_string(memory_result_t result) {
@@ -342,6 +426,21 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
         memory_panic_stage("memory_detect_grub", result);
         return result;
     }
+
+    // Decide where to place the PMM bitmap/heap. If the initrd module overlaps
+    // the default 4MB PMM area, slide the PMM/heap above it to avoid clobbering
+    // the module contents before we get a chance to parse it.
+    uint32 initrd_start = 0, initrd_end = 0;
+    detect_initrd_bounds(multiboot_magic, multiboot_info, &initrd_start, &initrd_end);
+
+    uint32 pmm_base = MEMORY_PMM_START;
+    if (initrd_end != 0 && initrd_end > pmm_base) {
+        pmm_base = memory_align_up(initrd_end, MEMORY_PAGE_SIZE);
+        debuglog(DEBUG_INFO,
+                 "[MEM] Moving PMM/heap above initrd: initrd 0x%08x-0x%08x, new PMM base 0x%08x\n",
+                 initrd_start, initrd_end, pmm_base);
+    }
+    memory_set_pmm_layout(pmm_base);
     
     // Step 2: Initialize Physical Memory Manager
     print("[MEM] Initializing Physical Memory Manager...\n");
@@ -353,7 +452,56 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
         memory_panic_stage("pmm_init", result);
         return result;
     }
+
+    // Reserve the multiboot information structure itself so later code
+    // (like the initrd/VFS setup) can continue to read it safely.
+    if (multiboot_info != 0) {
+        if (multiboot_magic == MULTIBOOT2_BOOTLOADER_MAGIC) {
+            uint32 total_size = *(uint32*)multiboot_info;
+            if (total_size != 0) {
+                uint32 start = multiboot_info & ~(MEMORY_PAGE_SIZE - 1);
+                uint32 end = (multiboot_info + total_size + MEMORY_PAGE_SIZE - 1) & ~(MEMORY_PAGE_SIZE - 1);
+                pmm_reserve_range(start, end);
+                debuglog(DEBUG_INFO, "[MEM] Reserved Multiboot2 info region: 0x%08x - 0x%08x\n", start, end);
+            }
+        } else if (multiboot_magic == MULTIBOOT_BOOTLOADER_MAGIC) {
+            multiboot_info_t* mbi = (multiboot_info_t*)multiboot_info;
+            uint32 end = multiboot_info + sizeof(multiboot_info_t);
+            if (mbi->mmap_addr && mbi->mmap_length) {
+                uint32 mmap_end = mbi->mmap_addr + mbi->mmap_length;
+                if (mmap_end > end) {
+                    end = mmap_end;
+                }
+            }
+            if (mbi->mods_count > 0 && mbi->mods_addr != 0) {
+                uint32 mods_end = mbi->mods_addr + (mbi->mods_count * sizeof(multiboot_module_t));
+                if (mods_end > end) {
+                    end = mods_end;
+                }
+            }
+            uint32 start = multiboot_info & ~(MEMORY_PAGE_SIZE - 1);
+            end = (end + MEMORY_PAGE_SIZE - 1) & ~(MEMORY_PAGE_SIZE - 1);
+            pmm_reserve_range(start, end);
+            debuglog(DEBUG_INFO, "[MEM] Reserved Multiboot1 info region: 0x%08x - 0x%08x\n", start, end);
+        }
+    }
     
+    // CRITICAL: Reserve initrd module memory BEFORE vmm_init allocates page tables
+    // This prevents the PMM from allocating frames that overlap with the initrd
+    debuglog(DEBUG_INFO, "[MEM] Checking multiboot magic: 0x%08x (expected MB1: 0x2BADB002)\n", multiboot_magic);
+    if (initrd_start != 0 && initrd_end != 0 && initrd_end > initrd_start) {
+        debuglog(DEBUG_INFO, "[MEM] Reserving initrd in memory.c: 0x%08x - 0x%08x\n",
+                 initrd_start, initrd_end);
+        print("[MEM] Reserving initrd: 0x");
+        print_hex(initrd_start);
+        print(" - 0x");
+        print_hex(initrd_end);
+        print("\n");
+        pmm_reserve_range(initrd_start, initrd_end);
+    } else {
+        debuglog(DEBUG_WARN, "[MEM] Unknown multiboot magic or no info, cannot reserve initrd\n");
+    }
+
     // Step 3: Initialize Virtual Memory Manager
     print("[MEM] Initializing Virtual Memory Manager...\n");
     result = vmm_init();
@@ -371,7 +519,7 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
     
     const uint32 initial_heap_size = 1024 * 1024; // 1MB heap bootstrap
     uint32 kernel_buffer_end = (uint32)&kernel_end + 0x100000; // keep extra space for modules
-    uint32 heap_region_end = MEMORY_KERNEL_HEAP_START + initial_heap_size;
+    uint32 heap_region_end = memory_get_kernel_heap_start() + initial_heap_size;
     uint32 identity_end = kernel_buffer_end > heap_region_end ?
                           kernel_buffer_end : heap_region_end;
     uint32 kernel_map_end = memory_align_up(identity_end, MEMORY_PAGE_SIZE);
@@ -399,23 +547,23 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
     
     // Step 5.5: Register page fault handler now that paging is enabled
     print("[MEM] Registering page fault handler...\n");
-    interrupt_set_handler(EXCEPTION_PAGE_FAULT, memory_page_fault_wrapper);
+    interrupt_set_handler_legacy(EXCEPTION_PAGE_FAULT, memory_page_fault_wrapper);
     print("[MEM] Page fault handler registered\n");
     
     // Step 6: Drop the identity map for the heap range so heap_init can map
     // fresh physical frames without running into duplicate mappings.
     result = unmap_identity_range(kernel_dir,
-                                  MEMORY_KERNEL_HEAP_START,
-                                  MEMORY_KERNEL_HEAP_START + initial_heap_size);
+                                  memory_get_kernel_heap_start(),
+                                  memory_get_kernel_heap_start() + initial_heap_size);
     if (result != MEMORY_OK) {
         print("[MEM] Failed to unmap temporary heap mapping\n");
         memory_panic_stage("unmap_identity_range (heap)", result);
         return result;
     }
-
+    
     // Step 7: Initialize kernel heap
     print("[MEM] Initializing kernel heap...\n");
-    result = heap_init(MEMORY_KERNEL_HEAP_START, initial_heap_size);
+    result = heap_init(memory_get_kernel_heap_start(), initial_heap_size);
     if (result != MEMORY_OK) {
         print("[MEM] Heap initialization failed: ");
         print(memory_result_to_string(result));
@@ -469,7 +617,7 @@ memory_stats_t memory_get_stats(void) {
         stats.heap_free_kb = heap_free / 1024;
         
         // Calculate kernel memory usage (rough estimate)
-        uint32 kernel_size = MEMORY_KERNEL_HEAP_START - MEMORY_KERNEL_START;
+        uint32 kernel_size = memory_get_kernel_heap_start() - MEMORY_KERNEL_START;
         stats.kernel_frames = (kernel_size / MEMORY_PAGE_SIZE) + (heap_used / MEMORY_PAGE_SIZE);
     }
     

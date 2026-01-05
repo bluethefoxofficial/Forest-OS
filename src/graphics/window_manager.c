@@ -3,6 +3,7 @@
 #include "../include/memory.h"
 #include "../include/string.h"
 #include "../include/debuglog.h"
+#include "../include/mm.h"
 
 // Window manager state
 static struct {
@@ -165,7 +166,7 @@ window_handle_t window_create(int32_t x, int32_t y, uint32_t width, uint32_t hei
     }
     
     // Create window structure
-    window_t* window = kmalloc(sizeof(window_t));
+    window_t* window = kmalloc(sizeof(window_t), GFP_KERNEL);
     if (!window) {
         debuglog(DEBUG_ERROR, "Failed to allocate memory for window\n");
         return INVALID_WINDOW_HANDLE;

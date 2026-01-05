@@ -11,7 +11,19 @@ extern "C" {
 #include "time.h"
 #include "sys/utsname.h"
 
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#else
+#define ARCH_64BIT 0
+#endif
+#endif
+
+#if ARCH_64BIT
+typedef long ssize_t;
+#else
 typedef int32 ssize_t;
+#endif
 
 ssize_t write(int fd, const void *buf, size_t count);
 ssize_t read(int fd, void *buf, size_t count);
@@ -34,6 +46,8 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags,
 int netinfo(net_socket_info_t* buffer, int max_entries);
 int poweroff(void);
 int reboot(int howto);
+int user_syscall(int op, const char* user, const char* pass, const char* aux,
+                 void* out, int max_entries);
 
 #ifdef __cplusplus
 }

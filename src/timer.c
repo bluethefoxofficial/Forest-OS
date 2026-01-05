@@ -6,6 +6,7 @@
 #include "include/interrupt.h"
 #include "include/task.h"
 #include "include/io_ports.h"
+#include "include/screen.h"
 
 static uint32 timer_ticks = 0;
 
@@ -13,6 +14,7 @@ static void timer_handler(struct interrupt_frame* frame, uint32 error_code) {
     (void)frame;
     (void)error_code;
     timer_ticks++;
+
     
     // Call the task scheduler every timer interrupt
     task_schedule();
@@ -26,7 +28,7 @@ bool timer_init(uint32 frequency) {
     }
     
     // Install timer interrupt handler
-    interrupt_set_handler(IRQ_TIMER, timer_handler);
+    interrupt_set_handler_legacy(IRQ_TIMER, timer_handler);
     
     // Enable timer IRQ
     pic_unmask_irq(0);

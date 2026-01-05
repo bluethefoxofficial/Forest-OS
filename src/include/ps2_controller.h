@@ -59,6 +59,10 @@ typedef struct {
 // Initialize PS/2 controller
 int ps2_controller_init(void);
 
+// Minimal fallback initialization - just enables keyboard port and IRQs
+// Use this if full init fails but we still want keyboard to work
+void ps2_controller_minimal_init(void);
+
 // Send command to PS/2 controller
 bool ps2_controller_send_command(uint8 command);
 
