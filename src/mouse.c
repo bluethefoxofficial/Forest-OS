@@ -19,10 +19,12 @@ static ps2_mouse_event_callback_t mouse_callback = NULL;
 static uint8 mouse_packet[4];
 static uint8 mouse_packet_index = 0;
 static uint8 mouse_device_id = 0;
+static bool mouse_ready = false;
 
 static bool ps2_mouse_send_command(uint8 command);
 static bool ps2_mouse_reset(void);
 static void ps2_mouse_process_packet(void);
+static void ps2_mouse_process_input_stream(void);
 
 int ps2_mouse_init(void) {
     print("[MOUSE] Initializing PS/2 mouse driver...\n");
@@ -79,6 +81,7 @@ int ps2_mouse_init(void) {
     print(id_str);
     print(")\n");
 
+    mouse_ready = true;
     return 0;
 }
 
@@ -86,29 +89,26 @@ void ps2_mouse_irq_handler(struct interrupt_frame* frame, uint32 error_code) {
     (void)frame;
     (void)error_code;
 
-    if (ps2_mouse_data_available()) {
-        uint8 data = ps2_controller_read_data();
-
-        // Synchronize packets: first byte always has bit 3 set
-        if (mouse_packet_index == 0 && !(data & PS2_MOUSE_SYNC_BIT)) {
-            // Still need to acknowledge IRQ even if packet discarded below
-        } else {
-            mouse_packet[mouse_packet_index++] = data;
-
-            // Standard 3-byte packet
-            if (mouse_packet_index == 3) {
-                ps2_mouse_process_packet();
-                mouse_packet_index = 0;
-            }
-        }
+    if (!mouse_ready) {
+        pic_send_eoi(12);
+        return;
     }
+
+    // Discard any stray keyboard data that might be blocking the buffer
+    for (int i = 0; i < 16 && ps2_keyboard_data_available(); i++) {
+        (void)ps2_controller_read_data();
+    }
+
+    ps2_mouse_process_input_stream();
 
     pic_send_eoi(12);
 }
 
 static void ps2_mouse_process_packet(void) {
     int dx = (int8)mouse_packet[1];
-    int dy = (int8)mouse_packet[2];
+    // PS/2 reports positive Y for upward motion; invert so screen coords
+    // follow the conventional top-left origin with Y increasing downward.
+    int dy = -(int8)mouse_packet[2];
 
     mouse_state.left_button = (mouse_packet[0] & 0x01) != 0;
     mouse_state.right_button = (mouse_packet[0] & 0x02) != 0;
@@ -116,9 +116,9 @@ static void ps2_mouse_process_packet(void) {
     mouse_state.x_overflow = (mouse_packet[0] & 0x40) != 0;
     mouse_state.y_overflow = (mouse_packet[0] & 0x80) != 0;
 
-    // PS/2 Y movement is negative when moving up, invert for screen-friendly coords
+    // PS/2 Y movement is negative when moving up; keep screen coords matching that
     mouse_state.x += dx;
-    mouse_state.y -= dy;
+    mouse_state.y += dy;
 
     ps2_mouse_event_t event;
     event.dx = dx;
@@ -134,6 +134,36 @@ static void ps2_mouse_process_packet(void) {
     if (mouse_callback) {
         mouse_callback(&event);
     }
+}
+
+static void ps2_mouse_process_input_stream(void) {
+    while (ps2_mouse_data_available()) {
+        uint8 data = ps2_controller_read_data();
+
+        // Synchronize packets: first byte always has bit 3 set
+        if (mouse_packet_index == 0 && !(data & PS2_MOUSE_SYNC_BIT)) {
+            // Discard byte - not a valid packet start
+            continue;
+        }
+
+        mouse_packet[mouse_packet_index++] = data;
+
+        // Standard 3-byte packet
+        if (mouse_packet_index == 3) {
+            ps2_mouse_process_packet();
+            mouse_packet_index = 0;
+        }
+    }
+}
+
+void ps2_mouse_poll(void) {
+    if (!mouse_ready) {
+        return;
+    }
+
+    bool interrupts_were_enabled = irq_save_and_disable_safe();
+    ps2_mouse_process_input_stream();
+    irq_restore_safe(interrupts_were_enabled);
 }
 
 static bool ps2_mouse_send_command(uint8 command) {

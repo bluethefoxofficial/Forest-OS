@@ -35,6 +35,9 @@ typedef struct display_driver_ops {
     graphics_result_t (*draw_pixel)(graphics_device_t* device, 
                                   int32_t x, int32_t y, 
                                   graphics_color_t color);
+    graphics_result_t (*get_pixel)(graphics_device_t* device, 
+                                  int32_t x, int32_t y, 
+                                  graphics_color_t* color);
     graphics_result_t (*draw_rect)(graphics_device_t* device, 
                                  const graphics_rect_t* rect, 
                                  graphics_color_t color, 

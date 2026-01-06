@@ -6,6 +6,7 @@
 #include "include/cpu_ops.h"
 #include "include/task.h"
 #include "include/signal.h"
+#include "include/ps2_mouse.h"
 
 #ifndef USERSPACE_BUILD
 #include "include/panic.h"
@@ -105,7 +106,17 @@ static bool legacy_read_char(char* out_char) {
         return true;
     }
 
-    if ((inportb(0x64) & 0x1) == 0) {
+    // Check PS/2 status: bit 0 = output buffer full, bit 5 = data from mouse (AUX)
+    uint8 status = inportb(0x64);
+
+    // If AUX data is pending, hand it to the mouse driver instead of discarding
+    if (status & 0x20) {
+        ps2_mouse_poll();
+        status = inportb(0x64);
+    }
+
+    // Now check if keyboard data is available
+    if ((status & 0x01) == 0) {
         return false;
     }
 

@@ -82,7 +82,8 @@
       "Bash(./run.sh:*)",
       "Bash(make clean-all:*)",
       "Bash(make ARCH=32 BOOT_MODE=bios BUILD_TYPE=debug all:*)",
-      "Bash(make kernel:*)"
+      "Bash(make kernel:*)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": [],

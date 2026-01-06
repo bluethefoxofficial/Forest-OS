@@ -7,5 +7,6 @@
 // This is a minimal in-kernel shell used when the userspace shell fails
 // to load so that we can still inspect and poke the system.
 void dks_run(void);
+extern bool dks_guimode_active;
 
 #endif

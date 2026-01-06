@@ -10,6 +10,8 @@
 #include "include/net.h"
 #include "include/power.h"
 #include "include/auth.h"
+#include "include/memory_safe.h"
+#include "include/memory.h"
 
 #if ARCH_64BIT
 extern void syscall_handler(void);  // From interrupt_stubs.s
@@ -20,8 +22,6 @@ typedef uint32 sys_arg_t;
 #endif
 
 #define MAX_VFS_HANDLES 16
-#define USER_HEAP_BASE  0x01800000
-
 typedef struct {
     bool used;
     const uint8* data;
@@ -30,8 +30,94 @@ typedef struct {
 } vfs_handle_t;
 
 static vfs_handle_t vfs_handles[MAX_VFS_HANDLES];
-static uint8* program_break = (uint8*)USER_HEAP_BASE;
 static uint32 fake_unix_epoch = 1730000000; // Fake epoch for time()
+
+static inline task_t* current_user_task_ptr(void) {
+    if (current_task && current_task->page_directory && current_task->elf_info.valid) {
+        return current_task;
+    }
+    return NULL;
+}
+
+static inline uint32 heap_align_up(uint32 value) {
+    return memory_align_up(value, MEMORY_PAGE_SIZE);
+}
+
+static inline uint32 heap_align_down(uint32 value) {
+    return memory_align_down(value, MEMORY_PAGE_SIZE);
+}
+
+static void unmap_user_range(page_directory_t* dir, uint32 start, uint32 end);
+
+static bool map_user_range(page_directory_t* dir, uint32 start, uint32 end) {
+    if (!dir || start >= end) {
+        return false;
+    }
+
+    uint32 aligned_start = heap_align_down(start);
+    uint32 aligned_end = heap_align_up(end);
+    uint32 mapped_end = aligned_start;
+
+    for (uint32 va = aligned_start; va < aligned_end; va += MEMORY_PAGE_SIZE) {
+        uint32 frame = pmm_alloc_frame();
+        if (!frame) {
+            unmap_user_range(dir, aligned_start, mapped_end);
+            return false;
+        }
+
+        memory_result_t res = vmm_map_page(dir,
+                                           va,
+                                           frame,
+                                           PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE);
+        if (res == MEMORY_ERROR_ALREADY_MAPPED) {
+            pmm_free_frame(frame);
+            mapped_end = va + MEMORY_PAGE_SIZE;
+            continue;
+        }
+
+        if (res != MEMORY_OK) {
+            pmm_free_frame(frame);
+            unmap_user_range(dir, aligned_start, mapped_end);
+            return false;
+        }
+        mapped_end = va + MEMORY_PAGE_SIZE;
+    }
+
+    return true;
+}
+
+static void unmap_user_range(page_directory_t* dir, uint32 start, uint32 end) {
+    if (!dir || start >= end) {
+        return;
+    }
+
+    uint32 aligned_start = heap_align_down(start);
+    uint32 aligned_end = heap_align_up(end);
+
+    for (uint32 va = aligned_start; va < aligned_end; va += MEMORY_PAGE_SIZE) {
+        uint32 phys = vmm_get_physical_addr(dir, va);
+        vmm_unmap_page(dir, va);
+        if (phys) {
+            pmm_free_frame(phys);
+        }
+    }
+}
+
+typedef struct {
+    uint32 st_dev;     // Device ID
+    uint32 st_ino;     // Inode number  
+    uint32 st_mode;    // File mode
+    uint32 st_nlink;   // Number of hard links
+    uint32 st_uid;     // User ID
+    uint32 st_gid;     // Group ID
+    uint32 st_rdev;    // Device ID (if special file)
+    uint32 st_size;    // File size
+    uint32 st_blksize; // Block size
+    uint32 st_blocks;  // Number of blocks
+    uint32 st_atime;   // Access time
+    uint32 st_mtime;   // Modify time
+    uint32 st_ctime;   // Change time
+} stat_stub_t;
 
 // Error codes (Linux compatible)
 #define SYSCALL_ENOSYS  (-38)
@@ -61,6 +147,43 @@ static bool syscall_warned[SYS_MAX];
 static int32 sys_dup(sys_arg_t fd);
 static int32 sys_dup2(sys_arg_t oldfd, sys_arg_t newfd);
 
+static bool user_buffer_readable(const void* ptr, size_t len) {
+    if (!ptr || len == 0) {
+        return false;
+    }
+    return memory_probe_user_buffer(ptr, len) >= len;
+}
+
+static bool user_buffer_writable(void* ptr, size_t len) {
+    if (!ptr || len == 0) {
+        return false;
+    }
+    return memory_probe_user_buffer(ptr, len) >= len;
+}
+
+static bool user_copy_string(char* dst, size_t dst_size, const char* src) {
+    if (!dst || !src || dst_size == 0) {
+        return false;
+    }
+
+    size_t span = memory_probe_user_buffer(src, dst_size);
+    if (span == 0) {
+        return false;
+    }
+
+    size_t limit = (span < dst_size) ? span : dst_size;
+    size_t i = 0;
+    for (; i + 1 < limit; i++) {
+        dst[i] = src[i];
+        if (src[i] == '\0') {
+            return true;
+        }
+    }
+
+    dst[limit - 1] = '\0';
+    return src[i] == '\0';
+}
+
 static int32 sys_unimplemented(sys_arg_t arg1, sys_arg_t arg2, sys_arg_t arg3,
                                sys_arg_t arg4, sys_arg_t arg5, sys_arg_t arg6) {
     (void)arg1;
@@ -85,6 +208,10 @@ static int32 sys_write(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len) {
         return 0;
     }
 
+    if (!user_buffer_readable((const void*)buf_ptr, len)) {
+        return SYSCALL_EFAULT;
+    }
+
     const char* buf = (const char*)buf_ptr;
 
     if (fd == 1 || fd == 2) {
@@ -101,6 +228,10 @@ static int32 sys_write(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len) {
 static int32 sys_read(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len) {
     if (!buf_ptr || len == 0) {
         return 0;
+    }
+
+    if (!user_buffer_writable((void*)buf_ptr, len)) {
+        return SYSCALL_EFAULT;
     }
 
     char* dest = (char*)buf_ptr;
@@ -156,12 +287,9 @@ static int32 sys_open(sys_arg_t path_ptr, sys_arg_t flags, sys_arg_t mode) {
 
     char path_buf[128];
     const char* user_path = (const char*)path_ptr;
-    uint32 i = 0;
-    while (user_path[i] && i < sizeof(path_buf) - 1) {
-        path_buf[i] = user_path[i];
-        i++;
+    if (!user_copy_string(path_buf, sizeof(path_buf), user_path)) {
+        return SYSCALL_EFAULT;
     }
-    path_buf[i] = '\0';
 
     const uint8* data = 0;
     uint32 size = 0;
@@ -240,23 +368,56 @@ static int32 sys_time(sys_arg_t user_ptr) {
     fake_unix_epoch++;
     if (user_ptr) {
         uint32* t = (uint32*)user_ptr;
+        if (!user_buffer_writable(t, sizeof(uint32))) {
+            return SYSCALL_EFAULT;
+        }
         *t = fake_unix_epoch;
     }
     return (int32)fake_unix_epoch;
 }
 
 static int32 sys_brk(sys_arg_t new_break) {
+    task_t* task = current_user_task_ptr();
+    if (!task) {
+        return SYSCALL_ENOMEM;
+    }
+
+    uint32 heap_base = task->user_heap_base ? task->user_heap_base : MEMORY_USER_START;
+    uint32 heap_limit = task->user_heap_limit ?
+                        task->user_heap_limit :
+                        (USER_STACK_TOP - USER_HEAP_GUARD_PAGES * MEMORY_PAGE_SIZE);
+
+    if (heap_base >= heap_limit) {
+        return SYSCALL_ENOMEM;
+    }
+
     if (new_break == 0) {
-        return (int32)program_break;
+        uint32 current = task->user_brk ? task->user_brk : heap_base;
+        return (int32)current;
     }
 
-    if (new_break < USER_HEAP_BASE) {
-        program_break = (uint8*)USER_HEAP_BASE;
-        return (int32)program_break;
+    uint32 requested = (uint32)new_break;
+    if (requested < heap_base) {
+        requested = heap_base;
+    }
+    if (requested > heap_limit) {
+        return SYSCALL_ENOMEM;
     }
 
-    program_break = (uint8*)new_break;
-    return (int32)program_break;
+    uint32 old_brk = task->user_brk ? task->user_brk : heap_base;
+    uint32 old_aligned = heap_align_up(old_brk);
+    uint32 new_aligned = heap_align_up(requested);
+
+    if (new_aligned > old_aligned) {
+        if (!map_user_range(task->page_directory, old_aligned, new_aligned)) {
+            return SYSCALL_ENOMEM;
+        }
+    } else if (new_aligned < old_aligned) {
+        unmap_user_range(task->page_directory, new_aligned, old_aligned);
+    }
+
+    task->user_brk = requested;
+    return (int32)task->user_brk;
 }
 
 typedef struct {
@@ -277,6 +438,10 @@ static int32 sys_nanosleep(sys_arg_t req_ptr, sys_arg_t rem_ptr) {
         return SYSCALL_EINVAL;
     }
 
+    if (!user_buffer_readable((const void*)req_ptr, sizeof(timespec_simple_t))) {
+        return SYSCALL_EFAULT;
+    }
+
     timespec_simple_t* req = (timespec_simple_t*)req_ptr;
     uint32 loops = req->tv_sec * 100000 + req->tv_nsec / 1000;
     busy_wait(loops);
@@ -294,6 +459,10 @@ typedef struct {
 static int32 sys_uname(sys_arg_t user_ptr) {
     if (!user_ptr) {
         return SYSCALL_EINVAL;
+    }
+
+    if (!user_buffer_writable((void*)user_ptr, sizeof(utsname_t))) {
+        return SYSCALL_EFAULT;
     }
 
     utsname_t* info = (utsname_t*)user_ptr;
@@ -349,12 +518,19 @@ static int32 sys_sendto(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len, sys_arg_
         return SYSCALL_EINVAL;
     }
 
+    if (!user_buffer_readable((const void*)buf_ptr, len)) {
+        return SYSCALL_EFAULT;
+    }
+
     uint32 dest_addr = INADDR_LOOPBACK;
     uint16 dest_port = 0;
 
     if (addr_ptr) {
         if (addr_len < sizeof(sockaddr_in_t)) {
             return SYSCALL_EINVAL;
+        }
+        if (!user_buffer_readable((const void*)addr_ptr, sizeof(sockaddr_in_t))) {
+            return SYSCALL_EFAULT;
         }
         sockaddr_in_t dest;
         memory_copy((char*)addr_ptr, (char*)&dest, sizeof(dest));
@@ -376,8 +552,25 @@ static int32 sys_recvfrom(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len, sys_ar
         return SYSCALL_EINVAL;
     }
 
+    if (!user_buffer_writable((void*)buf_ptr, len)) {
+        return SYSCALL_EFAULT;
+    }
+
     uint32 src_addr = 0;
     uint16 src_port = 0;
+    socklen_t user_len = 0;
+
+    if (addr_len_ptr) {
+        if (!user_buffer_readable((const void*)addr_len_ptr, sizeof(socklen_t)) ||
+            !user_buffer_writable((void*)addr_len_ptr, sizeof(socklen_t))) {
+            return SYSCALL_EFAULT;
+        }
+        user_len = *(socklen_t*)addr_len_ptr;
+    }
+
+    if (addr_ptr && !user_buffer_writable((void*)addr_ptr, sizeof(sockaddr_in_t))) {
+        return SYSCALL_EFAULT;
+    }
 
     int32 received = net_recv_datagram(fd, (uint8*)buf_ptr, len, &src_addr, &src_port);
     if (received < 0) {
@@ -385,8 +578,7 @@ static int32 sys_recvfrom(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len, sys_ar
     }
 
     if (addr_ptr && addr_len_ptr) {
-        socklen_t* user_len = (socklen_t*)addr_len_ptr;
-        if (*user_len < sizeof(sockaddr_in_t)) {
+        if (user_len < sizeof(sockaddr_in_t)) {
             return SYSCALL_EINVAL;
         }
         sockaddr_in_t* user_addr = (sockaddr_in_t*)addr_ptr;
@@ -394,7 +586,7 @@ static int32 sys_recvfrom(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len, sys_ar
         user_addr->sin_port = htons(src_port);
         user_addr->sin_addr = src_addr;
         memory_set(user_addr->sin_zero, 0, sizeof(user_addr->sin_zero));
-        *user_len = sizeof(sockaddr_in_t);
+        *(socklen_t*)addr_len_ptr = sizeof(sockaddr_in_t);
     }
 
     return received;
@@ -403,6 +595,13 @@ static int32 sys_recvfrom(sys_arg_t fd, sys_arg_t buf_ptr, sys_arg_t len, sys_ar
 static int32 sys_netinfo(sys_arg_t buffer_ptr, sys_arg_t max_entries) {
     if (!buffer_ptr || max_entries == 0) {
         return SYSCALL_EINVAL;
+    }
+    size_t total_bytes = (size_t)max_entries * sizeof(net_socket_info_t);
+    if (max_entries > 0 && total_bytes / sizeof(net_socket_info_t) != (size_t)max_entries) {
+        return SYSCALL_ERANGE;
+    }
+    if (!user_buffer_writable((void*)buffer_ptr, total_bytes)) {
+        return SYSCALL_EFAULT;
     }
     return (int32)net_snapshot((net_socket_info_t*)buffer_ptr, max_entries);
 }
@@ -413,31 +612,25 @@ static int32 sys_stat(sys_arg_t path_ptr, sys_arg_t stat_ptr) {
     if (!path_ptr || !stat_ptr) {
         return SYSCALL_EFAULT;
     }
-    
-    const char* path = (const char*)path_ptr;
+
+    char path_buf[128];
+    if (!user_copy_string(path_buf, sizeof(path_buf), (const char*)path_ptr)) {
+        return SYSCALL_EFAULT;
+    }
+
+    if (!user_buffer_writable((void*)stat_ptr, sizeof(stat_stub_t))) {
+        return SYSCALL_EFAULT;
+    }
+
     const uint8* fdata = 0;
     uint32 fsize = 0;
-    if (!vfs_read_file(path, &fdata, &fsize)) {
+    if (!vfs_read_file(path_buf, &fdata, &fsize)) {
         return SYSCALL_ENOENT;
     }
     (void)fdata; // Data not needed beyond existence/size
-    
+
     // Simple stat structure (compatible with POSIX)
-    struct {
-        uint32 st_dev;     // Device ID
-        uint32 st_ino;     // Inode number  
-        uint32 st_mode;    // File mode
-        uint32 st_nlink;   // Number of hard links
-        uint32 st_uid;     // User ID
-        uint32 st_gid;     // Group ID
-        uint32 st_rdev;    // Device ID (if special file)
-        uint32 st_size;    // File size
-        uint32 st_blksize; // Block size
-        uint32 st_blocks;  // Number of blocks
-        uint32 st_atime;   // Access time
-        uint32 st_mtime;   // Modify time
-        uint32 st_ctime;   // Change time
-    }* stat_buf = (void*)stat_ptr;
+    stat_stub_t* stat_buf = (void*)stat_ptr;
     
     // Fill with dummy values
     stat_buf->st_dev = 1;
@@ -462,13 +655,12 @@ static int32 sys_fstat(sys_arg_t fd, sys_arg_t stat_ptr) {
         return SYSCALL_EFAULT;
     }
 
+    if (!user_buffer_writable((void*)stat_ptr, sizeof(stat_stub_t))) {
+        return SYSCALL_EFAULT;
+    }
+
     // Same structure as sys_stat
-    struct {
-        uint32 st_dev, st_ino, st_mode, st_nlink;
-        uint32 st_uid, st_gid, st_rdev, st_size;
-        uint32 st_blksize, st_blocks;
-        uint32 st_atime, st_mtime, st_ctime;
-    }* stat_buf = (void*)stat_ptr;
+    stat_stub_t* stat_buf = (void*)stat_ptr;
 
     if (fd < 3 || net_is_fd(fd)) {
         // Treat stdio and sockets as character devices
@@ -517,7 +709,12 @@ static int32 sys_access(sys_arg_t path_ptr, sys_arg_t mode) {
     }
     
     (void)mode;
-    if (!vfs_read_file((const char*)path_ptr, 0, 0)) {
+    char path_buf[128];
+    if (!user_copy_string(path_buf, sizeof(path_buf), (const char*)path_ptr)) {
+        return SYSCALL_EFAULT;
+    }
+
+    if (!vfs_read_file(path_buf, 0, 0)) {
         return SYSCALL_ENOENT;
     }
     return 0; // Read-only filesystem; treat as accessible if present
@@ -566,6 +763,9 @@ static int32 sys_ioctl(sys_arg_t fd, sys_arg_t request, sys_arg_t arg) {
     switch (request) {
         case 0x5401: // TCGETS - get terminal attributes
             if (!arg) return SYSCALL_EFAULT;
+            if (!user_buffer_writable((void*)arg, 60)) {
+                return SYSCALL_EFAULT;
+            }
             // Fill with dummy terminal attributes
             memory_set((uint8*)arg, 0, 60); // sizeof(struct termios)
             return 0;
@@ -661,6 +861,9 @@ static int32 sys_user(sys_arg_t op, sys_arg_t arg2, sys_arg_t arg3, sys_arg_t ar
 
     switch (op) {
         case USER_OP_LOGIN: {
+            if (!user_buffer_readable(user, 1) || !user_buffer_readable(pass, 1)) {
+                return SYSCALL_EFAULT;
+            }
             auth_user_info_t info = {0};
             res = auth_login(user, pass, &info);
             if (res == AUTH_OK && current_task) {
@@ -669,23 +872,50 @@ static int32 sys_user(sys_arg_t op, sys_arg_t arg2, sys_arg_t arg3, sys_arg_t ar
                 current_task->groups_mask = info.groups_mask;
             }
             if (out_info) {
+                if (!user_buffer_writable(out_info, sizeof(auth_user_info_t))) {
+                    return SYSCALL_EFAULT;
+                }
                 memory_copy((const char*)&info, (char*)out_info, sizeof(auth_user_info_t));
             }
             break;
         }
         case USER_OP_SIGNUP:
+            if (!user_buffer_readable(user, 1) || !user_buffer_readable(pass, 1)) {
+                return SYSCALL_EFAULT;
+            }
             res = auth_signup(user, pass, aux, false);
             break;
         case USER_OP_PASSWD:
+            if (!user_buffer_readable(user, 1) || !user_buffer_readable(pass, 1)) {
+                return SYSCALL_EFAULT;
+            }
             res = auth_change_password(user, pass);
             break;
         case USER_OP_GROUP:
+            if (!user_buffer_readable(aux, 1)) {
+                return SYSCALL_EFAULT;
+            }
             res = auth_add_group(aux, 0);
             break;
         case USER_OP_CURRENT:
+            if (out_info && !user_buffer_writable(out_info, sizeof(auth_user_info_t))) {
+                return SYSCALL_EFAULT;
+            }
             res = auth_get_current(out_info);
             break;
         case USER_OP_LIST:
+            if (out_info) {
+                size_t total_bytes = (size_t)extra * sizeof(auth_user_info_t);
+                if (extra > 0 && total_bytes / sizeof(auth_user_info_t) != (size_t)extra) {
+                    return SYSCALL_ERANGE;
+                }
+                if (!user_buffer_writable(out_info, total_bytes)) {
+                    return SYSCALL_EFAULT;
+                }
+            }
+            if (aux && !user_buffer_writable((void*)aux, sizeof(uint32))) {
+                return SYSCALL_EFAULT;
+            }
             res = auth_list(out_info, extra, (uint32*)aux);
             break;
         case USER_OP_LOGOUT:
@@ -706,8 +936,11 @@ static int32 sys_unlink(sys_arg_t path_ptr) {
     if (!path_ptr) {
         return SYSCALL_EFAULT;
     }
-    const char* path = (const char*)path_ptr;
-    if (!vfs_read_file(path, 0, 0)) {
+    char path_buf[128];
+    if (!user_copy_string(path_buf, sizeof(path_buf), (const char*)path_ptr)) {
+        return SYSCALL_EFAULT;
+    }
+    if (!vfs_read_file(path_buf, 0, 0)) {
         return SYSCALL_ENOENT;
     }
     // Initrd is read-only, so unlink is not supported yet.

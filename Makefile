@@ -104,11 +104,11 @@ endif
 # Common flags
 COMMON_CFLAGS := $(ARCH_FLAGS) -ffreestanding -nostdlib -fno-pic -fno-pie \
                  -Wall -Wextra -I$(SRCDIR)/include -Ilibs/uacpi/include \
-                 -mno-sse -mno-sse2 -mno-mmx -mno-3dnow -fcf-protection=none
+                 -fcf-protection=none
 
 # Architecture-specific flags
 ifeq ($(ARCH),32)
-    COMMON_CFLAGS += -mno-red-zone
+    COMMON_CFLAGS += -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-3dnow
 else ifeq ($(ARCH),64)
     COMMON_CFLAGS += -mno-red-zone -mcmodel=kernel -mno-mmx -mno-sse3
 endif
@@ -187,7 +187,8 @@ EXCLUDED_CSOURCES := \
     $(SRCDIR)/smp_interrupt_distribution.c \
     $(SRCDIR)/spurious_interrupt.c \
     $(SRCDIR)/watchdog_interrupt_support.c \
-    $(SRCDIR)/interrupt_driven_io.c
+    $(SRCDIR)/interrupt_driven_io.c \
+    $(SRCDIR)/stb_vorbis.c
 
 EXCLUDED_CSOURCES := $(filter-out $(SRCDIR)/interrupt.c $(SRCDIR)/interrupt_handlers.c $(SRCDIR)/interrupt_utils.c,$(EXCLUDED_CSOURCES))
 
@@ -197,6 +198,13 @@ PANICUI_CSOURCES := $(wildcard $(SRCDIR)/panicui*.c)
 # Exclude boot files from wildcard, add correct one based on BOOT_ASM variable
 ASMSOURCES_RAW := $(wildcard $(SRCDIR)/*.asm $(SRCDIR)/*.s)
 ASMSOURCES := $(filter-out $(SRCDIR)/boot.asm $(SRCDIR)/boot64.asm,$(ASMSOURCES_RAW)) $(BOOT_ASM)
+# Avoid duplicate object names for the interrupt stub sources: pick the 64-bit
+# implementation on x86_64 and the 32-bit implementation otherwise.
+ifeq ($(ARCH),64)
+    ASMSOURCES := $(filter-out $(SRCDIR)/interrupt_stubs.asm,$(ASMSOURCES))
+else
+    ASMSOURCES := $(filter-out $(SRCDIR)/interrupt_stubs.s,$(ASMSOURCES))
+endif
 UACPI_CSOURCES := $(wildcard $(UACPI_SRCDIR)/*.c)
 
 # Boot mode specific sources
@@ -394,6 +402,20 @@ $(OBJDIR)/%.o: $(SRCDIR)/%.s
 	@mkdir -p $(OBJDIR)
 	@echo "$(OK_COLOR)Assembling $<...$(NO_COLOR)"
 	@$(AS) $(ASFLAGS) -o $@ $<
+
+# Disambiguate the dual interrupt stub sources by architecture so the correct
+# NASM file is assembled when both .asm and .s variants exist.
+ifeq ($(ARCH),64)
+$(OBJDIR)/interrupt_stubs.o: $(SRCDIR)/interrupt_stubs.s
+	@mkdir -p $(OBJDIR)
+	@echo "$(OK_COLOR)Assembling $<...$(NO_COLOR)"
+	@$(AS) $(ASFLAGS) -o $@ $<
+else
+$(OBJDIR)/interrupt_stubs.o: $(SRCDIR)/interrupt_stubs.asm
+	@mkdir -p $(OBJDIR)
+	@echo "$(OK_COLOR)Assembling $<...$(NO_COLOR)"
+	@$(AS) $(ASFLAGS) -o $@ $<
+endif
 
 # Graphics subdirectory compilation
 $(OBJDIR)/graphics/%.o: $(SRCDIR)/graphics/%.c

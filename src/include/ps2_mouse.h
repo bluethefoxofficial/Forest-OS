@@ -33,5 +33,6 @@ void ps2_mouse_irq_handler(struct interrupt_frame* frame, uint32 error_code);
 void ps2_mouse_register_event_callback(ps2_mouse_event_callback_t callback);
 ps2_mouse_state_t ps2_mouse_get_state(void);
 bool ps2_mouse_disable_reporting(void);
+void ps2_mouse_poll(void);
 
 #endif

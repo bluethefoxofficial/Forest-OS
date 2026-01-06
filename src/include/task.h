@@ -5,6 +5,8 @@
 #include "elf.h"
 #include "memory.h" // For page_directory_t
 
+#define USER_HEAP_GUARD_PAGES 1
+
 // Process states
 typedef enum {
     TASK_STATE_RUNNING,
@@ -22,6 +24,10 @@ typedef struct task {
     uint32 kernel_stack_base;   // Base address of the allocated kernel stack
     page_directory_t* page_directory; // Page directory for this task
     elf_load_info_t elf_info;   // ELF loading information (for cleanup, etc.)
+    // Userspace memory layout (per-task brk/heap tracking)
+    uint32 user_heap_base;      // Lowest heap address (page-aligned)
+    uint32 user_heap_limit;     // Highest heap address allowed before the stack
+    uint32 user_brk;            // Current program break (may be unaligned)
     int32 exit_code;            // Exit status (set when task terminates)
     char  exit_reason[32];      // Short reason string for termination
     uint32 uid;                 // Owning user

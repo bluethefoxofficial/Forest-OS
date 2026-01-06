@@ -34,6 +34,7 @@ typedef struct {
     uint32 height;
     uint32 bpp;
     bool top_down;         // true if height is negative (top-down), false if bottom-up
+    bool owns_data;        // true if pixel_data was heap-allocated and must be freed
     uint8* pixel_data;     // Raw pixel data (BGR or BGRA format)
     uint32 pixel_data_size;
 } bmp_image_t;

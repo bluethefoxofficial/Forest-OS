@@ -1,1235 +1,899 @@
 /*
- * Forest OS PanicUI - Graphical Kernel Panic Interface
- * 
- * A modern, interactive graphical interface for kernel panic handling.
- * Features mouse navigation, tabbed interface, memory visualization,
- * stack trace inspection, and comprehensive debugging information.
- * 
- * This module provides a professional X11-style windowed interface
- * for handling critical system errors in a user-friendly manner.
+ * Forest OS PanicUI - Framebuffer-Based Kernel Panic Screen
+ *
+ * A clean, direct framebuffer panic display using graphics_draw_text
+ * for text rendering. Does not use TTY to avoid buffer conflicts.
  */
 
-#include "panicui.h"
-#include "system.h"
-#include "memory.h"
-#include "string.h"
-#include "debuglog.h"
-#include "kb.h"
-#include "util.h"
-#include "hardware.h"
+#include "include/panicui.h"
+#include "include/tty.h"
+#include "include/system.h"
+#include "include/memory.h"
+#include "include/string.h"
+#include "include/debuglog.h"
+#include "include/util.h"
+#include "include/hardware.h"
+#include "include/ps2_mouse.h"
+#include "include/keyboard_layout.h"
+#include "include/ps2_keyboard.h"
 #include "include/libc/stdio.h"
-#include "include/libc/math.h"
-#include "panicui_gfx.h"
-#include "panicui_input.h"
-#include "panicui_wm.h"
-
-// Math constants
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+#include "include/graphics/graphics_manager.h"
+#include "include/graphics/font_renderer.h"
 
 // =============================================================================
-// GLOBAL STATE
+// PANIC UI CONFIGURATION
 // =============================================================================
 
-static panicui_context_t g_panicui;
-static bool g_panicui_active = false;
+#define PANIC_VERSION "2.0"
 
-// Tab names for the interface
-static const char* g_tab_names[PANICUI_PANEL_COUNT] = {
-    "Overview",
-    "Registers", 
-    "Memory",
-    "Stack Trace",
-    "System Info",
-    "Colors",
-    "Recovery"
+// Graphics colors for framebuffer drawing
+static const graphics_color_t PANIC_COLOR_BG       = {0, 0, 120, 255};      // Blue background
+static const graphics_color_t PANIC_COLOR_HEADER   = {0, 0, 170, 255};      // Lighter blue header
+static const graphics_color_t PANIC_COLOR_WHITE    = {255, 255, 255, 255};  // White
+static const graphics_color_t PANIC_COLOR_RED      = {255, 80, 80, 255};    // Red for errors
+static const graphics_color_t PANIC_COLOR_YELLOW   = {255, 255, 0, 255};    // Yellow
+static const graphics_color_t PANIC_COLOR_CYAN     = {0, 255, 255, 255};    // Cyan
+static const graphics_color_t PANIC_COLOR_GRAY     = {180, 180, 180, 255};  // Light gray
+
+// Character dimensions (8x8 font assumed)
+#define CHAR_WIDTH  8
+#define CHAR_HEIGHT 8
+
+// =============================================================================
+// PANIC UI STATE
+// =============================================================================
+
+typedef enum {
+    PANIC_PAGE_OVERVIEW = 0,
+    PANIC_PAGE_REGISTERS,
+    PANIC_PAGE_MEMORY,
+    PANIC_PAGE_STACK,
+    PANIC_PAGE_SYSTEM,
+    PANIC_PAGE_MAX
+} panic_page_t;
+
+static struct {
+    bool initialized;
+    bool active;
+
+    // Screen dimensions
+    uint32_t screen_width;
+    uint32_t screen_height;
+
+    // Current page
+    panic_page_t current_page;
+    int32_t scroll_offset;
+
+    // Panic information
+    char message[512];
+    char file[256];
+    uint32_t line;
+    uint32_t fault_addr;
+    uint32_t error_code;
+
+    // CPU state
+    struct {
+        uint32_t eax, ebx, ecx, edx;
+        uint32_t esi, edi, ebp, esp;
+        uint32_t eip, eflags;
+        uint32_t cr0, cr2, cr3, cr4;
+        uint16_t cs, ds, es, fs, gs, ss;
+    } regs;
+
+    // Stack trace
+    uint32_t stack_trace[16];
+    uint32_t stack_count;
+
+    // Font
+    font_t* font;
+
+    // Mouse
+    int32_t mouse_x;
+    int32_t mouse_y;
+    bool mouse_left;
+    bool mouse_right;
+    bool mouse_enabled;
+} g_panic = {0};
+
+// Page titles
+static const char* g_page_titles[PANIC_PAGE_MAX] = {
+    "OVERVIEW",
+    "CPU REGISTERS",
+    "MEMORY",
+    "STACK TRACE",
+    "SYSTEM INFO"
 };
 
 // =============================================================================
-// GRAPHICS PRIMITIVES AND UTILITIES
+// INPUT BUFFER (EVENT + DIRECT POLL)
 // =============================================================================
 
-// Draw a rounded rectangle with gradient effect
-void panicui_draw_rounded_rect(graphics_rect_t rect, graphics_color_t color, 
-                               uint32_t radius, bool gradient) {
-    // For simplicity, draw regular rectangles for now
-    // TODO: Implement proper rounded corners and gradients
-    if (gradient) {
-        // Simple vertical gradient effect
-        for (uint32_t y = 0; y < rect.height; y++) {
-            uint8_t alpha = (uint8_t)(255 * y / rect.height);
-            graphics_color_t grad_color = panicui_darken_color(color, alpha / 8);
-            graphics_rect_t line_rect = {rect.x, rect.y + y, rect.width, 1};
-            graphics_draw_rect(&line_rect, grad_color, true);
-        }
-    } else {
-        graphics_draw_rect(&rect, color, true);
+#define PANIC_KEY_QUEUE_CAP 32
+static volatile uint8_t g_key_head = 0;
+static volatile uint8_t g_key_tail = 0;
+static key_code_t g_key_queue[PANIC_KEY_QUEUE_CAP];
+static bool g_seen_extended = false;
+
+static void panic_enqueue_key(key_code_t code) {
+    uint8_t next = (uint8_t)((g_key_head + 1) % PANIC_KEY_QUEUE_CAP);
+    g_key_queue[g_key_head] = code;
+    g_key_head = next;
+    if (g_key_head == g_key_tail) {
+        g_key_tail = (uint8_t)((g_key_tail + 1) % PANIC_KEY_QUEUE_CAP);
     }
 }
 
-// Draw rectangle with border and enhanced shadow
-void panicui_draw_rect_with_border(graphics_rect_t rect, graphics_color_t bg, 
-                                  graphics_color_t border, uint32_t border_width) {
-    // Draw multi-layer shadow for depth
-    for (int i = 3; i >= 1; i--) {
-        graphics_rect_t shadow_rect = {rect.x + i, rect.y + i, rect.width, rect.height};
-        graphics_color_t shadow_color = {0, 0, 0, 16 - (i * 4)};
-        graphics_draw_rect(&shadow_rect, shadow_color, true);
+static bool panic_dequeue_key(key_code_t* code) {
+    if (!code || g_key_head == g_key_tail) {
+        return false;
     }
-    
-    // Draw main background
-    graphics_draw_rect(&rect, bg, true);
-    
-    // Draw border with enhanced styling
-    if (border_width > 0) {
-        // Top border (lighter for 3D effect)
-        graphics_rect_t top = {rect.x, rect.y, rect.width, border_width};
-        graphics_color_t top_color = panicui_lighten_color(border, 40);
-        graphics_draw_rect(&top, top_color, true);
-        
-        // Bottom border (darker for 3D effect)
-        graphics_rect_t bottom = {rect.x, rect.y + rect.height - border_width, 
-                                 rect.width, border_width};
-        graphics_color_t bottom_color = panicui_darken_color(border, 40);
-        graphics_draw_rect(&bottom, bottom_color, true);
-        
-        // Left border (lighter)
-        graphics_rect_t left = {rect.x, rect.y, border_width, rect.height};
-        graphics_draw_rect(&left, top_color, true);
-        
-        // Right border (darker)
-        graphics_rect_t right = {rect.x + rect.width - border_width, rect.y, 
-                                border_width, rect.height};
-        graphics_draw_rect(&right, bottom_color, true);
-    }
+    *code = g_key_queue[g_key_tail];
+    g_key_tail = (uint8_t)((g_key_tail + 1) % PANIC_KEY_QUEUE_CAP);
+    return true;
 }
 
-// Draw text with drop shadow for better readability
-void panicui_draw_text_with_shadow(int32_t x, int32_t y, const char* text, 
-                                  font_t* font, graphics_color_t color) {
-    if (!text || !font) return;
-    
-    // Draw shadow (offset by 1 pixel)
-    graphics_color_t shadow_color = {0, 0, 0, 128};
-    graphics_draw_text(x + 1, y + 1, text, font, shadow_color);
-    
-    // Draw main text
-    graphics_draw_text(x, y, text, font, color);
-}
-
-// Draw a modern-style button with hover and pressed states
-void panicui_draw_button(graphics_rect_t bounds, const char* text, bool pressed, bool hovered) {
-    graphics_color_t bg_color = PANICUI_COLOR_BG_ACCENT;
-    graphics_color_t border_color = PANICUI_COLOR_BORDER;
-    
-    if (pressed) {
-        bg_color = panicui_darken_color(bg_color, 30);
-        border_color = PANICUI_COLOR_HIGHLIGHT;
-        bounds.x += 1;
-        bounds.y += 1;
-    } else if (hovered) {
-        bg_color = panicui_lighten_color(bg_color, 20);
-        border_color = PANICUI_COLOR_HIGHLIGHT;
-    }
-    
-    panicui_draw_rect_with_border(bounds, bg_color, border_color, 1);
-    
-    // Center text in button
-    if (text && g_panicui.font_normal) {
-        uint32_t text_width, text_height;
-        if (graphics_get_text_bounds(text, g_panicui.font_normal, &text_width, &text_height) == GRAPHICS_SUCCESS) {
-            int32_t text_x = bounds.x + (bounds.width - text_width) / 2;
-            int32_t text_y = bounds.y + (bounds.height - text_height) / 2;
-            panicui_draw_text_with_shadow(text_x, text_y, text, g_panicui.font_normal, PANICUI_COLOR_TEXT_PRIMARY);
-        }
-    }
-}
-
-// Get text bounds for layout calculations
-graphics_rect_t panicui_get_text_bounds(const char* text, font_t* font) {
-    graphics_rect_t bounds = {0, 0, 0, 0};
-    if (text && font) {
-        graphics_get_text_bounds(text, font, &bounds.width, &bounds.height);
-    }
-    return bounds;
-}
-
-// Color manipulation utilities
-graphics_color_t panicui_blend_colors(graphics_color_t a, graphics_color_t b, uint8_t alpha) {
-    graphics_color_t result;
-    result.r = (a.r * (255 - alpha) + b.r * alpha) / 255;
-    result.g = (a.g * (255 - alpha) + b.g * alpha) / 255;
-    result.b = (a.b * (255 - alpha) + b.b * alpha) / 255;
-    result.a = (a.a * (255 - alpha) + b.a * alpha) / 255;
-    return result;
-}
-
-graphics_color_t panicui_darken_color(graphics_color_t color, uint8_t amount) {
-    graphics_color_t result = color;
-    result.r = (result.r > amount) ? result.r - amount : 0;
-    result.g = (result.g > amount) ? result.g - amount : 0;
-    result.b = (result.b > amount) ? result.b - amount : 0;
-    return result;
-}
-
-graphics_color_t panicui_lighten_color(graphics_color_t color, uint8_t amount) {
-    graphics_color_t result = color;
-    result.r = (result.r + amount < 255) ? result.r + amount : 255;
-    result.g = (result.g + amount < 255) ? result.g + amount : 255;
-    result.b = (result.b + amount < 255) ? result.b + amount : 255;
-    return result;
-}
-
-// =============================================================================
-// CORE INITIALIZATION AND MANAGEMENT
-// =============================================================================
-
-graphics_result_t panicui_init(void) {
-    debuglog(DEBUG_INFO, "[PanicUI] Initializing graphics panic interface...\n");
-    
-    // Clear context
-    memset(&g_panicui, 0, sizeof(panicui_context_t));
-    
-    // Check if graphics subsystem is available
-    if (!graphics_is_initialized()) {
-        debuglog(DEBUG_WARN, "[PanicUI] Graphics subsystem not initialized\n");
-        g_panicui.graphics_mode_available = false;
-        return GRAPHICS_ERROR_NOT_SUPPORTED;
-    }
-    
-    // Get current video mode
-    video_mode_t mode;
-    if (graphics_get_current_mode(&mode) != GRAPHICS_SUCCESS) {
-        debuglog(DEBUG_ERROR, "[PanicUI] Failed to get current video mode\n");
-        return GRAPHICS_ERROR_GENERIC;
-    }
-    
-    g_panicui.screen_width = mode.width;
-    g_panicui.screen_height = mode.height;
-    
-    // Ensure minimum resolution for GUI
-    if (g_panicui.screen_width < PANICUI_MIN_WIDTH || g_panicui.screen_height < PANICUI_MIN_HEIGHT) {
-        // Try to set a suitable graphics mode
-        graphics_result_t result = graphics_set_mode(PANICUI_MIN_WIDTH, PANICUI_MIN_HEIGHT, 32, 60);
-        if (result != GRAPHICS_SUCCESS) {
-            debuglog(DEBUG_WARN, "[PanicUI] Failed to set graphics mode, using current resolution\n");
-        } else {
-            g_panicui.screen_width = PANICUI_MIN_WIDTH;
-            g_panicui.screen_height = PANICUI_MIN_HEIGHT;
-        }
-    }
-    
-    // Load fonts
-    graphics_load_font(NULL, PANICUI_FONT_SIZE_LARGE, &g_panicui.font_large);
-    graphics_load_font(NULL, PANICUI_FONT_SIZE_NORMAL, &g_panicui.font_normal);
-    graphics_load_font(NULL, PANICUI_FONT_SIZE_SMALL, &g_panicui.font_small);
-    
-    // Calculate window bounds (centered on screen)
-    uint32_t window_width = (g_panicui.screen_width * 90) / 100;  // 90% of screen width
-    uint32_t window_height = (g_panicui.screen_height * 85) / 100; // 85% of screen height
-    
-    g_panicui.window_bounds.x = (g_panicui.screen_width - window_width) / 2;
-    g_panicui.window_bounds.y = (g_panicui.screen_height - window_height) / 2;
-    g_panicui.window_bounds.width = window_width;
-    g_panicui.window_bounds.height = window_height;
-    
-    // Initialize titlebar
-    g_panicui.titlebar.bounds.x = g_panicui.window_bounds.x;
-    g_panicui.titlebar.bounds.y = g_panicui.window_bounds.y;
-    g_panicui.titlebar.bounds.width = g_panicui.window_bounds.width;
-    g_panicui.titlebar.bounds.height = PANICUI_TITLEBAR_HEIGHT;
-    strcpy(g_panicui.titlebar.title, PANICUI_TITLE);
-    
-    // Initialize status bar
-    g_panicui.statusbar.bounds.x = g_panicui.window_bounds.x;
-    g_panicui.statusbar.bounds.y = g_panicui.window_bounds.y + g_panicui.window_bounds.height - PANICUI_STATUSBAR_HEIGHT;
-    g_panicui.statusbar.bounds.width = g_panicui.window_bounds.width;
-    g_panicui.statusbar.bounds.height = PANICUI_STATUSBAR_HEIGHT;
-    strcpy(g_panicui.statusbar.status_text, "Kernel Panic - System Halted");
-    
-    // Initialize tabs
-    uint32_t tab_width = (g_panicui.window_bounds.width - PANICUI_SIDEBAR_WIDTH) / PANICUI_PANEL_COUNT;
-    for (uint32_t i = 0; i < PANICUI_PANEL_COUNT; i++) {
-        panicui_tab_t* tab = &g_panicui.tabs[i];
-        tab->base.bounds.x = g_panicui.window_bounds.x + PANICUI_SIDEBAR_WIDTH + i * tab_width;
-        tab->base.bounds.y = g_panicui.window_bounds.y + PANICUI_TITLEBAR_HEIGHT;
-        tab->base.bounds.width = tab_width;
-        tab->base.bounds.height = PANICUI_TAB_HEIGHT;
-        tab->base.visible = true;
-        tab->base.enabled = true;
-        tab->panel_type = (panicui_panel_type_t)i;
-        strcpy(tab->text, g_tab_names[i]);
-        tab->active = (i == 0);
-    }
-    
-    // Initialize panels
-    for (uint32_t i = 0; i < PANICUI_PANEL_COUNT; i++) {
-        panicui_panel_t* panel = &g_panicui.panels[i];
-        panel->base.bounds.x = g_panicui.window_bounds.x + PANICUI_SIDEBAR_WIDTH;
-        panel->base.bounds.y = g_panicui.window_bounds.y + PANICUI_TITLEBAR_HEIGHT + PANICUI_TAB_HEIGHT;
-        panel->base.bounds.width = g_panicui.window_bounds.width - PANICUI_SIDEBAR_WIDTH;
-        panel->base.bounds.height = g_panicui.window_bounds.height - PANICUI_TITLEBAR_HEIGHT - PANICUI_TAB_HEIGHT - PANICUI_STATUSBAR_HEIGHT;
-        panel->base.visible = (i == 0);
-        panel->type = (panicui_panel_type_t)i;
-        panel->active = (i == 0);
-        sprintf(panel->title, "%s", g_tab_names[i]);
-    }
-    
-    g_panicui.active_panel = PANICUI_PANEL_OVERVIEW;
-    
-    // Enable double buffering for smooth rendering
-    graphics_enable_double_buffering(true);
-    
-    // Initialize the window manager and input handlers
-    panicui_wm_init();
-    panicui_init_input();
-    
-    g_panicui.graphics_mode_available = true;
-    g_panicui.initialized = true;
-    g_panicui.need_redraw = true;
-    g_panicui.enable_animations = true;
-    
-    debuglog(DEBUG_INFO, "[PanicUI] Graphics panic interface initialized (%ux%u)\n", 
-             g_panicui.screen_width, g_panicui.screen_height);
-    
-    return GRAPHICS_SUCCESS;
-}
-
-void panicui_shutdown(void) {
-    if (!g_panicui.initialized) return;
-    
-    debuglog(DEBUG_INFO, "[PanicUI] Shutting down graphics panic interface\n");
-    
-    // Unload fonts
-    if (g_panicui.font_large) graphics_unload_font(g_panicui.font_large);
-    if (g_panicui.font_normal) graphics_unload_font(g_panicui.font_normal);
-    if (g_panicui.font_small) graphics_unload_font(g_panicui.font_small);
-    
-    // Clean up surfaces
-    if (g_panicui.main_surface) graphics_destroy_surface(g_panicui.main_surface);
-    if (g_panicui.back_buffer) graphics_destroy_surface(g_panicui.back_buffer);
-    
-    // Disable double buffering
-    graphics_enable_double_buffering(false);
-    
-    memset(&g_panicui, 0, sizeof(panicui_context_t));
-    g_panicui_active = false;
-}
-
-bool panicui_is_graphics_available(void) {
-    return g_panicui.graphics_mode_available && graphics_is_initialized();
-}
-
-panicui_context_t* panicui_get_context(void) {
-    return &g_panicui;
-}
-
-// =============================================================================
-// MAIN INTERFACE FUNCTIONS  
-// =============================================================================
-
-void panicui_show_panic(const char* message, const char* file, uint32_t line, 
-                       uint32_t fault_addr, uint32_t error_code) {
-    if (!panicui_is_graphics_available()) {
-        debuglog(DEBUG_ERROR, "[PanicUI] Graphics mode not available for panic display\n");
+static void panicui_keyboard_callback(const keyboard_event_t* event) {
+    if (!event || event->state != KEY_STATE_PRESSED) {
         return;
     }
-    
-    // Store panic information
-    if (message) {
-        strncpy(g_panicui.panic_message, message, sizeof(g_panicui.panic_message) - 1);
-        g_panicui.panic_message[sizeof(g_panicui.panic_message) - 1] = '\0';
-    }
-    if (file) {
-        strncpy(g_panicui.panic_file, file, sizeof(g_panicui.panic_file) - 1);
-        g_panicui.panic_file[sizeof(g_panicui.panic_file) - 1] = '\0';
-    }
-    g_panicui.panic_line = line;
-    g_panicui.fault_address = fault_addr;
-    g_panicui.error_code = error_code;
-    
-    // Collect system information for all panels
-    panicui_collect_register_info();
-    panicui_collect_memory_info(fault_addr);
-    panicui_collect_stack_trace();
-    panicui_collect_system_info();
-    panicui_generate_recovery_suggestions();
-    
-    // Mark for redraw
-    g_panicui.need_redraw = true;
-    g_panicui_active = true;
-    
-    debuglog(DEBUG_INFO, "[PanicUI] Displaying panic: %s at %s:%u\n", message, file, line);
-    
-    // Enter main event loop
-    panicui_main_loop();
+    panic_enqueue_key(event->key_code);
 }
 
-void panicui_main_loop(void) {
-    g_panicui.frame_count = 0;
-    g_panicui.last_fps_time = 0; // TODO: Get system timer
-    
-    while (g_panicui_active) {
-        // Input is handled by the graphics manager via callbacks.
-        // The main loop just needs to keep running.
-        
-        // Render frame if needed
-        if (g_panicui.need_redraw) {
-            panicui_render_frame();
-            g_panicui.need_redraw = false;
-            g_panicui.frame_count++;
-        }
-        
-        // Small delay to prevent excessive CPU usage
-        // TODO: Implement proper VSync waiting
-        for (volatile int i = 0; i < 100000; i++);
+// Fallback: poll controller directly (in case IRQ path is dead)
+static bool panic_poll_direct_key(key_code_t* out_code) {
+    uint8_t status = inportb(0x64);
+
+    // If AUX (mouse) data is pending, flush it via the mouse poller and skip this turn
+    if (status & 0x20) {
+        ps2_mouse_poll();
+        return false;
     }
+
+    if ((status & 0x01) == 0) {
+        return false;  // No data
+    }
+
+    uint8_t scancode = inportb(0x60);
+    if (scancode == 0xE0) {
+        g_seen_extended = true;
+        return false;
+    }
+    if (scancode == 0xE1) {
+        g_seen_extended = false;
+        return false;
+    }
+
+    bool release = (scancode & 0x80U) != 0;
+    scancode &= 0x7F;
+
+    if (release) {
+        g_seen_extended = false;
+        return false;
+    }
+
+    key_code_t code = keyboard_scancode_set1_lookup(scancode, g_seen_extended);
+    g_seen_extended = false;
+    if (code == KEY_UNKNOWN) {
+        return false;
+    }
+
+    if (out_code) {
+        *out_code = code;
+    }
+    return true;
+}
+
+// =============================================================================
+// DIRECT GRAPHICS DRAWING HELPERS
+// =============================================================================
+
+static void panic_fill_rect(int32_t x, int32_t y, uint32_t w, uint32_t h, graphics_color_t color) {
+    graphics_rect_t rect = {x, y, w, h};
+    graphics_draw_rect(&rect, color, true);
+}
+
+// Simple crosshair cursor for panic UI
+static void panic_draw_cursor(void) {
+    if (!g_panic.mouse_enabled) {
+        return;
+    }
+
+    int32_t x = g_panic.mouse_x;
+    int32_t y = g_panic.mouse_y;
+
+    // Horizontal line
+    graphics_draw_line(x - 6, y, x + 6, y, PANIC_COLOR_WHITE);
+    // Vertical line
+    graphics_draw_line(x, y - 6, x, y + 6, PANIC_COLOR_WHITE);
+    // Center dot
+    graphics_draw_pixel(x, y, PANIC_COLOR_RED);
+}
+
+// Draw text at pixel position
+static void panic_draw_text(int32_t x, int32_t y, const char* text, graphics_color_t color) {
+    graphics_draw_text(x, y, text, g_panic.font, color);
+}
+
+// =============================================================================
+// PAGE RENDERING
+// =============================================================================
+
+static void panic_render_header(void) {
+    // Header background
+    panic_fill_rect(0, 0, g_panic.screen_width, 48, PANIC_COLOR_HEADER);
+    graphics_draw_line(0, 47, g_panic.screen_width - 1, 47, PANIC_COLOR_WHITE);
+
+    // Title
+    panic_draw_text(16, 8, "FOREST OS - KERNEL PANIC", PANIC_COLOR_WHITE);
+
+    // Page info
+    char page_info[64];
+    sprintf(page_info, "Page [%d/%d]: %s",
+            g_panic.current_page + 1, PANIC_PAGE_MAX,
+            g_page_titles[g_panic.current_page]);
+    panic_draw_text(16, 28, page_info, PANIC_COLOR_CYAN);
+}
+
+static void panic_render_footer(void) {
+    uint32_t footer_y = g_panic.screen_height - 32;
+
+    // Footer background
+    panic_fill_rect(0, footer_y, g_panic.screen_width, 32, PANIC_COLOR_HEADER);
+    graphics_draw_line(0, footer_y, g_panic.screen_width - 1, footer_y, PANIC_COLOR_WHITE);
+
+    // Navigation help
+    panic_draw_text(16, footer_y + 12,
+        "[LEFT/RIGHT] Page  [UP/DOWN] Scroll  [R] Reboot  [H] Halt", PANIC_COLOR_YELLOW);
+}
+
+static void panic_render_overview(void) {
+    int32_t y = 64;
+    int32_t x = 16;
+
+    // Error title
+    panic_draw_text(x, y, "*** STOP: KERNEL PANIC ***", PANIC_COLOR_RED);
+    y += 24;
+
+    // Error message
+    panic_draw_text(x, y, g_panic.message, PANIC_COLOR_WHITE);
+    y += 16;
+
+    // Location
+    char loc[128];
+    sprintf(loc, "Location: %s:%u", g_panic.file, g_panic.line);
+    panic_draw_text(x, y, loc, PANIC_COLOR_CYAN);
+    y += 16;
+
+    // Fault info
+    char fault[128];
+    sprintf(fault, "Fault Address: 0x%08X  Error Code: 0x%08X",
+            g_panic.fault_addr, g_panic.error_code);
+    panic_draw_text(x, y, fault, PANIC_COLOR_YELLOW);
+    y += 32;
+
+    // Quick CPU info
+    panic_draw_text(x, y, "Quick Info:", PANIC_COLOR_CYAN);
+    y += 16;
+
+    char reg_info[128];
+    sprintf(reg_info, "EIP: 0x%08X  ESP: 0x%08X  EBP: 0x%08X",
+            g_panic.regs.eip, g_panic.regs.esp, g_panic.regs.ebp);
+    panic_draw_text(x + 16, y, reg_info, PANIC_COLOR_WHITE);
+    y += 12;
+
+    sprintf(reg_info, "CR2: 0x%08X  CR3: 0x%08X  EFLAGS: 0x%08X",
+            g_panic.regs.cr2, g_panic.regs.cr3, g_panic.regs.eflags);
+    panic_draw_text(x + 16, y, reg_info, PANIC_COLOR_WHITE);
+    y += 32;
+
+    // Recommendations
+    panic_draw_text(x, y, "Recommendations:", PANIC_COLOR_CYAN);
+    y += 16;
+    panic_draw_text(x + 16, y, "1. Check recent code changes for bugs", PANIC_COLOR_GRAY);
+    y += 12;
+    panic_draw_text(x + 16, y, "2. Review the stack trace (page 4)", PANIC_COLOR_GRAY);
+    y += 12;
+    panic_draw_text(x + 16, y, "3. Verify memory operations are valid", PANIC_COLOR_GRAY);
+    y += 12;
+    panic_draw_text(x + 16, y, "4. Check for null pointer dereferences", PANIC_COLOR_GRAY);
+}
+
+static void panic_render_registers(void) {
+    int32_t y = 64;
+    int32_t x = 16;
+    char buf[64];
+
+    panic_draw_text(x, y, "CPU Register State:", PANIC_COLOR_CYAN);
+    y += 24;
+
+    // General purpose registers
+    sprintf(buf, "EAX: 0x%08X    EBX: 0x%08X", g_panic.regs.eax, g_panic.regs.ebx);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+    y += 12;
+
+    sprintf(buf, "ECX: 0x%08X    EDX: 0x%08X", g_panic.regs.ecx, g_panic.regs.edx);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+    y += 12;
+
+    sprintf(buf, "ESI: 0x%08X    EDI: 0x%08X", g_panic.regs.esi, g_panic.regs.edi);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+    y += 12;
+
+    sprintf(buf, "EBP: 0x%08X    ESP: 0x%08X", g_panic.regs.ebp, g_panic.regs.esp);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+    y += 24;
+
+    // Instruction pointer and flags
+    panic_draw_text(x, y, "Instruction Pointer & Flags:", PANIC_COLOR_CYAN);
+    y += 16;
+
+    sprintf(buf, "EIP: 0x%08X", g_panic.regs.eip);
+    panic_draw_text(x, y, buf, PANIC_COLOR_RED);
+    y += 12;
+
+    sprintf(buf, "EFLAGS: 0x%08X", g_panic.regs.eflags);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+    y += 12;
+
+    // Decode flags
+    uint32_t flags = g_panic.regs.eflags;
+    sprintf(buf, "CF=%d PF=%d ZF=%d SF=%d OF=%d IF=%d",
+            (flags & 0x1) ? 1 : 0,
+            (flags & 0x4) ? 1 : 0,
+            (flags & 0x40) ? 1 : 0,
+            (flags & 0x80) ? 1 : 0,
+            (flags & 0x800) ? 1 : 0,
+            (flags & 0x200) ? 1 : 0);
+    panic_draw_text(x + 16, y, buf, PANIC_COLOR_GRAY);
+    y += 24;
+
+    // Control registers
+    panic_draw_text(x, y, "Control Registers:", PANIC_COLOR_CYAN);
+    y += 16;
+
+    sprintf(buf, "CR0: 0x%08X    CR2: 0x%08X", g_panic.regs.cr0, g_panic.regs.cr2);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+    y += 12;
+
+    sprintf(buf, "CR3: 0x%08X    CR4: 0x%08X", g_panic.regs.cr3, g_panic.regs.cr4);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+    y += 24;
+
+    // Segment registers
+    panic_draw_text(x, y, "Segment Registers:", PANIC_COLOR_CYAN);
+    y += 16;
+
+    sprintf(buf, "CS: 0x%04X  DS: 0x%04X  ES: 0x%04X  FS: 0x%04X  GS: 0x%04X  SS: 0x%04X",
+            g_panic.regs.cs, g_panic.regs.ds, g_panic.regs.es,
+            g_panic.regs.fs, g_panic.regs.gs, g_panic.regs.ss);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+}
+
+static void panic_render_memory(void) {
+    int32_t y = 64;
+    int32_t x = 16;
+
+    panic_draw_text(x, y, "Memory Around Fault Address:", PANIC_COLOR_CYAN);
+    y += 16;
+
+    if (g_panic.fault_addr == 0) {
+        panic_draw_text(x, y, "No fault address available.", PANIC_COLOR_YELLOW);
+        return;
+    }
+
+    char buf[128];
+    sprintf(buf, "Fault Address: 0x%08X", g_panic.fault_addr);
+    panic_draw_text(x, y, buf, PANIC_COLOR_RED);
+    y += 24;
+
+    // Header
+    panic_draw_text(x, y, "Address     00 01 02 03 04 05 06 07  ASCII", PANIC_COLOR_YELLOW);
+    y += 12;
+
+    // Show memory around fault address
+    uint32_t base = (g_panic.fault_addr & ~0x7) - 0x20;
+
+    for (int row = 0; row < 8 && y < (int32_t)(g_panic.screen_height - 64); row++) {
+        uint32_t addr = base + row * 8;
+        char hex_part[64];
+        char ascii_part[16];
+
+        sprintf(hex_part, "0x%08X  ", addr);
+
+        for (int i = 0; i < 8; i++) {
+            uint32_t byte_addr = addr + i;
+            // Only read from kernel memory space safely
+            if (byte_addr >= 0xC0000000) {
+                uint8_t byte = *(volatile uint8_t*)byte_addr;
+                char byte_str[4];
+                sprintf(byte_str, "%02X ", byte);
+                strcat(hex_part, byte_str);
+                ascii_part[i] = (byte >= 32 && byte < 127) ? byte : '.';
+            } else {
+                strcat(hex_part, "?? ");
+                ascii_part[i] = '?';
+            }
+        }
+        ascii_part[8] = '\0';
+        strcat(hex_part, " ");
+        strcat(hex_part, ascii_part);
+
+        // Highlight line with fault address
+        graphics_color_t color = PANIC_COLOR_WHITE;
+        if (addr <= g_panic.fault_addr && g_panic.fault_addr < addr + 8) {
+            color = PANIC_COLOR_RED;
+        }
+
+        panic_draw_text(x, y, hex_part, color);
+        y += 10;
+    }
+}
+
+static void panic_render_stack(void) {
+    int32_t y = 64;
+    int32_t x = 16;
+
+    panic_draw_text(x, y, "Stack Trace:", PANIC_COLOR_CYAN);
+    y += 24;
+
+    if (g_panic.stack_count == 0) {
+        panic_draw_text(x, y, "No stack trace available.", PANIC_COLOR_YELLOW);
+        return;
+    }
+
+    panic_draw_text(x, y, "#   Address      Description", PANIC_COLOR_YELLOW);
+    y += 12;
+
+    for (uint32_t i = 0; i < g_panic.stack_count && y < (int32_t)(g_panic.screen_height - 64); i++) {
+        char buf[64];
+        graphics_color_t color = (i == 0) ? PANIC_COLOR_RED : PANIC_COLOR_WHITE;
+
+        if (i == 0) {
+            sprintf(buf, "%2u  0x%08X  <fault location>", i, g_panic.stack_trace[i]);
+        } else {
+            sprintf(buf, "%2u  0x%08X  <caller>", i, g_panic.stack_trace[i]);
+        }
+
+        panic_draw_text(x, y, buf, color);
+        y += 10;
+    }
+
+    y += 16;
+    panic_draw_text(x, y, "Note: Symbol names require symbol table support", PANIC_COLOR_GRAY);
+}
+
+static void panic_render_system(void) {
+    int32_t y = 64;
+    int32_t x = 16;
+    char buf[128];
+
+    panic_draw_text(x, y, "System Information:", PANIC_COLOR_CYAN);
+    y += 24;
+
+    sprintf(buf, "Forest OS - Panic Screen v%s", PANIC_VERSION);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+    y += 16;
+
+    sprintf(buf, "Display: %ux%u pixels", g_panic.screen_width, g_panic.screen_height);
+    panic_draw_text(x, y, buf, PANIC_COLOR_WHITE);
+    y += 24;
+
+    panic_draw_text(x, y, "Memory Layout:", PANIC_COLOR_CYAN);
+    y += 16;
+    panic_draw_text(x + 16, y, "Kernel:  0xC0100000 - 0xC0FFFFFF", PANIC_COLOR_GRAY);
+    y += 10;
+    panic_draw_text(x + 16, y, "Heap:    0xC1000000 - 0xCFFFFFFF", PANIC_COLOR_GRAY);
+    y += 10;
+    panic_draw_text(x + 16, y, "Stack:   0xCFF00000 - 0xCFFFFFFF", PANIC_COLOR_GRAY);
+    y += 24;
+
+    panic_draw_text(x, y, "CPU Information:", PANIC_COLOR_CYAN);
+    y += 16;
+    panic_draw_text(x + 16, y, "Architecture: x86 (32-bit protected mode)", PANIC_COLOR_GRAY);
+    y += 10;
+
+    uint32_t cr0 = g_panic.regs.cr0;
+    sprintf(buf, "CR0: PE=%d PG=%d", (cr0 & 0x1) ? 1 : 0, (cr0 & 0x80000000) ? 1 : 0);
+    panic_draw_text(x + 16, y, buf, PANIC_COLOR_GRAY);
+    y += 24;
+
+    panic_draw_text(x, y, "Recovery Options:", PANIC_COLOR_CYAN);
+    y += 16;
+    panic_draw_text(x + 16, y, "Press 'R' to reboot the system", PANIC_COLOR_YELLOW);
+    y += 10;
+    panic_draw_text(x + 16, y, "Press 'H' to halt the CPU", PANIC_COLOR_YELLOW);
+}
+
+// =============================================================================
+// MAIN RENDERING
+// =============================================================================
+
+static void panic_render_frame(void) {
+    // Clear screen with blue background
+    graphics_clear_screen(PANIC_COLOR_BG);
+
+    // Render header and footer
+    panic_render_header();
+    panic_render_footer();
+
+    // Render current page
+    switch (g_panic.current_page) {
+        case PANIC_PAGE_OVERVIEW:
+            panic_render_overview();
+            break;
+        case PANIC_PAGE_REGISTERS:
+            panic_render_registers();
+            break;
+        case PANIC_PAGE_MEMORY:
+            panic_render_memory();
+            break;
+        case PANIC_PAGE_STACK:
+            panic_render_stack();
+            break;
+        case PANIC_PAGE_SYSTEM:
+            panic_render_system();
+            break;
+        default:
+            break;
+    }
+
+    // Draw mouse cursor last so it sits on top
+    panic_draw_cursor();
+
+    // Swap buffers
+    graphics_swap_buffers();
 }
 
 // =============================================================================
 // INPUT HANDLING
 // =============================================================================
 
-void panicui_handle_input(void) {
-    // The graphics manager will forward input events to the registered handler,
-    // which is panicui_handle_mouse in panicui_input.c.
-    // That handler will then call panicui_wm_handle_input.
-    // So, we don't need to do anything here.
-}
-
-void panicui_handle_mouse_event(const ps2_mouse_event_t* event) {
-    if (!event || !g_panicui_active) return;
-    
-    // Update cursor position
-    g_panicui.cursor.x = event->x;
-    g_panicui.cursor.y = event->y;
-    
-    // Clamp cursor to screen
-    if (g_panicui.cursor.x < 0) g_panicui.cursor.x = 0;
-    if (g_panicui.cursor.y < 0) g_panicui.cursor.y = 0;
-    if (g_panicui.cursor.x >= (int32_t)g_panicui.screen_width) 
-        g_panicui.cursor.x = g_panicui.screen_width - 1;
-    if (g_panicui.cursor.y >= (int32_t)g_panicui.screen_height) 
-        g_panicui.cursor.y = g_panicui.screen_height - 1;
-    
-    // Handle mouse clicks
-    if (event->left_button && !g_panicui.mouse_state.left_button) {
-        // Left click - check for tab clicks
-        for (uint32_t i = 0; i < PANICUI_PANEL_COUNT; i++) {
-            if (panicui_point_in_rect(g_panicui.cursor.x, g_panicui.cursor.y, g_panicui.tabs[i].base.bounds)) {
-                panicui_switch_to_panel((panicui_panel_type_t)i);
-                break;
-            }
-        }
-        
-        // Handle color panel interactions
-        if (g_panicui.active_panel == PANICUI_PANEL_COLORS) {
-            panicui_handle_color_panel_click(g_panicui.cursor.x, g_panicui.cursor.y);
-        }
-        
-        // Add sparkle effect at click location
-        if (g_panicui.enable_animations) {
-            panicui_add_sparkle_effect(g_panicui.cursor.x, g_panicui.cursor.y);
-        }
+static void panic_mouse_callback(const ps2_mouse_event_t* event) {
+    if (!event) {
+        return;
     }
-    
-    // Update mouse state
-    g_panicui.mouse_state = (ps2_mouse_state_t){
-        .x = event->x,
-        .y = event->y,
-        .left_button = event->left_button,
-        .right_button = event->right_button,
-        .middle_button = event->middle_button,
-        .x_overflow = event->x_overflow,
-        .y_overflow = event->y_overflow
-    };
-    
-    g_panicui.need_redraw = true;
+
+    int32_t x = event->x;
+    int32_t y = event->y;
+
+    // Clamp to screen bounds
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= (int32_t)g_panic.screen_width) x = (int32_t)g_panic.screen_width - 1;
+    if (y >= (int32_t)g_panic.screen_height) y = (int32_t)g_panic.screen_height - 1;
+
+    g_panic.mouse_x = x;
+    g_panic.mouse_y = y;
+    g_panic.mouse_left = event->left_button;
+    g_panic.mouse_right = event->right_button;
+    g_panic.mouse_enabled = true;
 }
 
-void panicui_handle_key_event(uint32_t keycode) {
-    switch (keycode) {
-        case '1': case '2': case '3': case '4': case '5': case '6': case '7':
-            // Switch to panel by number (7 panels now including Colors)
-            if (keycode - '1' < PANICUI_PANEL_COUNT) {
-                panicui_switch_to_panel((panicui_panel_type_t)(keycode - '1'));
+static void panic_handle_keycode(key_code_t k) {
+    // Page selection with number row
+    if (k >= KEY_1 && k <= KEY_5) {
+        g_panic.current_page = (panic_page_t)(k - KEY_1);
+        g_panic.scroll_offset = 0;
+        return;
+    }
+
+    // Map a few keypad numbers to pages (avoids clashes with keypad arrows)
+    if (k == KEY_KEYPAD_1) {
+        g_panic.current_page = PANIC_PAGE_OVERVIEW;
+        g_panic.scroll_offset = 0;
+        return;
+    }
+    if (k == KEY_KEYPAD_3) {
+        g_panic.current_page = PANIC_PAGE_MEMORY;
+        g_panic.scroll_offset = 0;
+        return;
+    }
+    if (k == KEY_KEYPAD_5) {
+        g_panic.current_page = PANIC_PAGE_SYSTEM;
+        g_panic.scroll_offset = 0;
+        return;
+    }
+
+    switch (k) {
+        case KEY_LEFT:
+        case KEY_KEYPAD_4:
+            if (g_panic.current_page > 0) {
+                g_panic.current_page--;
+                g_panic.scroll_offset = 0;
             }
             break;
-            
-        case 'q': case 'Q':
-        case 27: // ESC key
-            // Exit panic interface (system remains halted)
-            g_panicui_active = false;
-            break;
-            
-        case 'r': case 'R':
-            // Attempt system reboot if recovery panel suggests it
-            if (g_panicui.panels[PANICUI_PANEL_RECOVERY].content.recovery.can_reboot) {
-                debuglog(DEBUG_INFO, "[PanicUI] User requested system reboot\n");
-                // TODO: Implement safe reboot
+
+        case KEY_RIGHT:
+        case KEY_KEYPAD_6:
+            if (g_panic.current_page < PANIC_PAGE_MAX - 1) {
+                g_panic.current_page++;
+                g_panic.scroll_offset = 0;
             }
             break;
-            
-        case 'a': case 'A':
-            // Toggle animations
-            g_panicui.enable_animations = !g_panicui.enable_animations;
-            if (g_panicui.enable_animations) {
-                panicui_init_effects();
-                debuglog(DEBUG_INFO, "[PanicUI] Animations enabled\n");
-            } else {
-                debuglog(DEBUG_INFO, "[PanicUI] Animations disabled\n");
+
+        case KEY_UP:
+        case KEY_KEYPAD_8:
+            g_panic.scroll_offset--;
+            if (g_panic.scroll_offset < -64) g_panic.scroll_offset = -64;
+            break;
+
+        case KEY_DOWN:
+        case KEY_KEYPAD_2:
+            g_panic.scroll_offset++;
+            if (g_panic.scroll_offset > 64) g_panic.scroll_offset = 64;
+            break;
+
+        case KEY_R: {
+            uint8_t status = 0x02;
+            while (status & 0x02) {
+                status = inportb(0x64);
             }
+            outportb(0x64, 0xFE);
             break;
-            
-        case 'c': case 'C':
-            // Jump to Colors panel
-            panicui_switch_to_panel(PANICUI_PANEL_COLORS);
+        }
+
+        case KEY_H:
+        case KEY_ESC:
+            g_panic.active = false;
             break;
-            
-        case 'h': case 'H':
-        case '/': case '?':
-            // Show help/shortcuts (could display an overlay)
-            panicui_show_help_overlay();
-            break;
-            
-        case ' ': // Spacebar
-            // Pause/unpause effects
-            g_panicui.enable_animations = !g_panicui.enable_animations;
-            break;
-            
-        case 9: // Tab key
-            // Cycle through panels
-            panicui_switch_to_panel((panicui_panel_type_t)((g_panicui.active_panel + 1) % PANICUI_PANEL_COUNT));
-            break;
-            
-        case 8: case 127: // Backspace/Delete
-            // Go back to Overview
-            panicui_switch_to_panel(PANICUI_PANEL_OVERVIEW);
-            break;
-            
+
         default:
             break;
     }
-    
-    g_panicui.need_redraw = true;
 }
 
-bool panicui_point_in_rect(int32_t x, int32_t y, graphics_rect_t rect) {
-    return (x >= rect.x && x < rect.x + (int32_t)rect.width &&
-            y >= rect.y && y < rect.y + (int32_t)rect.height);
-}
+static void panic_handle_input(void) {
+    key_code_t code;
 
-// =============================================================================
-// PANEL MANAGEMENT
-// =============================================================================
+    // Drain queued events from the PS/2 driver
+    while (panic_dequeue_key(&code)) {
+        panic_handle_keycode(code);
+    }
 
-void panicui_switch_to_panel(panicui_panel_type_t panel) {
-    if (panel >= PANICUI_PANEL_COUNT || panel == g_panicui.active_panel) return;
-    
-    // Deactivate current panel and tab
-    g_panicui.panels[g_panicui.active_panel].active = false;
-    g_panicui.panels[g_panicui.active_panel].base.visible = false;
-    g_panicui.tabs[g_panicui.active_panel].active = false;
-    
-    // Activate new panel and tab
-    g_panicui.active_panel = panel;
-    g_panicui.panels[panel].active = true;
-    g_panicui.panels[panel].base.visible = true;
-    g_panicui.tabs[panel].active = true;
-    
-    // Update panel content
-    panicui_update_panel_content(panel);
-    
-    g_panicui.need_redraw = true;
-    
-    debuglog(DEBUG_INFO, "[PanicUI] Switched to panel: %s\n", g_tab_names[panel]);
-}
-
-void panicui_update_panel_content(panicui_panel_type_t panel) {
-    if (panel >= PANICUI_PANEL_COUNT) return;
-    
-    panicui_panel_t* p = &g_panicui.panels[panel];
-    
-    switch (panel) {
-        case PANICUI_PANEL_OVERVIEW:
-            // Overview content is updated in panicui_show_panic
-            strcpy(p->content.overview.error_message, g_panicui.panic_message);
-            strcpy(p->content.overview.file_location, g_panicui.panic_file);
-            p->content.overview.line_number = g_panicui.panic_line;
-            p->content.overview.error_code = g_panicui.error_code;
-            strcpy(p->content.overview.error_type, "Page Fault"); // TODO: Classify error type
+    // Also poll the controller directly in case IRQs are off
+    for (int i = 0; i < 4; i++) {
+        if (!panic_poll_direct_key(&code)) {
             break;
-            
-        case PANICUI_PANEL_REGISTERS:
-        case PANICUI_PANEL_MEMORY:
-        case PANICUI_PANEL_STACK:
-        case PANICUI_PANEL_SYSTEM:
-        case PANICUI_PANEL_COLORS:
-            panicui_init_colors_panel();
-            break;
-            
-        case PANICUI_PANEL_RECOVERY:
-            // Content updated by respective collection functions
-            break;
+        }
+        panic_handle_keycode(code);
     }
 }
 
-// These functions will be implemented in the next part...
-void panicui_collect_register_info(void) {
-    // TODO: Implement register collection
-    panicui_panel_t* panel = &g_panicui.panels[PANICUI_PANEL_REGISTERS];
-    
-    // For now, set dummy values
-    panel->content.registers.eax = 0xDEADBEEF;
-    panel->content.registers.ebx = 0xCAFEBABE;
-    panel->content.registers.ecx = 0x12345678;
-    panel->content.registers.edx = 0x87654321;
-    // TODO: Get actual register values from interrupt frame
+// =============================================================================
+// COLLECT SYSTEM STATE
+// =============================================================================
+
+static void panic_collect_registers(void) {
+#ifndef __x86_64__
+    __asm__ volatile("mov %%cr0, %0" : "=r"(g_panic.regs.cr0));
+    __asm__ volatile("mov %%cr2, %0" : "=r"(g_panic.regs.cr2));
+    __asm__ volatile("mov %%cr3, %0" : "=r"(g_panic.regs.cr3));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(g_panic.regs.cr4));
+
+    __asm__ volatile("mov %%cs, %0" : "=r"(g_panic.regs.cs));
+    __asm__ volatile("mov %%ds, %0" : "=r"(g_panic.regs.ds));
+    __asm__ volatile("mov %%es, %0" : "=r"(g_panic.regs.es));
+    __asm__ volatile("mov %%fs, %0" : "=r"(g_panic.regs.fs));
+    __asm__ volatile("mov %%gs, %0" : "=r"(g_panic.regs.gs));
+    __asm__ volatile("mov %%ss, %0" : "=r"(g_panic.regs.ss));
+
+    __asm__ volatile("mov %%esp, %0" : "=r"(g_panic.regs.esp));
+    __asm__ volatile("mov %%ebp, %0" : "=r"(g_panic.regs.ebp));
+
+    __asm__ volatile("pushf; pop %0" : "=r"(g_panic.regs.eflags));
+#endif
 }
 
-void panicui_collect_memory_info(uint32_t fault_address) {
-    panicui_panel_t* panel = &g_panicui.panels[PANICUI_PANEL_MEMORY];
-    
-    panel->content.memory.base_address = fault_address & ~0xFFF; // Page align
-    panel->content.memory.view_size = 4096; // Show one page
-    panel->content.memory.hex_mode = true;
-    panel->content.memory.bytes_per_line = 16;
-    panel->content.memory.highlighted_offset = fault_address & 0xFFF;
-    
-    // TODO: Safely read memory around fault address
-}
+static void panic_collect_stack_trace(void) {
+    uint32_t* ebp;
+    __asm__ volatile("mov %%ebp, %0" : "=r"(ebp));
 
-void panicui_collect_stack_trace(void) {
-    // TODO: Implement stack unwinding
-    panicui_panel_t* panel = &g_panicui.panels[PANICUI_PANEL_STACK];
-    
-    panel->content.stack.frame_count = 5;
-    panel->content.stack.selected_frame = 0;
-    
-    static uint32_t dummy_stack[5] = {0xC0100123, 0xC0100456, 0xC0100789, 0xC0100ABC, 0xC0100DEF};
-    panel->content.stack.stack_trace = dummy_stack;
+    g_panic.stack_count = 0;
 
-    strcpy(panel->content.stack.function_names[0], "kernel_panic");
-    strcpy(panel->content.stack.function_names[1], "divide_by_zero_handler");
-    strcpy(panel->content.stack.function_names[2], "some_other_function");
-    strcpy(panel->content.stack.function_names[3], "another_function");
-    strcpy(panel->content.stack.function_names[4], "start_kernel");
-}
+    if (g_panic.regs.eip != 0) {
+        g_panic.stack_trace[g_panic.stack_count++] = g_panic.regs.eip;
+    }
 
-void panicui_collect_system_info(void) {
-    panicui_panel_t* panel = &g_panicui.panels[PANICUI_PANEL_SYSTEM];
-    
-    strcpy(panel->content.system.cpu_info, "Intel x86 Compatible CPU");
-    strcpy(panel->content.system.memory_info, "Physical Memory: 128MB");
-    strcpy(panel->content.system.hardware_info, "Graphics: BGA/VESA Compatible");
-    
-    // TODO: Get actual system information
-}
+    for (int i = 0; i < 15 && ebp != NULL && g_panic.stack_count < 16; i++) {
+        if ((uint32_t)ebp < 0xC0000000 || (uint32_t)ebp > 0xFFFFFFFF) {
+            break;
+        }
 
-void panicui_generate_recovery_suggestions(void) {
-    panicui_panel_t* panel = &g_panicui.panels[PANICUI_PANEL_RECOVERY];
-    
-    panel->content.recovery.suggestion_count = 3;
-    strcpy(panel->content.recovery.suggestions[0], "Check for hardware issues");
-    strcpy(panel->content.recovery.suggestions[1], "Review recent kernel changes");
-    strcpy(panel->content.recovery.suggestions[2], "Run memory diagnostics");
-    
-    panel->content.recovery.can_continue = false;
-    panel->content.recovery.can_reboot = true;
-    panel->content.recovery.can_debug = false;
+        uint32_t ret_addr = *(ebp + 1);
+        if (ret_addr < 0xC0000000 || ret_addr > 0xFFFFFFFF) {
+            break;
+        }
+
+        g_panic.stack_trace[g_panic.stack_count++] = ret_addr;
+        ebp = (uint32_t*)*ebp;
+    }
 }
 
 // =============================================================================
-// RENDERING FUNCTIONS
+// PUBLIC API
 // =============================================================================
+
+graphics_result_t panicui_init(void) {
+    debuglog(DEBUG_INFO, "[PanicUI] Initializing framebuffer panic screen...\n");
+
+    memset(&g_panic, 0, sizeof(g_panic));
+
+    if (!graphics_is_initialized()) {
+        debuglog(DEBUG_ERROR, "[PanicUI] Graphics not initialized\n");
+        return GRAPHICS_ERROR_NOT_SUPPORTED;
+    }
+
+    video_mode_t mode;
+    if (graphics_get_current_mode(&mode) != GRAPHICS_SUCCESS) {
+        debuglog(DEBUG_ERROR, "[PanicUI] Failed to get video mode\n");
+        return GRAPHICS_ERROR_GENERIC;
+    }
+
+    g_panic.screen_width = mode.width;
+    g_panic.screen_height = mode.height;
+
+    g_panic.mouse_x = (int32_t)(g_panic.screen_width / 2);
+    g_panic.mouse_y = (int32_t)(g_panic.screen_height / 2);
+    g_panic.mouse_left = false;
+    g_panic.mouse_right = false;
+    g_panic.mouse_enabled = false;
+
+    // Get system font
+    if (!font_renderer_is_initialized()) {
+        font_renderer_init();
+    }
+
+    if (font_get_system_font(&g_panic.font) != GRAPHICS_SUCCESS || !g_panic.font) {
+        g_panic.font = NULL;
+        debuglog(DEBUG_WARN, "[PanicUI] No system font available, using default\n");
+    }
+
+    // Disable double buffering for panic - write directly to screen
+    graphics_enable_double_buffering(false);
+
+    g_panic.initialized = true;
+    g_panic.current_page = PANIC_PAGE_OVERVIEW;
+
+    debuglog(DEBUG_INFO, "[PanicUI] Initialized (%ux%u)\n",
+        g_panic.screen_width, g_panic.screen_height);
+
+    return GRAPHICS_SUCCESS;
+}
+
+void panicui_shutdown(void) {
+    memset(&g_panic, 0, sizeof(g_panic));
+}
+
+bool panicui_is_graphics_available(void) {
+    return g_panic.initialized && graphics_is_initialized();
+}
+
+void panicui_show_panic(const char* message, const char* file, uint32_t line,
+                       uint32_t fault_addr, uint32_t error_code) {
+    if (!g_panic.initialized) {
+        if (panicui_init() != GRAPHICS_SUCCESS) {
+            return;
+        }
+    }
+
+    // Store panic info
+    if (message) {
+        strncpy(g_panic.message, message, sizeof(g_panic.message) - 1);
+    } else {
+        strcpy(g_panic.message, "Unknown error");
+    }
+
+    if (file) {
+        strncpy(g_panic.file, file, sizeof(g_panic.file) - 1);
+    } else {
+        strcpy(g_panic.file, "<unknown>");
+    }
+
+    g_panic.line = line;
+    g_panic.fault_addr = fault_addr;
+    g_panic.error_code = error_code;
+    g_panic.regs.eip = fault_addr;
+
+    // Collect state
+    panic_collect_registers();
+    panic_collect_stack_trace();
+
+    // Hook keyboard events so we can receive input even if the normal handler is active
+    g_key_head = g_key_tail = 0;
+    ps2_keyboard_register_event_callback(panicui_keyboard_callback);
+    ps2_mouse_register_event_callback(panic_mouse_callback);
+    g_panic.mouse_enabled = true;
+
+    g_panic.active = true;
+    g_panic.current_page = PANIC_PAGE_OVERVIEW;
+    g_panic.scroll_offset = 0;
+
+    debuglog(DEBUG_INFO, "[PanicUI] Showing panic: %s\n", message);
+
+    panicui_main_loop();
+}
+
+void panicui_main_loop(void) {
+    while (g_panic.active) {
+        // Keep mouse input flowing even if IRQ delivery is blocked
+        ps2_mouse_poll();
+        panic_handle_input();
+        panic_render_frame();
+
+        // Small delay
+        for (volatile int i = 0; i < 100000; i++);
+    }
+
+    // Halt
+    __asm__ volatile("cli; hlt");
+}
 
 void panicui_render_frame(void) {
-    if (!g_panicui.initialized || !panicui_is_graphics_available()) return;
-    
-    // Use enhanced rendering if animations are enabled
-    if (g_panicui.enable_animations) {
-        // Enhanced animated background
-        panicui_draw_animated_background();
-        
-        // Draw floating particles
-        panicui_draw_particle_system();
-    } else {
-        // Standard background
-        graphics_clear_screen(PANICUI_COLOR_BG_PRIMARY);
-    }
-    
-    // Draw main window frame with enhanced shadows
-    panicui_draw_window_frame();
-    
-    // Draw titlebar
-    panicui_draw_titlebar();
-    
-    // Draw tabs
-    panicui_draw_tabs();
-    
-    // Draw current panel
-    panicui_draw_panel(g_panicui.active_panel);
-    
-    // Draw status bar
-    panicui_draw_statusbar();
-    
-    // Draw visual effects overlay
-    if (g_panicui.enable_animations) {
-        panicui_draw_sparkles();
-        panicui_draw_scanlines();
-        panicui_draw_vignette();
-    }
-    
-    // Draw cursor last (on top of everything)
-    panicui_draw_cursor();
-    
-    // Draw help overlay on top of everything else
-    panicui_draw_help_overlay();
-    
-    // Swap buffers for smooth display
-    graphics_swap_buffers();
+    panic_render_frame();
 }
-
-void panicui_draw_window_frame(void) {
-    // Draw main window with border
-    panicui_draw_rect_with_border(g_panicui.window_bounds, 
-                                 PANICUI_COLOR_BG_SECONDARY, 
-                                 PANICUI_COLOR_BORDER, 
-                                 PANICUI_WINDOW_BORDER);
-    
-    // Draw sidebar area
-    graphics_rect_t sidebar_rect = {
-        g_panicui.window_bounds.x + PANICUI_WINDOW_BORDER,
-        g_panicui.window_bounds.y + PANICUI_TITLEBAR_HEIGHT + PANICUI_WINDOW_BORDER,
-        PANICUI_SIDEBAR_WIDTH - PANICUI_WINDOW_BORDER,
-        g_panicui.window_bounds.height - PANICUI_TITLEBAR_HEIGHT - PANICUI_STATUSBAR_HEIGHT - 2 * PANICUI_WINDOW_BORDER
-    };
-    
-    graphics_draw_rect(&sidebar_rect, PANICUI_COLOR_BG_ACCENT, true);
-    
-    // Draw Forest OS logo/title in sidebar
-    if (g_panicui.font_large) {
-        panicui_draw_text_with_shadow(sidebar_rect.x + PANICUI_PADDING, 
-                                     sidebar_rect.y + PANICUI_PADDING,
-                                     "Forest OS", 
-                                     g_panicui.font_large, 
-                                     PANICUI_COLOR_TEXT_PRIMARY);
-    }
-    
-    if (g_panicui.font_normal) {
-        panicui_draw_text_with_shadow(sidebar_rect.x + PANICUI_PADDING, 
-                                     sidebar_rect.y + PANICUI_PADDING + 30,
-                                     "Kernel Panic", 
-                                     g_panicui.font_normal, 
-                                     PANICUI_COLOR_ERROR);
-    }
-    
-    // Draw version info
-    if (g_panicui.font_small) {
-        panicui_draw_text_with_shadow(sidebar_rect.x + PANICUI_PADDING, 
-                                     sidebar_rect.y + sidebar_rect.height - 40,
-                                     "PanicUI " PANICUI_VERSION, 
-                                     g_panicui.font_small, 
-                                     PANICUI_COLOR_TEXT_MUTED);
-    }
-}
-
-void panicui_draw_titlebar(void) {
-    // Draw titlebar background
-    graphics_draw_rect(&g_panicui.titlebar.bounds, PANICUI_COLOR_TITLEBAR, true);
-    
-    // Draw titlebar border
-    graphics_rect_t border_rect = {
-        g_panicui.titlebar.bounds.x,
-        g_panicui.titlebar.bounds.y + g_panicui.titlebar.bounds.height - 1,
-        g_panicui.titlebar.bounds.width,
-        1
-    };
-    graphics_draw_rect(&border_rect, PANICUI_COLOR_BORDER, true);
-    
-    // Draw title text
-    if (g_panicui.font_normal) {
-        panicui_draw_text_with_shadow(g_panicui.titlebar.bounds.x + PANICUI_PADDING,
-                                     g_panicui.titlebar.bounds.y + (PANICUI_TITLEBAR_HEIGHT - 16) / 2,
-                                     g_panicui.titlebar.title,
-                                     g_panicui.font_normal,
-                                     PANICUI_COLOR_TEXT_PRIMARY);
-    }
-    
-    // Draw close button (X) in top-right corner
-    graphics_rect_t close_btn = {
-        g_panicui.titlebar.bounds.x + g_panicui.titlebar.bounds.width - 30,
-        g_panicui.titlebar.bounds.y + 5,
-        20, 20
-    };
-    
-    bool close_hovered = panicui_point_in_rect(g_panicui.cursor.x, g_panicui.cursor.y, close_btn);
-    panicui_draw_button(close_btn, "X", false, close_hovered);
-}
-
-void panicui_draw_tabs(void) {
-    for (uint32_t i = 0; i < PANICUI_PANEL_COUNT; i++) {
-        panicui_tab_t* tab = &g_panicui.tabs[i];
-        
-        // Choose colors based on tab state
-        graphics_color_t bg_color = tab->active ? PANICUI_COLOR_BG_SECONDARY : PANICUI_COLOR_BG_ACCENT;
-        graphics_color_t text_color = tab->active ? PANICUI_COLOR_TEXT_PRIMARY : PANICUI_COLOR_TEXT_SECONDARY;
-        graphics_color_t border_color = tab->active ? PANICUI_COLOR_HIGHLIGHT : PANICUI_COLOR_BORDER;
-        
-        // Check if tab is hovered
-        bool hovered = panicui_point_in_rect(g_panicui.cursor.x, g_panicui.cursor.y, tab->base.bounds);
-        if (hovered && !tab->active) {
-            bg_color = panicui_lighten_color(bg_color, 15);
-        }
-        
-        // Draw tab background
-        graphics_draw_rect(&tab->base.bounds, bg_color, true);
-        
-        // Draw tab border (bottom line for active tab, full border for inactive)
-        if (tab->active) {
-            graphics_rect_t bottom_line = {
-                tab->base.bounds.x,
-                tab->base.bounds.y + tab->base.bounds.height - 2,
-                tab->base.bounds.width,
-                2
-            };
-            graphics_draw_rect(&bottom_line, border_color, true);
-        } else {
-            graphics_rect_t border = {
-                tab->base.bounds.x,
-                tab->base.bounds.y + tab->base.bounds.height - 1,
-                tab->base.bounds.width,
-                1
-            };
-            graphics_draw_rect(&border, border_color, true);
-        }
-        
-        // Draw tab text
-        if (g_panicui.font_normal) {
-            uint32_t text_width, text_height;
-            if (graphics_get_text_bounds(tab->text, g_panicui.font_normal, &text_width, &text_height) == GRAPHICS_SUCCESS) {
-                int32_t text_x = tab->base.bounds.x + (tab->base.bounds.width - text_width) / 2;
-                int32_t text_y = tab->base.bounds.y + (tab->base.bounds.height - text_height) / 2;
-                panicui_draw_text_with_shadow(text_x, text_y, tab->text, g_panicui.font_normal, text_color);
-            }
-        }
-    }
-}
-
-void panicui_draw_panel(panicui_panel_type_t panel) {
-    if (panel >= PANICUI_PANEL_COUNT) return;
-    
-    panicui_panel_t* p = &g_panicui.panels[panel];
-    
-    // Draw panel background
-    graphics_draw_rect(&p->base.bounds, PANICUI_COLOR_BG_SECONDARY, true);
-    
-    // Draw panel border
-    graphics_rect_t border_rect = p->base.bounds;
-    border_rect.x -= 1;
-    border_rect.y -= 1;
-    border_rect.width += 2;
-    border_rect.height += 2;
-    panicui_draw_rect_with_border(border_rect, COLOR_TRANSPARENT, PANICUI_COLOR_BORDER, 1);
-    
-    // Content area (with padding)
-    graphics_rect_t content_area = {
-        p->base.bounds.x + PANICUI_PADDING,
-        p->base.bounds.y + PANICUI_PADDING,
-        p->base.bounds.width - 2 * PANICUI_PADDING,
-        p->base.bounds.height - 2 * PANICUI_PADDING
-    };
-    
-    switch (panel) {
-        case PANICUI_PANEL_OVERVIEW:
-            panicui_draw_overview_panel(&p->content.overview, content_area);
-            break;
-        case PANICUI_PANEL_REGISTERS:
-            panicui_draw_registers_panel(&p->content.registers, content_area);
-            break;
-        case PANICUI_PANEL_MEMORY:
-            panicui_draw_memory_panel(&p->content.memory, content_area);
-            break;
-        case PANICUI_PANEL_STACK:
-            panicui_draw_stack_panel(&p->content.stack, content_area);
-            break;
-        case PANICUI_PANEL_SYSTEM:
-            panicui_draw_system_panel(&p->content.system, content_area);
-            break;
-        case PANICUI_PANEL_COLORS:
-            panicui_draw_colors_panel(&p->content.colors, content_area);
-            break;
-            
-        case PANICUI_PANEL_RECOVERY:
-            panicui_draw_recovery_panel(&p->content.recovery, content_area);
-            break;
-    }
-}
-
-// Panel-specific drawing functions
-void panicui_draw_overview_panel(void* content, graphics_rect_t area) {
-    struct { char error_message[512]; char error_type[128]; char file_location[256]; 
-             uint32_t line_number; uint32_t error_code; } *overview = content;
-    
-    int32_t y = area.y;
-    int32_t line_height = 20;
-    
-    if (g_panicui.font_large) {
-        // Error type header
-        panicui_draw_text_with_shadow(area.x, y, "KERNEL PANIC", g_panicui.font_large, PANICUI_COLOR_ERROR);
-        y += 35;
-        
-        // Error message
-        panicui_draw_text_with_shadow(area.x, y, overview->error_message, g_panicui.font_normal, PANICUI_COLOR_TEXT_PRIMARY);
-        y += 30;
-    }
-    
-    if (g_panicui.font_normal) {
-        // Error details
-        char error_details[256];
-        sprintf(error_details, "Type: %s", overview->error_type);
-        panicui_draw_text_with_shadow(area.x, y, error_details, g_panicui.font_normal, PANICUI_COLOR_TEXT_SECONDARY);
-        y += line_height;
-        
-        sprintf(error_details, "Location: %s:%u", overview->file_location, overview->line_number);
-        panicui_draw_text_with_shadow(area.x, y, error_details, g_panicui.font_normal, PANICUI_COLOR_TEXT_SECONDARY);
-        y += line_height;
-        
-        sprintf(error_details, "Error Code: 0x%08X", overview->error_code);
-        panicui_draw_text_with_shadow(area.x, y, error_details, g_panicui.font_normal, PANICUI_COLOR_TEXT_SECONDARY);
-        y += line_height * 2;
-        
-        // Instructions
-        panicui_draw_text_with_shadow(area.x, y, "Use the tabs above to view detailed information:", 
-                                     g_panicui.font_normal, PANICUI_COLOR_TEXT_SECONDARY);
-        y += line_height * 2;
-        
-        panicui_draw_text_with_shadow(area.x, y, "• Registers - CPU register state at time of panic", 
-                                     g_panicui.font_small, PANICUI_COLOR_TEXT_MUTED);
-        y += line_height;
-        
-        panicui_draw_text_with_shadow(area.x, y, "• Memory - Memory view around fault address", 
-                                     g_panicui.font_small, PANICUI_COLOR_TEXT_MUTED);
-        y += line_height;
-        
-        panicui_draw_text_with_shadow(area.x, y, "• Stack Trace - Function call stack", 
-                                     g_panicui.font_small, PANICUI_COLOR_TEXT_MUTED);
-        y += line_height;
-        
-        panicui_draw_text_with_shadow(area.x, y, "• System Info - Hardware and system state", 
-                                     g_panicui.font_small, PANICUI_COLOR_TEXT_MUTED);
-        y += line_height;
-        
-        panicui_draw_text_with_shadow(area.x, y, "• Recovery - Suggested recovery actions", 
-                                     g_panicui.font_small, PANICUI_COLOR_TEXT_MUTED);
-    }
-}
-
-void panicui_draw_registers_panel(void* content, graphics_rect_t area) {
-    struct { uint32_t eax, ebx, ecx, edx, esp, ebp, esi, edi, eip, eflags;
-             uint16_t cs, ds, es, fs, gs, ss; uint32_t cr0, cr2, cr3, cr4; } *regs = content;
-    
-    int32_t y = area.y;
-    int32_t line_height = 18;
-    int32_t col_width = area.width / 3;
-    
-    if (g_panicui.font_normal) {
-        // General purpose registers
-        panicui_draw_text_with_shadow(area.x, y, "General Purpose Registers:", 
-                                     g_panicui.font_normal, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height + 5;
-        
-        char reg_text[64];
-        sprintf(reg_text, "EAX: 0x%08X", regs->eax);
-        panicui_draw_text_with_shadow(area.x, y, reg_text, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-        
-        sprintf(reg_text, "EBX: 0x%08X", regs->ebx);
-        panicui_draw_text_with_shadow(area.x + col_width, y, reg_text, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-        
-        sprintf(reg_text, "ECX: 0x%08X", regs->ecx);
-        panicui_draw_text_with_shadow(area.x + 2 * col_width, y, reg_text, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height;
-        
-        sprintf(reg_text, "EDX: 0x%08X", regs->edx);
-        panicui_draw_text_with_shadow(area.x, y, reg_text, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-        
-        sprintf(reg_text, "ESI: 0x%08X", regs->esi);
-        panicui_draw_text_with_shadow(area.x + col_width, y, reg_text, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-        
-        sprintf(reg_text, "EDI: 0x%08X", regs->edi);
-        panicui_draw_text_with_shadow(area.x + 2 * col_width, y, reg_text, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height * 2;
-        
-        // Stack and instruction pointers
-        panicui_draw_text_with_shadow(area.x, y, "Stack & Instruction Pointers:", 
-                                     g_panicui.font_normal, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height + 5;
-        
-        sprintf(reg_text, "EIP: 0x%08X", regs->eip);
-        panicui_draw_text_with_shadow(area.x, y, reg_text, g_panicui.font_small, PANICUI_COLOR_ERROR);
-        
-        sprintf(reg_text, "ESP: 0x%08X", regs->esp);
-        panicui_draw_text_with_shadow(area.x + col_width, y, reg_text, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-        
-        sprintf(reg_text, "EBP: 0x%08X", regs->ebp);
-        panicui_draw_text_with_shadow(area.x + 2 * col_width, y, reg_text, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-    }
-}
-
-void panicui_draw_memory_panel(void* content, graphics_rect_t area) {
-    struct { uint32_t base_address; uint32_t view_size; uint8_t* memory_data; 
-             bool hex_mode; uint32_t bytes_per_line; uint32_t highlighted_offset; } *mem = content;
-    
-    int32_t y = area.y;
-    int32_t line_height = 16;
-    
-    if (g_panicui.font_normal) {
-        char header[128];
-        sprintf(header, "Memory View - Base Address: 0x%08X", mem->base_address);
-        panicui_draw_text_with_shadow(area.x, y, header, g_panicui.font_normal, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height * 2;
-        
-        // TODO: Draw hex dump with highlighted fault address
-        panicui_draw_text_with_shadow(area.x, y, "Memory visualization not yet implemented", 
-                                     g_panicui.font_small, PANICUI_COLOR_TEXT_MUTED);
-    }
-}
-
-void panicui_draw_stack_panel(void* content, graphics_rect_t area) {
-    struct { uint32_t* stack_trace; uint32_t frame_count; uint32_t selected_frame; 
-             char function_names[16][64]; } *stack = content;
-    
-    int32_t y = area.y;
-    int32_t line_height = 18;
-    
-    if (g_panicui.font_normal) {
-        panicui_draw_text_with_shadow(area.x, y, "Call Stack:", g_panicui.font_normal, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height + 5;
-        
-        for (uint32_t i = 0; i < stack->frame_count && i < 16; i++) {
-            char frame_text[128];
-            sprintf(frame_text, "#%u  0x%08X  %s", i, stack->stack_trace[i], stack->function_names[i]);
-            
-            graphics_color_t text_color = (i == stack->selected_frame) ? 
-                PANICUI_COLOR_HIGHLIGHT : PANICUI_COLOR_TEXT_PRIMARY;
-                
-            panicui_draw_text_with_shadow(area.x + 10, y, frame_text, g_panicui.font_small, text_color);
-            y += line_height;
-        }
-    }
-}
-
-void panicui_draw_system_panel(void* content, graphics_rect_t area) {
-    struct { char cpu_info[256]; char memory_info[256]; char hardware_info[512]; 
-             uint32_t uptime; uint32_t total_memory; uint32_t free_memory; } *sys = content;
-    
-    int32_t y = area.y;
-    int32_t line_height = 18;
-    
-    if (g_panicui.font_normal) {
-        panicui_draw_text_with_shadow(area.x, y, "System Information:", 
-                                     g_panicui.font_normal, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height + 5;
-        
-        panicui_draw_text_with_shadow(area.x, y, sys->cpu_info, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height;
-        
-        panicui_draw_text_with_shadow(area.x, y, sys->memory_info, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height;
-        
-        panicui_draw_text_with_shadow(area.x, y, sys->hardware_info, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-    }
-}
-
-void panicui_draw_recovery_panel(void* content, graphics_rect_t area) {
-    struct { char suggestions[10][128]; uint32_t suggestion_count; 
-             bool can_continue; bool can_reboot; bool can_debug; } *recovery = content;
-    
-    int32_t y = area.y;
-    int32_t line_height = 18;
-    
-    if (g_panicui.font_normal) {
-        panicui_draw_text_with_shadow(area.x, y, "Recovery Suggestions:", 
-                                     g_panicui.font_normal, PANICUI_COLOR_TEXT_PRIMARY);
-        y += line_height + 5;
-        
-        for (uint32_t i = 0; i < recovery->suggestion_count && i < 10; i++) {
-            char suggestion[140];
-            sprintf(suggestion, "• %s", recovery->suggestions[i]);
-            panicui_draw_text_with_shadow(area.x, y, suggestion, g_panicui.font_small, PANICUI_COLOR_TEXT_PRIMARY);
-            y += line_height;
-        }
-        
-        y += line_height;
-        
-        // Action buttons
-        if (recovery->can_reboot) {
-            graphics_rect_t reboot_btn = {area.x, y, 100, 25};
-            bool hovered = panicui_point_in_rect(g_panicui.cursor.x, g_panicui.cursor.y, reboot_btn);
-            panicui_draw_button(reboot_btn, "Reboot", false, hovered);
-        }
-        
-        graphics_rect_t halt_btn = {area.x + 110, y, 100, 25};
-        bool halt_hovered = panicui_point_in_rect(g_panicui.cursor.x, g_panicui.cursor.y, halt_btn);
-        panicui_draw_button(halt_btn, "Halt", false, halt_hovered);
-    }
-}
-
-void panicui_draw_statusbar(void) {
-    // Draw status bar background
-    graphics_draw_rect(&g_panicui.statusbar.bounds, PANICUI_COLOR_BG_ACCENT, true);
-    
-    // Draw top border
-    graphics_rect_t border_rect = {
-        g_panicui.statusbar.bounds.x,
-        g_panicui.statusbar.bounds.y,
-        g_panicui.statusbar.bounds.width,
-        1
-    };
-    graphics_draw_rect(&border_rect, PANICUI_COLOR_BORDER, true);
-    
-    // Status text
-    if (g_panicui.font_small) {
-        panicui_draw_text_with_shadow(g_panicui.statusbar.bounds.x + PANICUI_PADDING,
-                                     g_panicui.statusbar.bounds.y + 5,
-                                     g_panicui.statusbar.status_text,
-                                     g_panicui.font_small,
-                                     PANICUI_COLOR_TEXT_SECONDARY);
-        
-        // Mouse coordinates (debug info)
-        char mouse_info[64];
-        sprintf(mouse_info, "Mouse: %d,%d", g_panicui.cursor.x, g_panicui.cursor.y);
-        panicui_draw_text_with_shadow(g_panicui.statusbar.bounds.x + g_panicui.statusbar.bounds.width - 150,
-                                     g_panicui.statusbar.bounds.y + 5,
-                                     mouse_info,
-                                     g_panicui.font_small,
-                                     PANICUI_COLOR_TEXT_MUTED);
-    }
-}
-
-void panicui_draw_cursor(void) {
-    if (!g_panicui.cursor.visible) return;
-    
-    // Draw enhanced cursor with glow effect (skip expensive trig when SSE is disabled)
-    graphics_color_t cursor_color = PANICUI_COLOR_HIGHLIGHT;
-#if !ARCH_64BIT
-    graphics_color_t glow_color = {cursor_color.r, cursor_color.g, cursor_color.b, 64};
-    
-    // Draw glow effect
-    for (int r = 8; r > 0; r--) {
-        uint8_t alpha = 64 - (r * 8);
-        graphics_color_t ring_color = {cursor_color.r, cursor_color.g, cursor_color.b, alpha};
-        
-        // Draw circle outline for glow
-        for (int angle = 0; angle < 360; angle += 10) {
-            int x = g_panicui.cursor.x + (r * cos(angle * M_PI / 180.0));
-            int y = g_panicui.cursor.y + (r * sin(angle * M_PI / 180.0));
-            graphics_draw_pixel(x, y, ring_color);
-        }
-    }
-#endif
-    
-    // Draw main cursor (modern arrow style)
-    graphics_color_t cursor_bg = {255, 255, 255, 255};
-    graphics_color_t cursor_border = {0, 0, 0, 255};
-    
-    // Arrow shape points
-    int cx = g_panicui.cursor.x;
-    int cy = g_panicui.cursor.y;
-    
-    // Draw cursor arrow with border
-    graphics_draw_line(cx, cy, cx, cy + 12, cursor_border);
-    graphics_draw_line(cx, cy, cx + 8, cy + 8, cursor_border);
-    graphics_draw_line(cx, cy + 12, cx + 4, cy + 8, cursor_border);
-    graphics_draw_line(cx + 4, cy + 8, cx + 8, cy + 8, cursor_border);
-    
-    // Fill the arrow
-    graphics_draw_line(cx + 1, cy + 1, cx + 1, cy + 10, cursor_bg);
-    graphics_draw_line(cx + 2, cy + 2, cx + 2, cy + 8, cursor_bg);
-    graphics_draw_line(cx + 3, cy + 3, cx + 3, cy + 7, cursor_bg);
-    graphics_draw_line(cx + 4, cy + 4, cx + 4, cy + 7, cursor_bg);
-    graphics_draw_line(cx + 5, cy + 5, cx + 5, cy + 7, cursor_bg);
-    graphics_draw_line(cx + 6, cy + 6, cx + 6, cy + 7, cursor_bg);
-    graphics_draw_line(cx + 7, cy + 7, cx + 7, cy + 7, cursor_bg);
-}
-
-// Color panel functions are implemented in panicui_colors.c
 
 // =============================================================================
-// HELP OVERLAY IMPLEMENTATION
+// COMPATIBILITY STUBS
 // =============================================================================
 
-static bool g_show_help_overlay = false;
+panicui_context_t* panicui_get_context(void) { return NULL; }
 
-void panicui_show_help_overlay(void) {
-    g_show_help_overlay = !g_show_help_overlay;
-}
-
-void panicui_draw_help_overlay(void) {
-    if (!g_show_help_overlay) return;
-    
-    // Semi-transparent overlay
-    graphics_rect_t overlay_rect = {0, 0, g_panicui.screen_width, g_panicui.screen_height};
-    graphics_color_t overlay_color = {0, 0, 0, 128};
-    graphics_draw_rect(&overlay_rect, overlay_color, true);
-    
-    // Help window
-    uint32_t help_width = 500;
-    uint32_t help_height = 400;
-    graphics_rect_t help_window = {
-        (g_panicui.screen_width - help_width) / 2,
-        (g_panicui.screen_height - help_height) / 2,
-        help_width,
-        help_height
-    };
-    
-    panicui_draw_rect_with_border(help_window, PANICUI_COLOR_BG_SECONDARY, PANICUI_COLOR_HIGHLIGHT, 3);
-    
-    // Help title
-    if (g_panicui.font_large) {
-        panicui_draw_text_with_shadow(help_window.x + 20, help_window.y + 20,
-                                     "Forest OS Panic Screen - Help",
-                                     g_panicui.font_large, PANICUI_COLOR_TEXT_PRIMARY);
-    }
-    
-    // Help content
-    if (g_panicui.font_normal) {
-        int32_t y = help_window.y + 60;
-        int32_t line_height = 20;
-        
-        const char* help_lines[] = {
-            "Keyboard Shortcuts:",
-            "",
-            "1-7     - Switch to panels (Overview, Registers, etc.)",
-            "Tab     - Cycle through panels",
-            "C       - Jump to Colors panel",
-            "A       - Toggle animations and effects",
-            "Space   - Pause/resume effects",
-            "H or ?  - Show/hide this help",
-            "Q/ESC   - Exit panic screen",
-            "R       - Restart system (if available)",
-            "",
-            "Mouse Controls:",
-            "",
-            "• Click tabs to switch panels",
-            "• Click in HSV square to select colors",
-            "• Click hue bar to change hue",
-            "• Click ANSI colors to select them",
-            "• Clicking adds sparkle effects",
-            "",
-            "Press H again to close this help."
-        };
-        
-        for (uint32_t i = 0; i < sizeof(help_lines) / sizeof(help_lines[0]); i++) {
-            graphics_color_t text_color = (help_lines[i][0] == '\0') ? 
-                PANICUI_COLOR_TEXT_MUTED : 
-                ((help_lines[i][strlen(help_lines[i])-1] == ':') ? 
-                 PANICUI_COLOR_TEXT_PRIMARY : PANICUI_COLOR_TEXT_SECONDARY);
-            
-            panicui_draw_text_with_shadow(help_window.x + 30, y, help_lines[i],
-                                         g_panicui.font_normal, text_color);
-            y += line_height;
-        }
+void panicui_switch_to_panel(panicui_panel_type_t panel) {
+    if ((int)panel < (int)PANIC_PAGE_MAX) {
+        g_panic.current_page = (panic_page_t)panel;
     }
 }
+
+void panicui_handle_mouse_event(const ps2_mouse_event_t* event) { (void)event; }
+void panicui_handle_key_event(uint32_t keycode) { (void)keycode; }
+void panicui_update_panel_content(panicui_panel_type_t panel) { (void)panel; }
+void panicui_scroll_panel(panicui_panel_type_t panel, int32_t dx, int32_t dy) { (void)panel; (void)dx; (void)dy; }
+void panicui_draw_window_frame(void) {}
+void panicui_draw_titlebar(void) {}
+void panicui_draw_tabs(void) {}
+void panicui_draw_panel(panicui_panel_type_t panel) { (void)panel; }
+void panicui_draw_statusbar(void) {}
+void panicui_draw_cursor(void) {}
+void panicui_draw_rect_with_border(graphics_rect_t r, graphics_color_t b, graphics_color_t bo, uint32_t bw) { (void)r; (void)b; (void)bo; (void)bw; }
+void panicui_draw_text_with_shadow(int32_t x, int32_t y, const char* t, font_t* f, graphics_color_t c) { (void)x; (void)y; (void)t; (void)f; (void)c; }
+void panicui_draw_button(graphics_rect_t b, const char* t, bool p, bool h) { (void)b; (void)t; (void)p; (void)h; }
+graphics_rect_t panicui_get_text_bounds(const char* t, font_t* f) { (void)t; (void)f; return (graphics_rect_t){0,0,0,0}; }
+bool panicui_point_in_rect(int32_t x, int32_t y, graphics_rect_t r) { (void)x; (void)y; (void)r; return false; }
+panicui_widget_t* panicui_get_widget_at_point(int32_t x, int32_t y) { (void)x; (void)y; return NULL; }
+void panicui_collect_register_info(void) { panic_collect_registers(); }
+void panicui_collect_memory_info(uint32_t a) { (void)a; }
+void panicui_collect_stack_trace(void) { panic_collect_stack_trace(); }
+void panicui_collect_system_info(void) {}
+void panicui_generate_recovery_suggestions(void) {}
+graphics_color_t panicui_blend_colors(graphics_color_t a, graphics_color_t b, uint8_t al) { (void)b; (void)al; return a; }
+graphics_color_t panicui_darken_color(graphics_color_t c, uint8_t a) { (void)a; return c; }
+graphics_color_t panicui_lighten_color(graphics_color_t c, uint8_t a) { (void)a; return c; }
+void panicui_draw_overview_panel(void* c, graphics_rect_t a) { (void)c; (void)a; }
+void panicui_draw_registers_panel(void* c, graphics_rect_t a) { (void)c; (void)a; }
+void panicui_draw_memory_panel(void* c, graphics_rect_t a) { (void)c; (void)a; }
+void panicui_draw_stack_panel(void* c, graphics_rect_t a) { (void)c; (void)a; }
+void panicui_draw_system_panel(void* c, graphics_rect_t a) { (void)c; (void)a; }
+void panicui_draw_colors_panel(void* c, graphics_rect_t a) { (void)c; (void)a; }
+void panicui_draw_recovery_panel(void* c, graphics_rect_t a) { (void)c; (void)a; }
+void panicui_draw_hsv_square(graphics_rect_t b, float h, float* s, float* v) { (void)b; (void)h; (void)s; (void)v; }
+void panicui_draw_hue_bar(graphics_rect_t b, float* h) { (void)b; (void)h; }
+void panicui_draw_ansi_color_grid(graphics_rect_t b) { (void)b; }
+void panicui_draw_color_preview(graphics_rect_t b, graphics_color_t c) { (void)b; (void)c; }
+graphics_color_t panicui_hsv_to_rgb(float h, float s, float v) { (void)h; (void)s; (void)v; return (graphics_color_t){0,0,0,255}; }
+void panicui_rgb_to_hsv(graphics_color_t r, float* h, float* s, float* v) { (void)r; (void)h; (void)s; (void)v; }
+void panicui_generate_ansi_palette(graphics_color_t* p) { (void)p; }
+void panicui_draw_glow_effect(graphics_rect_t b, graphics_color_t c, uint32_t r) { (void)b; (void)c; (void)r; }
+void panicui_draw_gradient_rect(graphics_rect_t b, graphics_color_t s, graphics_color_t e, bool v) { (void)b; (void)s; (void)e; (void)v; }
+void panicui_draw_animated_background(void) {}
+void panicui_draw_particle_system(void) {}
+void panicui_init_effects(void) {}
+void panicui_add_sparkle_effect(int32_t x, int32_t y) { (void)x; (void)y; }
+void panicui_draw_sparkles(void) {}
+void panicui_draw_scanlines(void) {}
+void panicui_draw_vignette(void) {}
+void panicui_render_enhanced_frame(void) {}
+void panicui_handle_color_panel_click(int32_t x, int32_t y) { (void)x; (void)y; }
+void panicui_init_colors_panel(void) {}
+void panicui_show_help_overlay(void) {}
+void panicui_draw_help_overlay(void) {}
+void panicui_handle_input(void) { panic_handle_input(); }

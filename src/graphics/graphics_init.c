@@ -19,9 +19,8 @@ static struct {
     bool required;
 } graphics_drivers[] = {
     // Bochs BGA driver for emulated environments
-    {"Bochs BGA", bga_init, false},
-    
-    // VESA driver for enhanced graphics
+        {"Bochs BGA", bga_init, true}, // Mark BGA as required
+        // VESA driver for enhanced graphics
     {"VESA", vesa_init, false},
     
     // Additional drivers can be added here

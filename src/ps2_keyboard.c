@@ -6,6 +6,7 @@
 #include "include/util.h"
 #include "include/keyboard_layout.h"
 #include "include/debuglog.h"
+#include "include/ps2_mouse.h"
 
 #ifndef PS2_KEYBOARD_DEFAULT_LAYOUT
 #define PS2_KEYBOARD_DEFAULT_LAYOUT KEYBOARD_LAYOUT_US
@@ -257,12 +258,17 @@ int ps2_keyboard_init(void) {
 void ps2_keyboard_irq_handler(struct interrupt_frame* frame, uint32 error_code) {
     (void)frame;
     (void)error_code;
-    
-    if (ps2_keyboard_data_available()) {
+
+    // Hand any pending AUX bytes to the mouse driver instead of discarding them
+    // so mouse movement/buttons are not lost when keyboard IRQs fire first.
+    ps2_mouse_poll();
+
+    // Now process keyboard data
+    while (ps2_keyboard_data_available()) {
         uint8 scancode = ps2_controller_read_data();
         ps2_keyboard_process_scancode(scancode);
     }
-    
+
     pic_send_eoi(1);
 }
 

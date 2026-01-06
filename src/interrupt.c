@@ -310,6 +310,12 @@ static void default_exception_handler(int int_no, struct interrupt_frame* frame,
     print_hex(FRAME_IP(frame));
     print(", error: ");
     print_hex(error_code);
+#if !ARCH_64BIT
+    uint32 cr2 = 0;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    print(", cr2=");
+    print_hex(cr2);
+#endif
     print("\n");
     kernel_panic("Unhandled CPU exception");
 }

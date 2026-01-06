@@ -72,6 +72,15 @@ typedef struct {
 typedef page_entry_t page_table_t[1024];
 typedef page_entry_t page_directory_t[1024];
 
+// Architecture-sized physical address helpers
+#if defined(__x86_64__)
+typedef uint64_t phys_addr_t;
+typedef uint64_t frame_count_t;
+#else
+typedef uint32_t phys_addr_t;
+typedef uint32_t frame_count_t;
+#endif
+
 // Memory region information from bootloader
 typedef struct {
     uint64 base;        // Base physical address
@@ -112,25 +121,25 @@ typedef enum {
 memory_result_t pmm_init(memory_region_t* regions, uint32 region_count);
 
 // Allocate a single page frame
-uint32 pmm_alloc_frame(void);
+phys_addr_t pmm_alloc_frame(void);
 
 // Allocate multiple contiguous page frames
-uint32 pmm_alloc_frames(uint32 count);
+phys_addr_t pmm_alloc_frames(uint32 count);
 
 // Free a page frame
-memory_result_t pmm_free_frame(uint32 frame_addr);
+memory_result_t pmm_free_frame(phys_addr_t frame_addr);
 
 // Free multiple page frames
-memory_result_t pmm_free_frames(uint32 frame_addr, uint32 count);
+memory_result_t pmm_free_frames(phys_addr_t frame_addr, uint32 count);
 
 // Check if frame is free
-bool pmm_is_frame_free(uint32 frame_addr);
+bool pmm_is_frame_free(phys_addr_t frame_addr);
 
 // Get total number of frames
-uint32 pmm_get_total_frames(void);
+frame_count_t pmm_get_total_frames(void);
 
 // Get number of free frames
-uint32 pmm_get_free_frames(void);
+frame_count_t pmm_get_free_frames(void);
 
 // =============================================================================
 // VIRTUAL MEMORY MANAGER (VMM)

@@ -31,6 +31,7 @@ graphics_result_t graphics_unmap_framebuffer(framebuffer_t* fb);
 // Drawing operations
 graphics_result_t graphics_clear_screen(graphics_color_t color);
 graphics_result_t graphics_draw_pixel(int32_t x, int32_t y, graphics_color_t color);
+graphics_result_t graphics_get_pixel(int32_t x, int32_t y, graphics_color_t* color);
 graphics_result_t graphics_draw_rect(const graphics_rect_t* rect, 
                                    graphics_color_t color, bool filled);
 graphics_result_t graphics_draw_line(int32_t x1, int32_t y1, 

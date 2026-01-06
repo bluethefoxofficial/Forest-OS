@@ -80,6 +80,8 @@ bmp_result_t bmp_load_from_file(const char* path, bmp_image_t** image) {
         return BMP_ERROR_INVALID_PARAMETER;
     }
 
+    *image = NULL;
+
     // Read file from VFS
     const uint8* file_data = NULL;
     uint32 file_size = 0;
@@ -116,6 +118,17 @@ bmp_result_t bmp_load_from_file(const char* path, bmp_image_t** image) {
     uint32 row_size_with_padding = row_size + row_padding;
     uint32 pixel_data_size = row_size_with_padding * height;
 
+    // Check for reasonable image size limits (prevent excessive memory allocation)
+    if (width > 16384 || height > 16384) {
+        debuglog(DEBUG_ERROR, "[BMP] Image dimensions too large: %ux%u (max 16384x16384)\n", width, height);
+        return BMP_ERROR_UNSUPPORTED_FORMAT;
+    }
+
+    if (pixel_data_size > 128 * 1024 * 1024) {
+        debuglog(DEBUG_ERROR, "[BMP] Image data too large: %u bytes (max 128MB)\n", pixel_data_size);
+        return BMP_ERROR_OUT_OF_MEMORY;
+    }
+
     // Check if we have enough data
     if (pixel_data_offset + pixel_data_size > file_size) {
         debuglog(DEBUG_ERROR, "[BMP] File too small for image data\n");
@@ -128,17 +141,22 @@ bmp_result_t bmp_load_from_file(const char* path, bmp_image_t** image) {
         debuglog(DEBUG_ERROR, "[BMP] Out of memory for image structure\n");
         return BMP_ERROR_OUT_OF_MEMORY;
     }
+    img->pixel_data = NULL;
+    img->pixel_data_size = 0;
+    img->owns_data = false;
 
     // Allocate pixel data buffer
-    img->pixel_data = (uint8*)kmalloc(pixel_data_size, GFP_KERNEL);
-    if (!img->pixel_data) {
-        kfree(img);
-        debuglog(DEBUG_ERROR, "[BMP] Out of memory for pixel data\n");
-        return BMP_ERROR_OUT_OF_MEMORY;
+    uint8* pixel_buffer = (uint8*)kmalloc(pixel_data_size, GFP_KERNEL);
+    if (!pixel_buffer) {
+        debuglog(DEBUG_WARN, "[BMP] OOM for pixel data (%u bytes) for %s, using zero-copy view\n",
+                 pixel_data_size, path);
+        img->pixel_data = (uint8*)(file_data + pixel_data_offset);
+        img->owns_data = false;
+    } else {
+        memcpy(pixel_buffer, file_data + pixel_data_offset, pixel_data_size);
+        img->pixel_data = pixel_buffer;
+        img->owns_data = true;
     }
-
-    // Copy pixel data
-    memcpy(img->pixel_data, file_data + pixel_data_offset, pixel_data_size);
 
     img->width = width;
     img->height = height;
@@ -160,7 +178,7 @@ void bmp_free(bmp_image_t* image) {
         return;
     }
 
-    if (image->pixel_data) {
+    if (image->pixel_data && image->owns_data) {
         kfree(image->pixel_data);
     }
     kfree(image);
@@ -180,10 +198,17 @@ static graphics_result_t bmp_draw_pixel_row(bmp_image_t* image, int32_t x, int32
 
     // Calculate source row (handle top-down vs bottom-up)
     uint32 src_row;
-    if (image->top_down) {
-        src_row = row_index;
+    if (scaled && target_height > 0) {
+        uint32 sy = (row_index * image->height) / target_height;
+        if (sy >= image->height) {
+            sy = image->height - 1;
+        }
+        src_row = image->top_down ? sy : (image->height - 1 - sy);
     } else {
-        src_row = image->height - 1 - row_index;
+        if (row_index >= image->height) {
+            return GRAPHICS_ERROR_INVALID_PARAMETER;
+        }
+        src_row = image->top_down ? row_index : (image->height - 1 - row_index);
     }
 
     const uint8* row_data = image->pixel_data + (src_row * row_size_with_padding);

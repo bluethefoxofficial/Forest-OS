@@ -3,6 +3,16 @@
 
 #include "types.h"
 
+#ifndef ARCH_64BIT
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARCH_64BIT 1
+#define ARCH_32BIT 0
+#else
+#define ARCH_64BIT 0
+#define ARCH_32BIT 1
+#endif
+#endif
+
 #define SYSCALL_VECTOR 0x80
 
 // Linux x86_64 syscall numbers - complete table

@@ -183,8 +183,13 @@ static page_entry_t* get_page_entry(uint32 vaddr, bool make, page_directory_t* d
         // Allocate a new page table
         uint32 pt_phys_addr = pmm_alloc_frame();
         if (pt_phys_addr == 0) {
-            kernel_panic("VMM: Failed to allocate frame for new page table!");
-            return NULL; // Should panic, but for safety return NULL
+            print("[VMM] CRITICAL: Failed to allocate frame for new page table!\n");
+            // Try to report available memory
+            uint32 free_frames = (uint32)pmm_get_free_frames();
+            print("[VMM] Free frames available: ");
+            print_dec(free_frames);
+            print("\n");
+            return NULL; // Out of physical memory
         }
         print("[VMM_DBG] New page table physical address: 0x"); print_hex(pt_phys_addr); print("\n");
         
@@ -478,7 +483,7 @@ void vmm_enable_paging(void) {
     }
     
     // Load the physical address of the current page directory into CR3
-    cpu_set_cr3((uint32)vmm_state.current_directory);
+    cpu_set_cr3((uintptr_t)vmm_state.current_directory);
 
     // Enable PAE (if needed, but for 32-bit non-PAE, it's not)
     // For now, assuming 32-bit non-PAE protected mode without explicit PAE.
@@ -507,7 +512,7 @@ void vmm_switch_page_directory(page_directory_t* dir) {
     vmm_state.current_directory = dir;
     // If paging is already enabled, update CR3
     if ((cpu_get_cr0() & (1 << 31)) != 0) {
-        cpu_set_cr3((uint32)dir);
+        cpu_set_cr3((uintptr_t)dir);
     }
 }
 

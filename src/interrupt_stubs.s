@@ -2,19 +2,21 @@
 ; Supports both x86-32 and x86-64 architectures
 ; Provides proper context saving and restoration
 
-; Architecture detection
-%ifdef __x86_64__
+; Architecture detection based on output format (NASM does not always define
+; __x86_64__ for us). This keeps symbol names consistent with the C side.
+%ifidn __OUTPUT_FORMAT__,elf64
     %define ARCH_64BIT 1
     %define ARCH_32BIT 0
+    bits 64
 %else
     %define ARCH_64BIT 0
     %define ARCH_32BIT 1
+    bits 32
 %endif
 
 ; External C functions
 extern interrupt_dispatch_handler
 extern interrupt_common_handler
-extern handle_spurious_interrupt
 extern interrupt_stats_update_latency
 
 ; Global symbols for assembly stubs
@@ -387,7 +389,7 @@ spurious_irq_handler:
     mov qword [rsp + OFFSET_ERROR_CODE], 0
     and rsp, -16
     mov rdi, rsp
-    call handle_spurious_interrupt
+    call interrupt_dispatch_handler
     RESTORE_CONTEXT_64
     add rsp, 8
     iretq
@@ -418,7 +420,8 @@ interrupt_stub_table:
     %elif vec < 32
         dq isr_stub_%+vec
     %elif vec < 48
-        dq irq_stub_%+(vec-32)
+        %assign irq_index (vec-32)
+        dq irq_stub_%+irq_index
     %else
         dq isr_stub_%+vec
     %endif

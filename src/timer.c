@@ -7,8 +7,11 @@
 #include "include/task.h"
 #include "include/io_ports.h"
 #include "include/screen.h"
+#include "include/timer.h"
+#include <stdint.h>
 
 static uint32 timer_ticks = 0;
+static uint64_t timer_frequency = 0;
 
 static void timer_handler(struct interrupt_frame* frame, uint32 error_code) {
     (void)frame;
@@ -26,7 +29,10 @@ bool timer_init(uint32 frequency) {
     if (frequency == 0 || !interrupts_initialized) {
         return false;
     }
-    
+
+    // Store the frequency for later retrieval
+    timer_frequency = (uint64_t)frequency;
+
     // Install timer interrupt handler
     interrupt_set_handler_legacy(IRQ_TIMER, timer_handler);
     
@@ -54,4 +60,22 @@ uint32 timer_get_ticks(void) {
 void timer_shutdown(void) {
     pic_mask_irq(0);
     interrupt_clear_handler(IRQ_TIMER);
+}
+
+uint64_t timer_get_frequency(void) {
+    return timer_frequency;
+}
+
+void timer_sleep_ms(uint32_t milliseconds) {
+    if (timer_frequency == 0) {
+        return;
+    }
+    uint32 start = timer_ticks;
+    uint32 ticks_to_wait = (milliseconds * timer_frequency) / 1000;
+    if (ticks_to_wait == 0) {
+        ticks_to_wait = 1;
+    }
+    while ((timer_ticks - start) < ticks_to_wait) {
+        __asm__ __volatile__("hlt");
+    }
 }

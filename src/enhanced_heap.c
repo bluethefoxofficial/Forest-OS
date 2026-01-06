@@ -154,7 +154,7 @@ void enhanced_heap_init(const enhanced_heap_config_t* config) {
         enhanced_heap_state.config.metadata_protection_enabled = true;
         enhanced_heap_state.config.fragmentation_mitigation_enabled = true;
         enhanced_heap_state.config.debug_mode_enabled = false;
-        enhanced_heap_state.config.max_heap_size = 16 * 1024 * 1024; // 16MB
+        enhanced_heap_state.config.max_heap_size = MEMORY_KERNEL_HEAP_MAX_SIZE;
         enhanced_heap_state.config.expansion_increment = 64 * 1024; // 64KB
     }
     

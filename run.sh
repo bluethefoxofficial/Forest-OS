@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Default configuration
-DEFAULT_MEMORY="1024"
+DEFAULT_MEMORY="10000"
 DEFAULT_TIMEOUT="3600"
 DEFAULT_ISO=""
 DEFAULT_MODE="graphics"

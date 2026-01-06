@@ -724,6 +724,56 @@ graphics_result_t graphics_draw_pixel(int32_t x, int32_t y, graphics_color_t col
     return driver->ops->draw_pixel(graphics_state.primary_device, x, y, color);
 }
 
+graphics_result_t graphics_get_pixel(int32_t x, int32_t y, graphics_color_t* color) {
+    if (!color || !graphics_state.primary_device) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+
+    display_driver_t* driver = graphics_state.primary_device->driver;
+    if (driver && driver->ops->get_pixel) { // Check if driver has specific get_pixel
+        return driver->ops->get_pixel(graphics_state.primary_device, x, y, color);
+    }
+
+    // Fallback: direct framebuffer read
+    if (!ensure_framebuffer_mapped()) {
+        return GRAPHICS_ERROR_GENERIC;
+    }
+
+    framebuffer_t* fb = graphics_state.current_framebuffer;
+    if (!fb || !fb->virtual_addr) {
+        return GRAPHICS_ERROR_GENERIC;
+    }
+
+    if (x < 0 || y < 0 || (uint32_t)x >= fb->width || (uint32_t)y >= fb->height) {
+        return GRAPHICS_ERROR_INVALID_PARAMETER;
+    }
+
+    uint8_t* pixel_addr = (uint8_t*)fb->virtual_addr + (y * fb->pitch) + (x * (fb->bpp / 8));
+    uint32_t raw_pixel = 0;
+
+    // Read raw pixel data based on BPP
+    switch (fb->bpp) {
+        case 8:
+            raw_pixel = *pixel_addr;
+            break;
+        case 15: // Not directly handled by graphics_pixel_to_color, but could be extended
+        case 16:
+            raw_pixel = *(uint16_t*)pixel_addr;
+            break;
+        case 24: // Read 3 bytes
+            raw_pixel = pixel_addr[0] | (pixel_addr[1] << 8) | (pixel_addr[2] << 16);
+            break;
+        case 32:
+            raw_pixel = *(uint32_t*)pixel_addr;
+            break;
+        default:
+            return GRAPHICS_ERROR_NOT_SUPPORTED;
+    }
+    
+    *color = graphics_pixel_to_color(raw_pixel, fb->format);
+    return GRAPHICS_SUCCESS;
+}
+
 graphics_result_t graphics_draw_rect(const graphics_rect_t* rect, 
                                    graphics_color_t color, bool filled) {
     if (!rect || !graphics_state.primary_device) {

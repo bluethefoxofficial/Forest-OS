@@ -1344,3 +1344,86 @@ bool tty_try_enable_graphics_backend(void) {
 bool tty_is_ready(void) {
     return tty_state.initialized && graphics_is_initialized();
 }
+
+bool tty_get_dimensions(uint16_t* cols, uint16_t* rows) {
+    if (!tty_state.initialized || !tty_state.cells) {
+        return false;
+    }
+
+    if (cols) {
+        *cols = tty_state.cols;
+    }
+    if (rows) {
+        *rows = tty_state.rows;
+    }
+    return true;
+}
+
+bool tty_get_cell_metrics(uint16_t* char_width, uint16_t* char_height) {
+    if (!graphics_is_initialized()) {
+        return false;
+    }
+
+    uint16_t cw = 8;
+    uint16_t ch = 16;
+    font_t* sys_font = NULL;
+
+    if (font_get_system_font(&sys_font) == GRAPHICS_SUCCESS && sys_font) {
+        if (sys_font->fixed_width > 0) {
+            cw = sys_font->fixed_width;
+        }
+        if (sys_font->metrics.height > 0) {
+            ch = sys_font->metrics.height;
+        }
+    }
+
+    if (char_width) {
+        *char_width = cw;
+    }
+    if (char_height) {
+        *char_height = ch;
+    }
+    return true;
+}
+
+bool tty_get_cell(uint16_t x, uint16_t y, char* ch, uint8_t* attr) {
+    if (!tty_state.initialized || !tty_state.cells) {
+        return false;
+    }
+    if (x >= tty_state.cols || y >= tty_state.rows) {
+        return false;
+    }
+
+    tty_cell_t cell = tty_state.cells[tty_cell_index(x, y)];
+    if (ch) {
+        *ch = cell.ch;
+    }
+    if (attr) {
+        *attr = cell.attr;
+    }
+    return true;
+}
+
+void tty_redraw_region(uint16_t x, uint16_t y, uint16_t width, uint16_t height) {
+    if (!tty_state.cells || width == 0 || height == 0) {
+        return;
+    }
+
+    uint16_t max_x = x + width;
+    uint16_t max_y = y + height;
+    if (max_x > tty_state.cols) {
+        max_x = tty_state.cols;
+    }
+    if (max_y > tty_state.rows) {
+        max_y = tty_state.rows;
+    }
+
+    for (uint16_t row = y; row < max_y; row++) {
+        for (uint16_t col = x; col < max_x; col++) {
+            tty_cell_t cell = tty_state.cells[tty_cell_index(col, row)];
+            tty_render_cell(col, row, cell.ch, cell.attr);
+        }
+    }
+
+    tty_apply_cursor();
+}

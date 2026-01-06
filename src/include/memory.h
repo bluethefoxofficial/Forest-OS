@@ -56,13 +56,15 @@ struct interrupt_frame;
 #define MEMORY_PRETOUCH_LIMIT_BYTES      (8 * 1024 * 1024) // Pre-touch only within first 8MB
 
 // PMM guardrails
-#define MEMORY_PMM_MAX_FRAMES (1024 * 1024) // Cap to 4GB worth of frames by default
+#define MEMORY_PMM_MAX_FRAMES (16 * 1024 * 1024) // Cap to 64GB worth of frames by default
 
 // Memory layout constants
 #define MEMORY_KERNEL_START     0x00100000  // 1MB - where kernel starts
 #define MEMORY_PMM_START        0x00400000  // 4MB - where PMM bitmap starts
 #define MEMORY_PMM_SIZE         0x40000     // 256KB for PMM bitmap
 #define MEMORY_KERNEL_HEAP_START (MEMORY_PMM_START + MEMORY_PMM_SIZE) // Heap starts after PMM
+#define MEMORY_KERNEL_HEAP_INITIAL_SIZE (1024 * 1024)    // 1MB bootstrap heap
+#define MEMORY_KERNEL_HEAP_MAX_SIZE     (128 * 1024 * 1024) // 128MB max heap (tuned for large assets)
 #define MEMORY_USER_START       0x40000000  // 1GB - user space starts
 #define USER_STACK_TOP          0xC0000000  // Top of user-mode stack
 #define MEMORY_MAX_ADDR         0xFFFFF000  // Maximum addressable memory
@@ -107,6 +109,15 @@ typedef page_entry_t page_directory_t[1024];
 static inline uintptr_t vmm_pdir_phys(page_directory_t* dir) {
     return (uintptr_t)dir;
 }
+
+// Architecture-sized physical address helpers
+#if defined(__x86_64__)
+typedef uint64_t phys_addr_t;
+typedef uint64_t frame_count_t;
+#else
+typedef uint32_t phys_addr_t;
+typedef uint32_t frame_count_t;
+#endif
 
 // Memory region types (multiboot/e820 compatible)
 #ifndef MEMORY_REGION_TYPE_T_DEFINED
@@ -170,32 +181,32 @@ typedef enum {
 memory_result_t pmm_init(memory_region_t* regions, uint32_t region_count);
 
 // Allocate a single page frame
-uint32_t pmm_alloc_frame(void);
+phys_addr_t pmm_alloc_frame(void);
 
 // Allocate multiple contiguous page frames
-uint32_t pmm_alloc_frames(uint32_t count);
+phys_addr_t pmm_alloc_frames(uint32_t count);
 
 // Best-effort allocation that can fall back to scattered frames when fragmented
-memory_result_t pmm_alloc_scattered(uint32_t count, uint32_t* frames_out,
+memory_result_t pmm_alloc_scattered(uint32_t count, phys_addr_t* frames_out,
                                     uint32_t max_frames, uint32_t* allocated);
 
 // Free a page frame
-memory_result_t pmm_free_frame(uint32_t frame_addr);
+memory_result_t pmm_free_frame(phys_addr_t frame_addr);
 
 // Free multiple page frames
-memory_result_t pmm_free_frames(uint32_t frame_addr, uint32_t count);
+memory_result_t pmm_free_frames(phys_addr_t frame_addr, uint32_t count);
 
 // Check if frame is free
-bool pmm_is_frame_free(uint32_t frame_addr);
+bool pmm_is_frame_free(phys_addr_t frame_addr);
 
 // Get total number of frames
-uint32_t pmm_get_total_frames(void);
+frame_count_t pmm_get_total_frames(void);
 
 // Get number of free frames
-uint32_t pmm_get_free_frames(void);
+frame_count_t pmm_get_free_frames(void);
 
 // Reserve a range of physical memory (mark as used)
-void pmm_reserve_range(uint32_t start_addr, uint32_t end_addr);
+void pmm_reserve_range(phys_addr_t start_addr, phys_addr_t end_addr);
 
 // =============================================================================
 // VIRTUAL MEMORY MANAGER (VMM)

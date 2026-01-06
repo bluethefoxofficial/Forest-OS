@@ -6,6 +6,7 @@
 #include "include/memory_region_manager.h"
 #include "include/page_fault_recovery.h"
 #include "include/interrupt.h"
+#include "include/task.h"
 
 #if ARCH_64BIT
 #define FRAME_IP(f)    ((f)->rip)
@@ -91,6 +92,16 @@ void page_fault_handler_minimal(uint32 fault_addr, uint32 error_code, struct int
     if (secure_vmm_handle_page_fault(fault_addr, error_code) == 0) {
         __sync_fetch_and_sub(&page_fault_in_progress, 1);
         return;
+    }
+
+    // Surface which task faulted so we can diagnose userspace loader issues.
+    if (current_task) {
+        write_string_direct("PF pid=", 0, 13, 0x0E);
+        write_hex_direct(current_task->id, 7, 13, 0x0E);
+        write_string_direct(" addr=", 17, 13, 0x0E);
+        write_hex_direct(fault_addr, 24, 13, 0x0E);
+        write_string_direct(" err=", 35, 13, 0x0E);
+        write_hex_direct(error_code, 41, 13, 0x0E);
     }
     
     // Attempt intelligent recovery before panicking

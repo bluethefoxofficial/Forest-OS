@@ -44,6 +44,7 @@
 #include "include/shell_loader.h"
 #include "include/dks.h"
 #include "include/session.h"
+#include "include/sound.h"
 
 typedef struct {
     char label[64];
@@ -272,7 +273,9 @@ static void initialize_framebuffer_console_early(void) {
         bool tty_success = tty_init();
         if (tty_success) {
             tty_clear();
-            boot_banner();
+            if (!g_silent_boot) {
+                boot_banner();
+            }
             boot_status("Framebuffer TTY with truecolor support", true);
             g_framebuffer_tty_ready = true;
         } else {
@@ -363,9 +366,11 @@ void startk(uint32 magic, uint32 mbi_addr) {
 
 void kmain(uint32 magic, uint32 mbi_addr) {
     // Initialize early text mode console first for debugging
-    clearScreen();
-    print_colored("Forest OS kernel v1.0 - Early Boot\n", TEXT_ATTR_LIGHT_GREEN, TEXT_ATTR_BLACK);
-    print_colored("Text mode console active\n\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
+    if (!g_silent_boot) {
+        clearScreen();
+        print_colored("Forest OS kernel v1.0 - Early Boot\n", TEXT_ATTR_LIGHT_GREEN, TEXT_ATTR_BLACK);
+        print_colored("Text mode console active\n\n", TEXT_ATTR_LIGHT_GRAY, TEXT_ATTR_BLACK);
+    }
 
     // Parse kernel command line for bootmode=silent
     if (magic == MULTIBOOT_BOOTLOADER_MAGIC && mbi_addr != 0) {
@@ -396,7 +401,6 @@ void kmain(uint32 magic, uint32 mbi_addr) {
         }
     }
     
-    // We'll initialize graphics much later in the boot process
     keyboard_set_driver_mode(KEYBOARD_DRIVER_LEGACY);
     
     bool hw_detected = hardware_detect_init();
@@ -527,7 +531,7 @@ void kmain(uint32 magic, uint32 mbi_addr) {
         .metadata_protection_enabled = true,
         .fragmentation_mitigation_enabled = true,
         .debug_mode_enabled = false,
-        .max_heap_size = 16 * 1024 * 1024,
+        .max_heap_size = MEMORY_KERNEL_HEAP_MAX_SIZE,
         .expansion_increment = 64 * 1024
     };
     
@@ -623,11 +627,12 @@ void kmain(uint32 magic, uint32 mbi_addr) {
         boot_status("Timer and task scheduling", true);
     }
     
-    // Temporarily disable sound system to isolate crash
-#if CONFIG_DEBUG_BOOT
-    KBOOT_DEBUG("[KERNEL] Skipping sound system initialization (debugging crash)\n");
-#endif
-    boot_status("Sound subsystem", false);
+    // Initialize sound subsystem
+    bool sound_ok = sound_system_init();
+    boot_status("Sound subsystem", sound_ok);
+    if (!sound_ok) {
+        tty_write_ansi("\x1b[33m[WARN]\x1b[0m Sound system unavailable (non-critical).\n");
+    }
 
 #if CONFIG_DEBUG_BOOT
     KBOOT_DEBUG("[KERNEL] About to initialize lock debugging...\n");

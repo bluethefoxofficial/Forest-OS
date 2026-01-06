@@ -48,6 +48,53 @@ static void idle_task_function(void) {
 // Forward declaration for assembly function
 extern void task_start_usermode_asm(void);
 
+// Simple helpers for mapping/unmapping user pages for task-local regions
+static bool task_map_user_pages(page_directory_t* dir, uint32 start, uint32 end, uint32 flags) {
+    if (!dir || start >= end) {
+        return false;
+    }
+
+    uint32 aligned_start = memory_align_down(start, MEMORY_PAGE_SIZE);
+    uint32 aligned_end = memory_align_up(end, MEMORY_PAGE_SIZE);
+
+    for (uint32 va = aligned_start; va < aligned_end; va += MEMORY_PAGE_SIZE) {
+        uint32 frame = pmm_alloc_frame();
+        if (!frame) {
+            return false;
+        }
+
+        memory_result_t res = vmm_map_page(dir, va, frame, flags);
+        if (res == MEMORY_ERROR_ALREADY_MAPPED) {
+            pmm_free_frame(frame);
+            continue;
+        }
+
+        if (res != MEMORY_OK) {
+            pmm_free_frame(frame);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void task_unmap_user_pages(page_directory_t* dir, uint32 start, uint32 end) {
+    if (!dir || start >= end) {
+        return;
+    }
+
+    uint32 aligned_start = memory_align_down(start, MEMORY_PAGE_SIZE);
+    uint32 aligned_end = memory_align_up(end, MEMORY_PAGE_SIZE);
+
+    for (uint32 va = aligned_start; va < aligned_end; va += MEMORY_PAGE_SIZE) {
+        uint32 phys = vmm_get_physical_addr(dir, va);
+        vmm_unmap_page(dir, va);
+        if (phys) {
+            pmm_free_frame(phys);
+        }
+    }
+}
+
 static void setup_initial_cpu_state(task_t* task, uint32 entry_point, uint32 user_stack_top, uint32 kernel_stack_top) {
     // The kernel stack for the new task must match what task_switch_asm expects.
     //
@@ -185,6 +232,9 @@ static task_t* create_kernel_task(void (*entry_point)(void), const char* name) {
     new_task->uid = 0;
     new_task->gid = 0;
     new_task->groups_mask = 1; // root group bit
+    new_task->user_heap_base = 0;
+    new_task->user_heap_limit = 0;
+    new_task->user_brk = 0;
 
     // No ELF info for kernel tasks
     memory_set((uint8*)&new_task->elf_info, 0, sizeof(elf_load_info_t));
@@ -252,6 +302,9 @@ void tasks_init(void) {
     kernel_task->uid = 0;
     kernel_task->gid = 0;
     kernel_task->groups_mask = 1;
+    kernel_task->user_heap_base = 0;
+    kernel_task->user_heap_limit = 0;
+    kernel_task->user_brk = 0;
     gdt_set_kernel_stack(kernel_task->kernel_stack);
 
     // No ELF info for the kernel task itself
@@ -309,6 +362,13 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
     new_task->gid = auth_active_gid();
     new_task->groups_mask = auth_active_groups_mask();
     new_task->last_active_tick = 0;
+    new_task->user_heap_base = 0;
+    new_task->user_heap_limit = 0;
+    new_task->user_brk = 0;
+    uint32 heap_base = 0;
+    uint32 heap_limit = 0;
+    uint32 initial_heap_end = 0;
+    bool heap_mapped = false;
 
     // 1. Load ELF into a new page directory
     elf_load_info_t elf_info;
@@ -364,7 +424,41 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
 
         stack_frames[stack_pages_mapped++] = p_addr;
     }
+
+    // Establish a per-task heap just below the user stack with a small guard.
+    uint32 stack_base = USER_STACK_TOP - (USER_STACK_SIZE * MEMORY_PAGE_SIZE);
+    uint32 guard_bytes = USER_HEAP_GUARD_PAGES * MEMORY_PAGE_SIZE;
+    heap_base = memory_align_up(elf_info.base_address + elf_info.total_size, MEMORY_PAGE_SIZE);
+    if (heap_base < MEMORY_USER_START) {
+        heap_base = MEMORY_USER_START;
+    }
+    heap_limit = (stack_base > guard_bytes) ? (stack_base - guard_bytes) : stack_base;
+    if (heap_base >= heap_limit) {
+        debuglog(DEBUG_ERROR, "[TASK] Heap range overlaps stack for '%s' (heap_base=0x%x, limit=0x%x)\n",
+                 name ? name : "(null)", heap_base, heap_limit);
+        print_colored("[TASK] Failed to reserve heap range for task\n", 0x0C, 0x00);
+        goto stack_fail;
+    }
+
+    initial_heap_end = heap_base + MEMORY_PAGE_SIZE;
+    if (initial_heap_end > heap_limit) {
+        initial_heap_end = heap_limit;
+    }
+
+    if (!task_map_user_pages((page_directory_t*)elf_info.page_directory,
+                             heap_base,
+                             initial_heap_end,
+                             PAGE_PRESENT | PAGE_USER | PAGE_WRITABLE)) {
+        debuglog(DEBUG_ERROR, "[TASK] Failed to map initial heap page for '%s'\n", name ? name : "(null)");
+        print_colored("[TASK] Failed to map initial heap page\n", 0x0C, 0x00);
+        goto stack_fail;
+    }
+    heap_mapped = true;
+
     vmm_switch_page_directory(current_pd_ptr);
+    new_task->user_heap_base = heap_base;
+    new_task->user_heap_limit = heap_limit;
+    new_task->user_brk = heap_base;
 
     // 3. Allocate a kernel stack for the new task
     // We need 2 pages for the kernel stack (8KB)
@@ -374,11 +468,7 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
         print_colored("[TASK] Failed to allocate kernel stack for task: ", 0x0C, 0x00);
         print(name);
         print("\n");
-        // Need to clean up previously allocated frames (user stack) and page directory
-        vmm_destroy_page_directory((page_directory_t*)elf_info.page_directory); // This should also free pmm frames for the user stack
-        kfree(new_task);
-        spinlock_release(&task_scheduler_lock);
-        return 0;
+        goto stack_fail;
     }
     new_task->kernel_stack_base = kernel_stack_vaddr; // Store the base address
     
@@ -430,6 +520,9 @@ task_t* task_create_elf(const uint8* elf_data, size_t elf_size, const char* name
 
 stack_fail:
     vmm_switch_page_directory(current_pd_ptr);
+    if (heap_mapped) {
+        task_unmap_user_pages((page_directory_t*)elf_info.page_directory, heap_base, initial_heap_end);
+    }
     vmm_destroy_page_directory((page_directory_t*)elf_info.page_directory);
     for (int j = 0; j < stack_pages_mapped; j++) {
         pmm_free_frame(stack_frames[j]);

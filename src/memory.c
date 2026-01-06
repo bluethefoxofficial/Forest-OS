@@ -517,9 +517,10 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
     print("[MEM] Setting up identity mapping...\n");
     page_directory_t* kernel_dir = vmm_get_current_page_directory();
     
-    const uint32 initial_heap_size = 1024 * 1024; // 1MB heap bootstrap
+    const uint32 initial_heap_size = MEMORY_KERNEL_HEAP_INITIAL_SIZE;
+    const uint32 heap_start = memory_get_kernel_heap_start();
     uint32 kernel_buffer_end = (uint32)&kernel_end + 0x100000; // keep extra space for modules
-    uint32 heap_region_end = memory_get_kernel_heap_start() + initial_heap_size;
+    uint32 heap_region_end = heap_start + initial_heap_size;
     uint32 identity_end = kernel_buffer_end > heap_region_end ?
                           kernel_buffer_end : heap_region_end;
     uint32 kernel_map_end = memory_align_up(identity_end, MEMORY_PAGE_SIZE);
@@ -551,10 +552,14 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
     print("[MEM] Page fault handler registered\n");
     
     // Step 6: Drop the identity map for the heap range so heap_init can map
-    // fresh physical frames without running into duplicate mappings.
+    // fresh physical frames without running into duplicate mappings. Remove
+    // it across the entire kernel heap span (not just the bootstrap size) so
+    // later heap expansions don't trip over the early identity mapping from
+    // vmm_init().
+    uint32 heap_unmap_end = heap_start + MEMORY_KERNEL_HEAP_MAX_SIZE;
     result = unmap_identity_range(kernel_dir,
-                                  memory_get_kernel_heap_start(),
-                                  memory_get_kernel_heap_start() + initial_heap_size);
+                                  heap_start,
+                                  heap_unmap_end);
     if (result != MEMORY_OK) {
         print("[MEM] Failed to unmap temporary heap mapping\n");
         memory_panic_stage("unmap_identity_range (heap)", result);
@@ -563,7 +568,7 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
     
     // Step 7: Initialize kernel heap
     print("[MEM] Initializing kernel heap...\n");
-    result = heap_init(memory_get_kernel_heap_start(), initial_heap_size);
+    result = heap_init(heap_start, initial_heap_size);
     if (result != MEMORY_OK) {
         print("[MEM] Heap initialization failed: ");
         print(memory_result_to_string(result));
@@ -601,11 +606,8 @@ memory_stats_t memory_get_stats(void) {
         stats.usable_memory_kb = memory_info.usable_memory_kb;
         
         // Get PMM stats
-        extern uint32 pmm_get_total_frames(void);
-        extern uint32 pmm_get_free_frames(void);
-        
-        stats.total_frames = pmm_get_total_frames();
-        stats.free_frames = pmm_get_free_frames();
+        stats.total_frames = (uint32)pmm_get_total_frames();
+        stats.free_frames = (uint32)pmm_get_free_frames();
         stats.used_frames = stats.total_frames - stats.free_frames;
         
         // Get heap stats

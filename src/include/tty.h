@@ -46,4 +46,19 @@ bool tty_try_enable_graphics_backend(void);
 // Returns true once the framebuffer TTY has successfully initialized.
 bool tty_is_ready(void);
 
+// Query current TTY dimensions (columns/rows). Returns false if TTY is not
+// initialized yet.
+bool tty_get_dimensions(uint16_t* cols, uint16_t* rows);
+
+// Return the pixel dimensions of a single TTY cell based on the active font.
+// Falls back to 8x16 if metrics are unavailable.
+bool tty_get_cell_metrics(uint16_t* char_width, uint16_t* char_height);
+
+// Read the character and attribute stored at a given cell. Returns false if
+// the coordinates are out of bounds or the TTY is not ready.
+bool tty_get_cell(uint16_t x, uint16_t y, char* ch, uint8_t* attr);
+
+// Redraw a rectangular region of the TTY from its backing cell buffer.
+void tty_redraw_region(uint16_t x, uint16_t y, uint16_t width, uint16_t height);
+
 #endif // TTY_H

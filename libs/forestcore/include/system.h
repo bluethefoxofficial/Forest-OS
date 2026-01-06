@@ -2,6 +2,7 @@
 #define SYSTEM_H
 #include "types.h"
 #include "util.h"
+#include <stdint.h>
 
 uint8 inportb (uint16 _port);
 uint16 inportw(uint16 _port);
@@ -34,7 +35,7 @@ bool rtc_read_time(rtc_time_t* out);
 void timer_sleep_ms(uint32 milliseconds);
 uint32 cpu_get_cr0(void);
 void cpu_set_cr0(uint32 value);
-void cpu_set_cr3(uint32 value);
+void cpu_set_cr3(uintptr_t value);
 
 void *memset(void *s, int c, size_t n);
 void *memcpy(void *dest, const void *src, size_t n);

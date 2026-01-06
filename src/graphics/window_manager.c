@@ -1,5 +1,6 @@
 #include "../include/graphics/window_manager.h"
 #include "../include/graphics/graphics_manager.h"
+#include "../include/graphics/font_renderer.h"
 #include "../include/memory.h"
 #include "../include/string.h"
 #include "../include/debuglog.h"
@@ -238,7 +239,22 @@ graphics_result_t window_destroy(window_handle_t handle) {
     // Remove focus if this window was focused
     if (wm_state.focused_window == handle) {
         wm_state.focused_window = INVALID_WINDOW_HANDLE;
-        // TODO: Focus next window in z-order
+
+        // Focus next window in z-order (find highest z-order window that isn't being destroyed)
+        window_t* best_candidate = NULL;
+        int32_t best_z = -1;
+        window_t* scan = wm_state.window_list;
+        while (scan) {
+            if (scan->handle != handle && scan->visible &&
+                scan->state != WINDOW_STATE_MINIMIZED && scan->z_order > best_z) {
+                best_z = scan->z_order;
+                best_candidate = scan;
+            }
+            scan = scan->next;
+        }
+        if (best_candidate) {
+            window_focus(best_candidate->handle);
+        }
     }
     
     // Destroy window surface
@@ -545,33 +561,137 @@ static graphics_result_t draw_window_decorations(window_t* window) {
     if (!window || !window->surface) {
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
-    
+
     // Draw title bar
     graphics_rect_t title_bar = {
         0, 0, window->width, wm_state.config.title_bar_height
     };
-    
+
     // Fill title bar background
-    graphics_color_t title_color = window->focused ? 
+    graphics_color_t title_color = window->focused ?
         wm_state.config.title_bar_color : COLOR_GRAY;
-    
+
     // Simple title bar drawing - in a real implementation you'd use proper drawing APIs
     if (window->surface->pixels) {
         uint32_t* pixels = (uint32_t*)window->surface->pixels;
         uint32_t title_pixel = graphics_color_to_pixel(title_color, window->surface->format);
-        
+
         for (uint32_t y = 0; y < wm_state.config.title_bar_height; y++) {
             for (uint32_t x = 0; x < window->width; x++) {
-                if (y * (window->surface->pitch / 4) + x < 
+                if (y * (window->surface->pitch / 4) + x <
                     (window->surface->pitch / 4) * window->surface->height) {
                     pixels[y * (window->surface->pitch / 4) + x] = title_pixel;
                 }
             }
         }
     }
-    
-    // TODO: Draw window title text, buttons, etc.
-    
+
+    // Draw window title text
+    if (window->title[0] != '\0' && window->surface->pixels) {
+        text_style_t title_style = {
+            .foreground = wm_state.config.title_text_color,
+            .background = title_color,
+            .has_background = false,
+            .underline = false,
+            .strikethrough = false
+        };
+
+        font_t* font = NULL;
+        font_get_system_font(&font);
+        if (font) {
+            // Draw title text centered vertically in title bar, with left padding
+            int32_t text_x = 8; // Left padding
+            int32_t text_y = (wm_state.config.title_bar_height - 8) / 2; // Center 8px font
+            font_render_text(font, window->surface, text_x, text_y, window->title, &title_style);
+        }
+    }
+
+    // Draw window control buttons (close, minimize, maximize)
+    if (window->surface->pixels && window->width > 60) {
+        uint32_t btn_size = wm_state.config.title_bar_height - 6;
+        uint32_t btn_y = 3;
+
+        // Close button (red X) - rightmost
+        uint32_t close_x = window->width - btn_size - 4;
+        graphics_color_t close_bg = graphics_make_color(200, 60, 60, 255);
+        uint32_t close_pixel = graphics_color_to_pixel(close_bg, window->surface->format);
+        uint32_t white_pixel = graphics_color_to_pixel(COLOR_WHITE, window->surface->format);
+
+        // Draw close button background
+        for (uint32_t y = btn_y; y < btn_y + btn_size; y++) {
+            for (uint32_t x = close_x; x < close_x + btn_size; x++) {
+                if (y < window->surface->height && x < window->width) {
+                    ((uint32_t*)window->surface->pixels)[y * (window->surface->pitch / 4) + x] = close_pixel;
+                }
+            }
+        }
+
+        // Draw X on close button
+        for (uint32_t i = 3; i < btn_size - 3; i++) {
+            uint32_t y1 = btn_y + i;
+            uint32_t x1 = close_x + i;
+            uint32_t x2 = close_x + btn_size - 1 - i;
+            if (y1 < window->surface->height && x1 < window->width) {
+                ((uint32_t*)window->surface->pixels)[y1 * (window->surface->pitch / 4) + x1] = white_pixel;
+            }
+            if (y1 < window->surface->height && x2 < window->width) {
+                ((uint32_t*)window->surface->pixels)[y1 * (window->surface->pitch / 4) + x2] = white_pixel;
+            }
+        }
+
+        // Maximize button (gray square) - middle
+        uint32_t max_x = close_x - btn_size - 2;
+        graphics_color_t max_bg = graphics_make_color(100, 100, 100, 255);
+        uint32_t max_pixel = graphics_color_to_pixel(max_bg, window->surface->format);
+
+        // Draw maximize button background
+        for (uint32_t y = btn_y; y < btn_y + btn_size; y++) {
+            for (uint32_t x = max_x; x < max_x + btn_size; x++) {
+                if (y < window->surface->height && x < window->width) {
+                    ((uint32_t*)window->surface->pixels)[y * (window->surface->pitch / 4) + x] = max_pixel;
+                }
+            }
+        }
+
+        // Draw square outline on maximize button
+        for (uint32_t i = 4; i < btn_size - 4; i++) {
+            uint32_t top_y = btn_y + 4;
+            uint32_t bot_y = btn_y + btn_size - 5;
+            uint32_t left_x = max_x + 4;
+            uint32_t right_x = max_x + btn_size - 5;
+            if (top_y < window->surface->height && max_x + i < window->width) {
+                ((uint32_t*)window->surface->pixels)[top_y * (window->surface->pitch / 4) + max_x + i] = white_pixel;
+                ((uint32_t*)window->surface->pixels)[bot_y * (window->surface->pitch / 4) + max_x + i] = white_pixel;
+            }
+            if (btn_y + i < window->surface->height && left_x < window->width) {
+                ((uint32_t*)window->surface->pixels)[(btn_y + i) * (window->surface->pitch / 4) + left_x] = white_pixel;
+                ((uint32_t*)window->surface->pixels)[(btn_y + i) * (window->surface->pitch / 4) + right_x] = white_pixel;
+            }
+        }
+
+        // Minimize button (gray with line) - leftmost of the three
+        uint32_t min_x = max_x - btn_size - 2;
+        graphics_color_t min_bg = graphics_make_color(100, 100, 100, 255);
+        uint32_t min_pixel = graphics_color_to_pixel(min_bg, window->surface->format);
+
+        // Draw minimize button background
+        for (uint32_t y = btn_y; y < btn_y + btn_size; y++) {
+            for (uint32_t x = min_x; x < min_x + btn_size; x++) {
+                if (y < window->surface->height && x < window->width) {
+                    ((uint32_t*)window->surface->pixels)[y * (window->surface->pitch / 4) + x] = min_pixel;
+                }
+            }
+        }
+
+        // Draw horizontal line on minimize button
+        uint32_t line_y = btn_y + btn_size / 2;
+        for (uint32_t i = 4; i < btn_size - 4; i++) {
+            if (line_y < window->surface->height && min_x + i < window->width) {
+                ((uint32_t*)window->surface->pixels)[line_y * (window->surface->pitch / 4) + min_x + i] = white_pixel;
+            }
+        }
+    }
+
     return GRAPHICS_SUCCESS;
 }
 

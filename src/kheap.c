@@ -42,8 +42,9 @@ static struct {
 
 // External VMM and PMM functions
 extern memory_result_t vmm_map_page(page_directory_t* dir, uint32 vaddr, uint32 paddr, uint32 flags);
+extern memory_result_t vmm_unmap_page(page_directory_t* dir, uint32 vaddr);
+extern bool vmm_is_mapped(page_directory_t* dir, uint32 vaddr);
 extern page_directory_t* vmm_get_current_page_directory(void);
-extern uint32 pmm_alloc_frame(void);
 
 // =============================================================================
 // INTERNAL HELPER FUNCTIONS
@@ -283,21 +284,62 @@ static memory_result_t expand_heap(uint32 needed_size) {
     // Ensure TLB entries for this range are clean before mapping
     tlb_safe_heap_expand(heap_state.current_end, pages_needed);
     
+    page_directory_t* current_dir = vmm_get_current_page_directory();
+    
     // Allocate and map new pages
     for (uint32 i = 0; i < pages_needed; i++) {
         uint32 phys_frame = pmm_alloc_frame();
         if (phys_frame == 0) {
-            print("[HEAP] ERROR: PMM allocation failed during heap expansion\n");
+            print("[HEAP] ERROR: PMM allocation failed during heap expansion (page ");
+            print_dec(i);
+            print(" of ");
+            print_dec(pages_needed);
+            print(")\n");
+            // Try to report available memory
+            uint32 free_frames = (uint32)pmm_get_free_frames();
+            print("[HEAP] Free frames available: ");
+            print_dec(free_frames);
+            print("\n");
             return MEMORY_ERROR_OUT_OF_MEMORY;
         }
-        
+
         uint32 vaddr = heap_state.current_end + (i * MEMORY_PAGE_SIZE);
-        memory_result_t result = vmm_map_page(vmm_get_current_page_directory(), 
-                                            vaddr, phys_frame, 
-                                            PAGE_PRESENT | PAGE_WRITABLE);
-        
+
+        if (vmm_is_mapped(current_dir, vaddr)) {
+            memory_result_t unmap_res = vmm_unmap_page(current_dir, vaddr);
+            if (unmap_res != MEMORY_OK && unmap_res != MEMORY_ERROR_NOT_MAPPED) {
+                print("[HEAP] ERROR: Failed to clear stale mapping at vaddr=0x");
+                print_hex(vaddr);
+                print("\n");
+                pmm_free_frame(phys_frame);
+                return unmap_res;
+            }
+            tlb_invalidate_page(vaddr);
+        }
+
+        memory_result_t result = vmm_map_page(current_dir,
+                                              vaddr,
+                                              phys_frame,
+                                              PAGE_PRESENT | PAGE_WRITABLE);
+
         if (result != MEMORY_OK) {
-            print("[HEAP] ERROR: VMM mapping failed during heap expansion\n");
+            print("[HEAP] ERROR: VMM mapping failed during heap expansion (page ");
+            print_dec(i);
+            print(" of ");
+            print_dec(pages_needed);
+            print(", vaddr=0x");
+            print_hex(vaddr);
+            print(", paddr=0x");
+            print_hex(phys_frame);
+            print(", result=");
+            print_dec(result);
+            print(")\n");
+            pmm_free_frame(phys_frame);
+            // Try to report available memory
+            uint32 free_frames = (uint32)pmm_get_free_frames();
+            print("[HEAP] Free frames available: ");
+            print_dec(free_frames);
+            print("\n");
             return result;
         }
         
@@ -342,7 +384,7 @@ memory_result_t heap_init(uint32 start_addr, uint32 initial_size) {
     
     heap_state.start_addr = start_addr;
     heap_state.current_end = start_addr;
-    heap_state.max_size = 16 * 1024 * 1024; // 16MB max heap
+    heap_state.max_size = MEMORY_KERNEL_HEAP_MAX_SIZE;
     heap_state.total_size = 0;
     heap_state.used_size = 0;
     heap_state.free_size = 0;
@@ -370,14 +412,17 @@ void* kmalloc(size_t size) {
         return NULL;
     }
     
-    // Prevent extremely large allocations
-    if (size > heap_state.max_size / 2) {
-        print("[HEAP] ERROR: Allocation too large: "); print_dec(size); print("\n");
+    // Prevent allocations that can never fit in the heap (account for header)
+    uint32 max_alloc = heap_state.max_size > sizeof(heap_block_t)
+        ? heap_state.max_size - sizeof(heap_block_t)
+        : 0;
+    if (size > (size_t)max_alloc) {
+        print("[HEAP] ERROR: Allocation too large for heap: "); print_dec(size); print("\n");
         return NULL;
     }
     
     // Calculate total size needed (including header)
-    uint32 total_size = align_size(sizeof(heap_block_t) + size);
+    uint32 total_size = align_size((uint32)(sizeof(heap_block_t) + size));
     
     // Find suitable free block
     heap_block_t* block = find_free_block(total_size);

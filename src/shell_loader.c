@@ -11,6 +11,7 @@
 #define USER_STACK_PAGES 4
 #define MAX_ELF_SIZE (1024 * 1024)
 #define MAX_BSS_SIZE (4 * 1024 * 1024)
+#define DEFAULT_SHELL_PATH "hbin/shell.elf"
 
 static uint32 g_last_shell_pid = 0;
 static task_t* g_last_shell_task = NULL;
@@ -30,14 +31,16 @@ bool shell_launch_embedded(void) {
     g_last_shell_pid = 0;
     g_last_shell_task = NULL;
 
-    debuglog(DEBUG_INFO, "[SHELL] Loading shell from /bin/invalidshellname.elf\n");
-    print("[SHELL] Loading shell from /bin/invalidshellname.elf\n");
+    debuglog(DEBUG_INFO, "[SHELL] Loading shell from /%s\n", DEFAULT_SHELL_PATH);
+    print("[SHELL] Loading shell from /");
+    print(DEFAULT_SHELL_PATH);
+    print("\n");
 
-
-
-    if (!vfs_read_file("bin/invalidshellname.elf", &elf_data, &elf_size)) {
-        debuglog(DEBUG_ERROR, "[SHELL] ERROR: Shell ELF not found (/bin/invalidshellname.elf)\n");
-        print_colored("[SHELL] ERROR: Shell ELF not found (/bin/invalidshellname.elf)\n", 0x0C, 0x00);
+    if (!vfs_read_file(DEFAULT_SHELL_PATH, &elf_data, &elf_size)) {
+        debuglog(DEBUG_ERROR, "[SHELL] ERROR: Shell ELF not found (/%s)\n", DEFAULT_SHELL_PATH);
+        print_colored("[SHELL] ERROR: Shell ELF not found (/", 0x0C, 0x00);
+        print(DEFAULT_SHELL_PATH);
+        print(")\n");
         return false;
     }
 

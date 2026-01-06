@@ -375,7 +375,12 @@ void print(const char* message) {
     }
 }
 
+extern bool dks_guimode_active;
+
 void printch(char c) {
+    if (dks_guimode_active) {
+        return; // Suppress TTY writes while GUI mode is active to avoid framebuffer artifacts
+    }
     // If the framebuffer TTY is active and ready, delegate to it so output remains visible
     if (tty_is_ready() && tty_uses_graphics_backend()) {
         tty_putc(c);

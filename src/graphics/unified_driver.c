@@ -1,7 +1,11 @@
 #include "graphics/unified_driver.h"
 #include "graphics/display_driver.h"
 #include "debuglog.h"
+#include "timer.h"
 #include <string.h>
+
+// Track subsystem initialization time for uptime calculation
+static uint32_t unified_subsystem_init_ticks = 0;
 
 // Global list of registered unified drivers
 static unified_driver_t* unified_driver_list = NULL;
@@ -184,14 +188,23 @@ graphics_result_t get_unified_driver_stats(unified_driver_t* driver,
     if (!driver || !stats) {
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
-    
+
     stats->total_operations = driver->operations_count;
     stats->successful_operations = driver->operations_count - driver->errors_count;
     stats->failed_operations = driver->errors_count;
     stats->active_features = driver->active_features;
     stats->last_error = driver->last_error_code;
-    stats->uptime_ms = 0; // TODO: Implement uptime tracking
-    
+
+    // Calculate uptime based on timer ticks since subsystem initialization
+    uint32_t current_ticks = timer_get_ticks();
+    uint64_t timer_freq = timer_get_frequency();
+    if (timer_freq > 0 && unified_subsystem_init_ticks > 0) {
+        uint32_t elapsed_ticks = current_ticks - unified_subsystem_init_ticks;
+        stats->uptime_ms = ((uint64_t)elapsed_ticks * 1000) / timer_freq;
+    } else {
+        stats->uptime_ms = 0;
+    }
+
     return GRAPHICS_SUCCESS;
 }
 
@@ -284,10 +297,13 @@ graphics_result_t unified_get_gpu_temperature(graphics_device_t* device,
 // Initialize the unified driver subsystem
 graphics_result_t initialize_unified_driver_subsystem(void) {
     debuglog(DEBUG_INFO, "Initializing unified graphics driver subsystem\n");
-    
+
     unified_driver_list = NULL;
     unified_driver_count = 0;
-    
+
+    // Record initialization time for uptime tracking
+    unified_subsystem_init_ticks = timer_get_ticks();
+
     return GRAPHICS_SUCCESS;
 }
 

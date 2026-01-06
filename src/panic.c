@@ -25,6 +25,7 @@
 #include "include/ps2_controller.h"
 #include "include/kb.h"
 #include "include/debuglog.h"
+#include "include/panicui.h"
 #include "include/graphics/graphics_manager.h"
 #include "include/graphics/font_renderer.h"
 #include "include/tty.h"
@@ -2834,8 +2835,61 @@ static const char* panic_identify_subsystem(const panic_context_t* ctx) {
     return "Core Kernel Runtime";
 }
 
+// Attempt to render the modern graphics-based panic UI. Falls back to the
+// legacy ANSI/TUI path if graphics are unavailable or initialization fails.
+static bool panic_try_render_panicui(const panic_context_t* ctx) {
+    // Only use graphics if already initialized - don't try to initialize during panic
+    // as this could cause secondary failures
+    if (!graphics_is_initialized()) {
+        debuglog(DEBUG_WARN, "[PANIC] Graphics not initialized, using text fallback\n");
+        return false;
+    }
+
+    // Set up a simple exception handler to catch any faults during panicui rendering
+    // If panicui crashes, we'll fall back to text mode
+    volatile bool panicui_failed = false;
+    
+    // Try to initialize panicui
+    graphics_result_t init_result = panicui_init();
+    if (init_result != GRAPHICS_SUCCESS) {
+        debuglog(DEBUG_WARN, "[PANIC] PanicUI init failed (%d), using text fallback\n", init_result);
+        return false;
+    }
+
+    // Validate context pointer before passing to panicui
+    if (!ctx || (uintptr_t)ctx == 0xFFFFFFFF || (uintptr_t)ctx == 0xFFFFFFFFFFFFFFFF) {
+        debuglog(DEBUG_ERROR, "[PANIC] Invalid panic context pointer, using text fallback\n");
+        return false;
+    }
+
+    // Compose a concise headline for the UI
+    char message_buf[256];
+    const char* base_msg = (ctx && ctx->message[0]) ? (const char*)ctx->message : "Kernel panic";
+    if (ctx && ctx->function[0]) {
+        strncpy(message_buf, ctx->function, sizeof(message_buf) - 1);
+        message_buf[sizeof(message_buf) - 1] = '\0';
+        strncat(message_buf, " :: ", sizeof(message_buf) - strlen(message_buf) - 1);
+        strncat(message_buf, base_msg, sizeof(message_buf) - strlen(message_buf) - 1);
+    } else {
+        strncpy(message_buf, base_msg, sizeof(message_buf) - 1);
+        message_buf[sizeof(message_buf) - 1] = '\0';
+    }
+
+    const char* file = (ctx && ctx->file[0]) ? (const char*)ctx->file : "<unknown>";
+    uint32_t line = ctx ? ctx->line : 0;
+    uint32_t fault_addr = ctx ? ctx->cpu_state.cr2 : 0;
+    uint32_t error_code = ctx ? ctx->error_code : 0;
+
+    panicui_show_panic(message_buf, file, line, fault_addr, error_code);
+    return true;
+}
+
 // Simple ANSI/Tty-based panic display
 static void draw_simple_panic_screen(const panic_context_t* ctx) {
+    if (panic_try_render_panicui(ctx)) {
+        return; // Modern graphics UI displayed; halt loop will follow
+    }
+
     // Try to ensure the TTY is ready even in error paths
     // First check if graphics is available to avoid circular panic
     if (!graphics_is_initialized()) {

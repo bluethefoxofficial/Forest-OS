@@ -170,9 +170,13 @@ void cpu_set_cr0(uint32 value) {
     __asm__ __volatile__("mov %0, %%cr0" : : "r"(val));
 }
 
-void cpu_set_cr3(uint32 value) {
-    unsigned long val = value;
+void cpu_set_cr3(uintptr_t value) {
+    register uintptr_t val asm("rax") = value;
+#if defined(__x86_64__)
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(val) : "memory");
+#else
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(val));
+#endif
 }
 
 bool cpu_has_tsc(void) {
