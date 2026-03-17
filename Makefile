@@ -170,6 +170,7 @@ endif
 # Common flags
 COMMON_CFLAGS := $(ARCH_FLAGS) -ffreestanding -nostdlib -fno-pic -fno-pie \
                  -Wall -Wextra -I$(SRCDIR)/include -Ilibs/uacpi/include \
+                 -Ilibs/qrcodegen \
                  -fcf-protection=none
 
 # Architecture-specific flags
@@ -299,6 +300,11 @@ CGDM_CSOURCES := $(SRCDIR)/display_manager.c $(SRCDIR)/mode_state.c $(SRCDIR)/ho
 # ELF test source
 ELF_TEST_CSOURCES := $(SRCDIR)/elf_test.c
 
+# QR Code generator library
+QRCODEGEN_DIR := libs/qrcodegen
+QRCODEGEN_SRCS := $(QRCODEGEN_DIR)/qrcodegen.c
+QRCODEGEN_OBJECTS := $(OBJDIR)/qrcodegen.o
+
 CSOURCES := $(filter-out $(EXCLUDED_CSOURCES), $(wildcard $(SRCDIR)/*.c)) $(SRCDIR)/symlink.c
 COBJECTS := $(CSOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 
@@ -329,6 +335,12 @@ FS_OBJECTS := $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(FS_SRCS))
 UACPI_SRCS := $(wildcard $(UACPI_SRCDIR)/*.c)
 UACPI_OBJECTS := $(patsubst $(UACPI_SRCDIR)/%.c,$(OBJDIR)/uacpi_%.o,$(UACPI_SRCS))
 
+# QR Code generator library
+$(OBJDIR)/qrcodegen.o: $(QRCODEGEN_DIR)/qrcodegen.c
+	@mkdir -p $(dir $@)
+	@echo "$(OK_COLOR)Compiling QR code library $<...$(NO_COLOR)"
+	@$(CC) $(CFLAGS) -c -o $@ $<
+
 # ASM objects (from .s and .asm files)
 ASM_SRCS := $(wildcard $(SRCDIR)/*.s) $(wildcard $(SRCDIR)/*.asm)
 ASMOBJECTS := $(patsubst $(SRCDIR)/%.s,$(OBJDIR)/%.o,$(filter $(SRCDIR)/%.s,$(ASM_SRCS))) \
@@ -336,7 +348,8 @@ ASMOBJECTS := $(patsubst $(SRCDIR)/%.s,$(OBJDIR)/%.o,$(filter $(SRCDIR)/%.s,$(AS
 
 ALL_OBJECTS := $(COBJECTS) $(GRAPHICS_OBJECTS) $(PANICUI_OBJECTS) $(CANOPY_OBJECTS) $(INPUT_OBJECTS) $(CGDM_OBJECTS) $(BOOT_OBJECTS) \
                $(ASMOBJECTS) $(INTERRUPT_OBJECTS) $(UACPI_OBJECTS) $(ELF_TEST_OBJECTS) $(FS_OBJECTS) \
-               $(USB_CSOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o) $(HW_CSOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
+               $(USB_CSOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o) $(HW_CSOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o) \
+               $(QRCODEGEN_OBJECTS)
 
 # Userspace configuration
 USER_OBJDIR := $(OBJDIR)/userspace
@@ -350,12 +363,18 @@ USER_APPS := $(basename $(notdir $(USER_APP_SRCS)))
 USER_APP_OBJECTS := $(USER_APPS:%=$(USER_OBJDIR)/%.o)
 
 # Apps that use LeafGFX and need special linking
-LEAFGFX_APPS := canopydm canopyde test_mouse
+LEAFGFX_APPS := canopydm canopyde test_mouse test_3d_acceleration
 USER_ELFS := $(filter-out $(LEAFGFX_APPS:%=$(USER_OBJDIR)/%.elf),$(USER_APPS:%=$(USER_OBJDIR)/%.elf))
 USER_PRIMARY_APP := shell
 USER_PRIMARY_ELF := $(USER_OBJDIR)/$(USER_PRIMARY_APP).elf
 USER_ELF_BIN := $(OBJDIR)/$(USER_PRIMARY_APP)_elf.o
 USER_APP_BINARIES := $(USER_APPS:%=$(INITRD_BIN_DIR)/%.elf)
+GUI_REQUIRED_BINARIES := $(INITRD_BIN_DIR)/canopydm.elf $(INITRD_BIN_DIR)/canopyde.elf
+GUI_REQUIRED_ASSETS := \
+	$(INITRD_DIR)/usr/share/images/background/login.bmp \
+	$(INITRD_DIR)/usr/share/images/bootup/logo.png \
+	$(INITRD_DIR)/usr/share/desktop/defaults.conf \
+	$(INITRD_DIR)/usr/share/sysconf/sys.conf
 
 # Additional test ELF binary for advanced testing
 USER_ELF_TEST := $(USER_OBJDIR)/elf_test.elf
@@ -374,7 +393,6 @@ LEAFGFX_SRCS := $(LEAFGFX_DIR)/leafgfx.c $(LEAFGFX_DIR)/leafgfx_bmp.c $(LEAFGFX_
                 $(LEAFGFX_DIR)/leafgfx_ttf.c \
                 $(LEAFGFX_DIR)/leafgfx_ttf_raster.c $(LEAFGFX_DIR)/leafgfx_anim.c
 LEAFGFX_OBJECTS := $(LEAFGFX_SRCS:$(LEAFGFX_DIR)/%.c=$(USER_OBJDIR)/leafgfx_%.o)
-LEAFGFX_APPS := canopydm canopyde
 
 # Userspace linker script selection
 ifeq ($(ARCH),32)
@@ -495,15 +513,15 @@ validate-toolchain:
 			exit 1; \
 		fi; \
 	fi
-	@if ! command -v $(CC) >/dev/null 2>&1; then \
+	@if ! command -v $(CC) >/dev/null 2>&1 && [ ! -x "$(CC)" ]; then \
 		echo "$(ERROR_COLOR)Required compiler '$(CC)' not found in PATH.$(NO_COLOR)"; \
 		exit 1; \
 	fi
-	@if ! command -v $(LD) >/dev/null 2>&1; then \
+	@if ! command -v $(LD) >/dev/null 2>&1 && [ ! -x "$(LD)" ]; then \
 		echo "$(ERROR_COLOR)Required linker '$(LD)' not found in PATH.$(NO_COLOR)"; \
 		exit 1; \
 	fi
-	@if ! command -v $(AS) >/dev/null 2>&1; then \
+	@if ! command -v $(AS) >/dev/null 2>&1 && [ ! -x "$(AS)" ]; then \
 		echo "$(ERROR_COLOR)Required assembler '$(AS)' not found in PATH.$(NO_COLOR)"; \
 		exit 1; \
 	fi
@@ -890,6 +908,11 @@ $(USER_OBJDIR)/test_mouse.elf: $(USER_OBJDIR)/test_mouse.o $(USER_SUPPORT_OBJECT
 	@$(LD) $(USER_LDFLAGS) -o $@ \
 	       $(USER_OBJDIR)/crt0.o $(USER_OBJDIR)/test_mouse.o $(LEAFGFX_OBJECTS) $(USER_SUPPORT_OBJECTS)
 
+$(USER_OBJDIR)/test_3d_acceleration.elf: $(USER_OBJDIR)/test_3d_acceleration.o $(USER_SUPPORT_OBJECTS) $(LEAFGFX_OBJECTS) $(USER_OBJDIR)/crt0.o $(USER_LINKER_SCRIPT)
+	@echo "$(OK_COLOR)Linking LeafGFX app: test_3d_acceleration.elf...$(NO_COLOR)"
+	@$(LD) $(USER_LDFLAGS) -o $@ \
+	       $(USER_OBJDIR)/crt0.o $(USER_OBJDIR)/test_3d_acceleration.o $(LEAFGFX_OBJECTS) $(USER_SUPPORT_OBJECTS)
+
 $(USER_ELFS): $(USER_SUPPORT_OBJECTS) $(USER_OBJDIR)/crt0.o
 $(USER_OBJDIR)/%.elf: $(USER_OBJDIR)/%.o $(USER_SUPPORT_OBJECTS) $(USER_OBJDIR)/crt0.o $(USER_LINKER_SCRIPT)
 	@echo "$(OK_COLOR)Linking userspace ELF $(@F)...$(NO_COLOR)"
@@ -929,7 +952,22 @@ prepare-canopy-icons:
 	@echo "$(OK_COLOR)Preparing Canopy desktop icons...$(NO_COLOR)"
 	@./tools/prepare-canopy-icons.sh
 
-$(INITRD): refresh-libc prepare-canopy-icons $(OUTPUT) $(INITRD_FILES) $(USER_APP_BINARIES)
+.PHONY: verify-gui-runtime
+verify-gui-runtime: $(GUI_REQUIRED_BINARIES) prepare-canopy-icons
+	@echo "$(OK_COLOR)Verifying GUI runtime binaries/assets...$(NO_COLOR)"
+	@test -f $(INITRD_BIN_DIR)/canopydm.elf
+	@test -f $(INITRD_BIN_DIR)/canopyde.elf
+	@test -f $(INITRD_DIR)/usr/share/images/background/login.bmp
+	@test -f $(INITRD_DIR)/usr/share/images/bootup/logo.png
+	@test -f $(INITRD_DIR)/usr/share/images/icons/canopy/files.bmp
+	@test -f $(INITRD_DIR)/usr/share/images/icons/canopy/terminal.bmp
+	@test -f $(INITRD_DIR)/usr/share/images/icons/canopy/settings.bmp
+	@test -f $(INITRD_DIR)/usr/share/images/icons/canopy/notes.bmp
+	@test -f $(INITRD_DIR)/usr/share/images/icons/canopy/monitor.bmp
+	@grep -Eq '^(DM|dm)=/bin/canopydm\.elf$$' $(INITRD_DIR)/usr/share/sysconf/sys.conf
+	@grep -Eq '^(DE|de|desktop)=/bin/canopyde\.elf$$' $(INITRD_DIR)/usr/share/sysconf/sys.conf
+
+$(INITRD): refresh-libc prepare-canopy-icons verify-gui-runtime $(OUTPUT) $(INITRD_FILES) $(USER_APP_BINARIES)
 	@mkdir -p $(OUTDIR)/boot
 	@echo "$(OK_COLOR)Copying libc into initrd...$(NO_COLOR)"
 	@rm -rf $(INITRD_DIR)/usr/libc

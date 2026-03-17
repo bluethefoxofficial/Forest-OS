@@ -354,12 +354,13 @@ create_forestos_symlinks() {
 
     step "Creating Forest OS symlinks (${forrest_target})..."
 
-    # Create symlinks for all binaries
+    # Create symlinks: i686-elf-gcc -> i686-forestos-gcc (strip target prefix, add forestos prefix)
     for bin in "${INSTALL_DIR}"/bin/${target}-*; do
-        if [[ -f "$bin" ]]; then
-            local basename
-            basename=$(basename "$bin" "${target}-")
-            ln -sf "${target}-${basename}" "${INSTALL_DIR}/bin/${forrest_target}-${basename}" 2>/dev/null || true
+        if [[ -f "$bin" ]] || [[ -L "$bin" ]]; then
+            local binname suffix
+            binname=$(basename "$bin")
+            suffix="${binname#${target}-}"
+            ln -sf "${binname}" "${INSTALL_DIR}/bin/${forrest_target}-${suffix}" 2>/dev/null || true
         fi
     done
 
