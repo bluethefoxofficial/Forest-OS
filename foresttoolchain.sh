@@ -61,9 +61,10 @@ BUILD_GCC_DIR="${TOOLCHAIN_DIR}/build-gcc"
 # ---------------------------------------------------------------------------
 # Versions & download URLs
 # ---------------------------------------------------------------------------
-# Use binutils 2.43 for GCC 15 compatibility (2.39 has issues with gprofng)
+# Use binutils 2.43 for compatibility
+# Use GCC 11.4.0 for better compatibility with older systems
 BINUTILS_VERSION="2.43"
-GCC_VERSION="12.2.0"
+GCC_VERSION="11.4.0"
 
 BINUTILS_TARBALL="binutils-${BINUTILS_VERSION}.tar.xz"
 GCC_TARBALL="gcc-${GCC_VERSION}.tar.xz"
