@@ -301,22 +301,20 @@ static memory_result_t expand_heap(uint32 needed_size) {
             print("[HEAP] expand_heap: mapping first page vaddr=0x"); print_hex(vaddr); print("\n");
         }
 
-        // Pages in the heap range are already identity-mapped by vmm_init.
-        // Skip the is_mapped check and directly remap with the new physical frame.
-        // vmm_map_page returns ALREADY_MAPPED if present; unmap first.
+        // Try to map the page. If it's already identity-mapped by vmm_init,
+        // just use the existing mapping (don't unmap/remap - that would
+        // destroy the page directory which lives at the heap start address).
         memory_result_t result = vmm_map_page(current_dir,
                                               vaddr,
                                               phys_frame,
                                               PAGE_PRESENT | PAGE_WRITABLE);
         if (result == MEMORY_ERROR_ALREADY_MAPPED) {
-            // Unmap the old identity mapping and remap with fresh frame
-            vmm_unmap_page(current_dir, vaddr);
-            tlb_invalidate_page(vaddr);
-            result = vmm_map_page(current_dir, vaddr, phys_frame,
-                                  PAGE_PRESENT | PAGE_WRITABLE);
-        }
-
-        if (result != MEMORY_OK) {
+            // Page is already mapped (identity-mapped by vmm_init).
+            // Use the existing mapping - don't remap with a new frame.
+            // The physical frame we allocated is not needed.
+            pmm_free_frame(phys_frame);
+            // result is effectively OK - the page is mapped and usable
+        } else if (result != MEMORY_OK) {
             pmm_free_frame(phys_frame);
             return result;
         }
