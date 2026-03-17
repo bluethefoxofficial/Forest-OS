@@ -341,10 +341,10 @@ create_forestos_symlinks() {
 
     # Map target to forestos naming
     case "$target" in
-        i686-linux-gnu)
+        i686-elf|i686-linux-gnu)
             forrest_target="i686-forestos"
             ;;
-        x86_64-linux-gnu)
+        x86_64-elf|x86_64-linux-gnu)
             forrest_target="x86_64-forestos"
             ;;
         *)
@@ -469,16 +469,17 @@ main() {
     setup_sysroot
 
     # 5. Build requested toolchain(s)
+    # Use i686-elf (bare metal) not i686-linux-gnu (requires glibc crti.o/crtn.o)
     case "$BUILD_ARCH" in
         32)
-            build_toolchain_for "i686-linux-gnu" "--with-arch=i686 --with-tune=generic"
+            build_toolchain_for "i686-elf" "--with-arch=i686 --with-tune=generic"
             ;;
         64)
-            build_toolchain_for "x86_64-linux-gnu" "--with-arch=x86-64 --with-tune=generic"
+            build_toolchain_for "x86_64-elf" "--with-arch=x86-64 --with-tune=generic"
             ;;
         both)
-            build_toolchain_for "i686-linux-gnu"   "--with-arch=i686 --with-tune=generic"
-            build_toolchain_for "x86_64-linux-gnu" "--with-arch=x86-64 --with-tune=generic"
+            build_toolchain_for "i686-elf"   "--with-arch=i686 --with-tune=generic"
+            build_toolchain_for "x86_64-elf" "--with-arch=x86-64 --with-tune=generic"
             ;;
     esac
 
