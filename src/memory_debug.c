@@ -296,7 +296,7 @@ bool memory_check_integrity(void) {
     }
     
     // Test heap functionality with a small allocation
-    void* test_ptr = kmalloc(64, GFP_KERNEL);
+    void* test_ptr = kmalloc(64);
     if (!test_ptr) {
         print("[MEM] ERROR: Failed to allocate test memory\n");
         all_good = false;

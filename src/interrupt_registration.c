@@ -21,9 +21,12 @@
 #include "mm.h"
 #include "smp.h"
 #include "debug.h"
+#include "debuglog.h"
 #include "time.h"
 #include "thread.h"
 #include <string.h>
+
+#define debug_printf debuglog_printf
 #include <stdio.h>
 
 /* Forward declarations for irq_management.c functions */
@@ -215,6 +218,15 @@ int request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,
 }
 
 /**
+ * Advanced IRQ registration (alias for request_irq for now)
+ */
+int request_irq_advanced(unsigned int irq, irq_handler_t handler,
+                        unsigned long flags, const char *name, void *dev_id)
+{
+    return request_irq(irq, handler, flags, name, dev_id);
+}
+
+/**
  * Register a threaded interrupt handler
  */
 int request_threaded_irq_extended(unsigned int irq, irq_handler_t handler,
@@ -341,6 +353,14 @@ int request_threaded_irq_extended(unsigned int irq, irq_handler_t handler,
     }
     
     return 0;
+}
+
+/**
+ * Advanced IRQ unregistration (alias for free_irq_extended)
+ */
+void free_irq_advanced(unsigned int irq, void *dev_id)
+{
+    free_irq_extended(irq, dev_id);
 }
 
 /**
@@ -786,7 +806,7 @@ static struct interrupt_registration *create_registration(
 {
     struct interrupt_registration *reg;
     
-    reg = (struct interrupt_registration *)kmalloc(sizeof(*reg), GFP_KERNEL);
+    reg = (struct interrupt_registration *)kmalloc(sizeof(*reg));
     if (!reg) {
         return NULL;
     }

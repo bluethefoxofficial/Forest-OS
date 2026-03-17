@@ -5,6 +5,8 @@
 #include "driver.h"
 #include <stdbool.h>
 
+#define AF_UNIX    1
+#define AF_LOCAL   AF_UNIX
 #define AF_INET    2
 #define SOCK_DGRAM 2
 #define SOCK_STREAM 1
@@ -35,6 +37,11 @@ typedef struct {
     uint32 sin_addr;
     uint8  sin_zero[8];
 } sockaddr_in_t;
+
+typedef struct {
+    uint16 sun_family;
+    char sun_path[108];
+} sockaddr_un_t;
 
 typedef struct {
     bool   used;

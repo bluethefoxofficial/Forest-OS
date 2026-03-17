@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#include "../types.h"
+#include "../../../libs/forestcore/include/types.h"
 #include <stddef.h>
 #include <stdarg.h>
 
@@ -18,6 +18,7 @@ int vsnprintf(char *buffer, size_t size, const char *format, va_list args);
 int vsprintf(char *buffer, const char *format, va_list args);
 int sprintf(char *buffer, const char *format, ...);
 int puts(const char *str);
+int sscanf(const char *str, const char *format, ...);
 int putchar(int c);
 int getchar(void);
 char *gets(char *str);
@@ -39,6 +40,8 @@ int fgetc(FILE *file);
 int fputc(int c, FILE *file);
 char *fgets(char *str, int n, FILE *file);
 int fputs(const char *str, FILE *file);
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
 
 #ifdef __cplusplus
 }

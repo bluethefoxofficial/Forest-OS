@@ -1,7 +1,7 @@
 #ifndef LIBC_NET_H
 #define LIBC_NET_H
 
-#include "../types.h"
+#include "../../../libs/forestcore/include/types.h"
 #include <stdbool.h>
 
 #ifdef FOREST_USE_HOST_LIBC
@@ -9,6 +9,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #else
+#define AF_UNIX      1
+#define AF_LOCAL     AF_UNIX
 #define AF_INET      2
 #define SOCK_DGRAM   2
 #define SOCK_STREAM  1
@@ -36,6 +38,11 @@ typedef struct {
     uint32 sin_addr;
     uint8  sin_zero[8];
 } sockaddr_in_t;
+
+typedef struct {
+    uint16 sun_family;
+    char sun_path[108];
+} sockaddr_un_t;
 
 typedef struct {
     bool   used;

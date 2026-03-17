@@ -95,6 +95,9 @@ graphics_result_t font_unload(font_t* font);
 graphics_result_t font_enumerate_builtin(char*** font_names, uint32_t* count);
 graphics_result_t font_get_info(font_t* font, font_metrics_t* metrics);
 
+// Notify renderer that the initrd has finished loading so deferred font loads can run.
+void font_renderer_on_initrd_ready(void);
+
 // Text measurement
 graphics_result_t font_measure_text(font_t* font, const char* text, 
                                    uint32_t* width, uint32_t* height);

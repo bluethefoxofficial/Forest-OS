@@ -115,8 +115,8 @@ const graphics_device_db_entry_t graphics_device_db[] = {
     // Virtualization devices
     {PCI_VENDOR_VMWARE, PCI_DEVICE_VMWARE_SVGA_II, 0, 0, GRAPHICS_DEVICE_VMWARE_SVGA, "VMware SVGA II", "vmware_svga", 0},
     {PCI_VENDOR_BOCHS, PCI_DEVICE_BOCHS_VGA, 0, 0, GRAPHICS_DEVICE_BOCHS_VBE, "Bochs BGA", "bochs_bga", 0},
-    {PCI_VENDOR_VIRTUALBOX, 0xBEEF, 0, 0, GRAPHICS_DEVICE_VESA, "VirtualBox Graphics", "virtualbox", 0},
-    {PCI_VENDOR_VIRTUALBOX, 0xDEAD, 0, 0, GRAPHICS_DEVICE_VESA, "VirtualBox VESA", "virtualbox", 0},
+    {PCI_VENDOR_VIRTUALBOX, 0xBEEF, 0, 0, GRAPHICS_DEVICE_BOCHS_VBE, "VirtualBox Graphics", "bochs_bga", 0},
+    {PCI_VENDOR_VIRTUALBOX, 0xDEAD, 0, 0, GRAPHICS_DEVICE_BOCHS_VBE, "VirtualBox VESA", "bochs_bga", 0},
 };
 
 const size_t graphics_device_db_size = sizeof(graphics_device_db) / sizeof(graphics_device_db[0]);
@@ -135,7 +135,7 @@ graphics_result_t detect_graphics_hardware(void) {
         
         // Fall back to legacy VGA detection
         if (is_vga_present()) {
-            graphics_device_t* vga_device = kmalloc(sizeof(graphics_device_t), GFP_KERNEL);
+            graphics_device_t* vga_device = kmalloc(sizeof(graphics_device_t));
             if (vga_device) {
                 result = setup_legacy_vga_device(vga_device);
                 if (result == GRAPHICS_SUCCESS) {
@@ -199,7 +199,7 @@ graphics_result_t probe_pci_graphics_devices(void) {
                             vendor_id, device_id, bus, slot, func);
                     
                     // Allocate new device structure
-                    graphics_device_t* new_device = kmalloc(sizeof(graphics_device_t), GFP_KERNEL);
+                    graphics_device_t* new_device = kmalloc(sizeof(graphics_device_t));
                     if (!new_device) {
                         debuglog(DEBUG_ERROR, "Failed to allocate memory for graphics device\n");
                         continue;
@@ -281,15 +281,18 @@ graphics_result_t setup_graphics_device(graphics_device_t* device,
     // Read memory regions
     for (int bar = 0; bar < 6; bar++) {
         uint32_t bar_value = pci_read_config_dword(bus, slot, func, 0x10 + (bar * 4));
-        
+
         if (bar_value & 1) {
-            // I/O space - skip for graphics devices
+            // I/O space
+            if (bar == 0) {
+                device->io_base = bar_value & 0xFFFFFFFC;
+            }
             continue;
         }
-        
+
         // Memory space
         if (bar == 0) {
-            // Usually framebuffer
+            // Usually framebuffer or FIFO for VMware
             device->framebuffer_base = bar_value & 0xFFFFFFF0;
             // Read size by writing all 1s and reading back
             pci_write_config_dword(bus, slot, func, 0x10 + (bar * 4), 0xFFFFFFFF);
@@ -297,12 +300,21 @@ graphics_result_t setup_graphics_device(graphics_device_t* device,
             pci_write_config_dword(bus, slot, func, 0x10 + (bar * 4), bar_value);
             device->framebuffer_size = ~(size_mask & 0xFFFFFFF0) + 1;
         } else if (bar == 1) {
-            // Usually MMIO registers
+            // Usually MMIO registers or FIFO
             device->mmio_base = bar_value & 0xFFFFFFF0;
             pci_write_config_dword(bus, slot, func, 0x10 + (bar * 4), 0xFFFFFFFF);
             uint32_t size_mask = pci_read_config_dword(bus, slot, func, 0x10 + (bar * 4));
             pci_write_config_dword(bus, slot, func, 0x10 + (bar * 4), bar_value);
             device->mmio_size = ~(size_mask & 0xFFFFFFF0) + 1;
+        } else if (bar == 2) {
+            // For VMware, BAR2 might be framebuffer
+            if (device->vendor_id == PCI_VENDOR_VMWARE) {
+                device->framebuffer_base = bar_value & 0xFFFFFFF0;
+                pci_write_config_dword(bus, slot, func, 0x10 + (bar * 4), 0xFFFFFFFF);
+                uint32_t size_mask = pci_read_config_dword(bus, slot, func, 0x10 + (bar * 4));
+                pci_write_config_dword(bus, slot, func, 0x10 + (bar * 4), bar_value);
+                device->framebuffer_size = ~(size_mask & 0xFFFFFFF0) + 1;
+            }
         }
     }
     
@@ -509,48 +521,19 @@ graphics_result_t try_load_driver(const char* driver_name, graphics_device_t* de
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
     
-    // Try to find and load the driver
-    extern display_driver_t* find_driver_for_device(graphics_device_t* device);
+    // Try to find the driver in the registry
+    // V2 system handles driver selection automatically - this is for legacy compatibility
+    extern display_driver_t* find_driver_by_name(const char* name);
     
-    // Simplified driver matching by name
-    if (strcmp(driver_name, "bochs_bga") == 0) {
-        extern display_driver_t bga_driver;
-        device->driver = &bga_driver;
-        debuglog(DEBUG_INFO, "Loaded Bochs BGA driver for %s\n", device->name);
-        return GRAPHICS_SUCCESS;
-    }
-    else if (strcmp(driver_name, "virtualbox") == 0) {
-        extern display_driver_t vbox_driver;
-        device->driver = &vbox_driver;
-        debuglog(DEBUG_INFO, "Loaded VirtualBox driver for %s\n", device->name);
-        return GRAPHICS_SUCCESS;
-    }
-    else if (strcmp(driver_name, "intel_hd") == 0) {
-        extern display_driver_t intel_hd_driver;
-        device->driver = &intel_hd_driver;
-        debuglog(DEBUG_INFO, "Loaded Intel HD driver for %s\n", device->name);
-        return GRAPHICS_SUCCESS;
-    }
-    else if (strcmp(driver_name, "nvidia") == 0) {
-        extern display_driver_t nvidia_driver;
-        device->driver = &nvidia_driver;
-        debuglog(DEBUG_INFO, "Loaded NVIDIA driver for %s\n", device->name);
-        return GRAPHICS_SUCCESS;
-    }
-    else if (strcmp(driver_name, "amd_ati") == 0) {
-        extern display_driver_t amd_ati_driver;
-        device->driver = &amd_ati_driver;
-        debuglog(DEBUG_INFO, "Loaded AMD/ATI driver for %s\n", device->name);
-        return GRAPHICS_SUCCESS;
-    }
-    else if (strcmp(driver_name, "vesa") == 0) {
-        extern display_driver_t vesa_driver;
-        device->driver = &vesa_driver;
-        debuglog(DEBUG_INFO, "Loaded VESA driver for %s\n", device->name);
+    display_driver_t* driver = find_driver_by_name(driver_name);
+    if (driver) {
+        device->driver = driver;
+        debuglog(DEBUG_INFO, "Loaded driver '%s' for %s\n", driver_name, device->name);
         return GRAPHICS_SUCCESS;
     }
     
-    debuglog(DEBUG_ERROR, "Driver '%s' not found or not compiled in\n", driver_name);
+    // V2 graphics system handles driver probing - this legacy function may not find V2 drivers
+    debuglog(DEBUG_INFO, "Driver '%s' not found in legacy registry - V2 system handles this\n", driver_name);
     return GRAPHICS_ERROR_NOT_SUPPORTED;
 }
 

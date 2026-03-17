@@ -23,7 +23,7 @@ void semaphore_wait(semaphore_t* sem) {
             continue;
         }
         
-        semaphore_wait_node_t* node = (semaphore_wait_node_t*)kmalloc(sizeof(semaphore_wait_node_t), GFP_KERNEL);
+        semaphore_wait_node_t* node = (semaphore_wait_node_t*)kmalloc(sizeof(semaphore_wait_node_t));
         if (!node) {
             spinlock_release(&sem->wait_lock);
             kernel_panic("Failed to allocate semaphore wait node");

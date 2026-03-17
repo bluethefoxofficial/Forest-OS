@@ -1,6 +1,8 @@
 #include <stddef.h>
+#include <stdarg.h>
 #include "include/string.h"
 #include "include/libc/string.h"
+#include "include/libc/stdio.h"
 #include "include/memory_safe.h"
 
 static size_t probe_guarded_span(const void* ptr, size_t length) {
@@ -412,4 +414,26 @@ char *strerror(int errnum) {
         case 12: return "out of memory";
         default: return "unknown error";
     }
+}
+
+int string_format(char* buffer, size_t size, const char* format, ...) {
+    if (!buffer || !format || size == 0) {
+        return -1;
+    }
+
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(buffer, size, format, args);
+    va_end(args);
+
+    if (written < 0) {
+        buffer[0] = '\0';
+        return -1;
+    }
+
+    if ((size_t)written >= size) {
+        buffer[size - 1] = '\0';
+    }
+
+    return written;
 }

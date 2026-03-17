@@ -11,9 +11,9 @@
 #define GDT_TSS_SELECTOR         0x28
 
 // Initialize GDT + TSS with an initial kernel stack top.
-void gdt_init(uint32 initial_stack_top);
+void gdt_init(uintptr_t initial_stack_top);
 
 // Update the kernel stack used when returning from user mode.
-void gdt_set_kernel_stack(uint32 stack_top);
+void gdt_set_kernel_stack(uintptr_t stack_top);
 
 #endif

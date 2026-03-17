@@ -411,15 +411,23 @@ void auth_init(void) {
 }
 
 auth_result_t auth_login(const char* username, const char* password, auth_user_info_t* out_info) {
+    debuglog(DEBUG_INFO, "[AUTH] auth_login called with username='%s', password='%s'\n", 
+             username ? username : "(null)", password ? password : "(null)");
     user_record_t* rec = find_user_record(username);
     if (!rec) {
+        debuglog(DEBUG_INFO, "[AUTH] User not found: '%s'\n", username);
         return AUTH_ERR_NOT_FOUND;
     }
+    debuglog(DEBUG_INFO, "[AUTH] Found user '%s', stored hash='%.32s...'\n", 
+             username, rec->hash_hex);
     char attempt_hash[AUTH_HASH_HEX_LEN];
     hash_password(rec->salt, password, attempt_hash);
+    debuglog(DEBUG_INFO, "[AUTH] Computed hash='%.32s...'\n", attempt_hash);
     if (strcmp(attempt_hash, rec->hash_hex) != 0) {
+        debuglog(DEBUG_INFO, "[AUTH] Password mismatch!\n");
         return AUTH_ERR_BAD_CREDENTIALS;
     }
+    debuglog(DEBUG_INFO, "[AUTH] Login successful!\n");
     g_active_user = rec;
     if (out_info) {
         memcpy(out_info, &rec->info, sizeof(auth_user_info_t));
@@ -547,4 +555,14 @@ uint32 auth_active_gid(void) {
 
 uint32 auth_active_groups_mask(void) {
     return g_active_user ? g_active_user->info.groups_mask : 0;
+}
+
+uint32 auth_get_group_gid(const char* name) {
+    if (!name) return (uint32)-1;
+    for (int i = 0; i < AUTH_MAX_GROUPS; ++i) {
+        if (g_groups[i].used && strcmp(g_groups[i].info.name, name) == 0) {
+            return g_groups[i].info.gid;
+        }
+    }
+    return (uint32)-1;
 }

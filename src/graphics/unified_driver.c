@@ -1,7 +1,9 @@
 #include "graphics/unified_driver.h"
-#include "graphics/display_driver.h"
-#include "debuglog.h"
-#include "timer.h"
+#include <graphics/graphics_types.h>
+#include <debuglog.h>
+#include <timer.h>
+#include <memory.h>
+#include <mm.h>
 #include <string.h>
 
 // Track subsystem initialization time for uptime calculation
@@ -110,13 +112,15 @@ graphics_result_t create_unified_driver_from_base(display_driver_t* base,
         return GRAPHICS_ERROR_INVALID_PARAMETER;
     }
     
-    // Note: In a real implementation, you would allocate memory here
-    // For this kernel implementation, we assume the caller provides pre-allocated memory
+    // Allocate memory for the unified driver
     unified_driver_t* driver = *result;
-    
     if (!driver) {
-        debuglog(DEBUG_ERROR, "No memory provided for unified driver creation\n");
-        return GRAPHICS_ERROR_OUT_OF_MEMORY;
+        driver = kmalloc(sizeof(unified_driver_t));
+        if (!driver) {
+            debuglog(DEBUG_ERROR, "Failed to allocate memory for unified driver\n");
+            return GRAPHICS_ERROR_OUT_OF_MEMORY;
+        }
+        *result = driver;
     }
     
     // Copy base driver

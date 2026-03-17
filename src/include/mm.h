@@ -139,13 +139,16 @@ struct rw_semaphore {
 #define SLAB_MIN_SIZE       32
 #define SLAB_ALIGN_SIZE     8
 
-// Memory zone types
+// Memory zone types (guarded - may be defined elsewhere)
+#ifndef ZONE_TYPE_T_DEFINED
 typedef enum {
     ZONE_DMA = 0,       // < 16MB for legacy DMA
-    ZONE_NORMAL,        // 16MB - 896MB
-    ZONE_HIGHMEM,       // > 896MB (on 32-bit systems)
-    MAX_NR_ZONES
+    ZONE_NORMAL = 1,    // 16MB - 896MB
+    ZONE_HIGHMEM = 2,   // > 896MB (on 32-bit systems)
+    MAX_NR_ZONES = 3
 } zone_type_t;
+#define ZONE_TYPE_T_DEFINED 1
+#endif
 
 // Page frame flags
 #define PG_LOCKED       (1 << 0)    // Page is locked
@@ -286,8 +289,14 @@ void *kmem_cache_alloc(kmem_cache_t *cache, gfp_t flags);
 void kmem_cache_free(kmem_cache_t *cache, void *obj);
 
 // General purpose allocators
-void *kmalloc(size_t size, gfp_t flags);
-void *kzalloc(size_t size, gfp_t flags);
+// Use simple kmalloc wrapper from kheap_enhanced
+// Defined in memory.h - don't redefine here
+extern void* kheap_alloc(uint32_t size);
+extern void kheap_free(void* ptr);
+
+// Note: kmalloc and kzalloc are defined in memory.h
+// Do not define them here to avoid redefinition errors
+
 void kfree(void *ptr);
 
 // =============================================================================

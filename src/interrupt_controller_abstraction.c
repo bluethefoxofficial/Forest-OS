@@ -447,7 +447,7 @@ static struct interrupt_controller *create_controller(controller_type_t type)
 {
     struct interrupt_controller *ctrl;
     
-    ctrl = (struct interrupt_controller *)kmalloc(sizeof(*ctrl), GFP_KERNEL);
+    ctrl = (struct interrupt_controller *)kmalloc(sizeof(*ctrl));
     if (!ctrl) {
         return NULL;
     }

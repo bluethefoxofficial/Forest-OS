@@ -507,7 +507,7 @@ static int uefi_register_event(uint32_t type, uint32_t notify_tpl,
     }
     
     /* Create event structure */
-    event = (struct uefi_event *)kmalloc(sizeof(*event), GFP_ATOMIC);
+    event = (struct uefi_event *)kmalloc(sizeof(*event));
     if (!event) {
         spin_unlock_irqrestore(&uefi_int_state.event_lock, flags);
         return -ENOMEM;

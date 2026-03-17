@@ -11,6 +11,7 @@
 #include "include/list.h"
 #include "include/interrupt.h"
 #include "include/system.h"
+#include "include/memory.h"  // For x86 page table definitions
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -111,9 +112,62 @@ int mm_handle_page_fault(struct interrupt_frame *frame, unsigned long address,
             goto unlock_out;
         }
         
-        // TODO: Expand stack VMA downward
-        ret = VM_FAULT_SIGBUS;
-        goto unlock_out;
+        // Expand stack VMA downward (for stack growth)
+        unsigned long new_start = address & ~(PAGE_SIZE - 1);
+        unsigned long expand_size = vma->vm_start - new_start;
+        
+        // Limit stack growth to reasonable size (prevent stack overflow attacks)
+        if (expand_size > (8 * 1024 * 1024)) { // 8MB limit
+            ret = VM_FAULT_SIGBUS;
+            goto unlock_out;
+        }
+        
+        // Expand the VMA
+        vma->vm_start = new_start;
+        
+        // Allocate and map the new pages
+        unsigned long cur_va = new_start;
+        while (cur_va < vma->vm_end) {
+            pte_t *ptep = get_pte_from_address(mm, cur_va);
+            if (!ptep) {
+                ret = VM_FAULT_SIGBUS;
+                goto unlock_out;
+            }
+            
+            if (!pte_present(*ptep)) {
+                page_t *page = alloc_page(GFP_USER);
+                if (!page) {
+                    ret = VM_FAULT_OOM;
+                    goto unlock_out;
+                }
+                
+                memset(page_address(page), 0, PAGE_SIZE);
+                page->flags |= PG_UPTODATE;
+                atomic_set(&page->refcount, 1);
+                
+                pte_t entry = pfn_pte(page_to_pfn(page), vma->vm_page_prot);
+                entry = pte_mkwrite(entry);
+                entry = pte_mkdirty(entry);
+                
+                spin_lock(&mm->page_table_lock);
+                if (!pte_none(*ptep)) {
+                    spin_unlock(&mm->page_table_lock);
+                    free_page(page);
+                } else {
+                    set_pte_at(mm, cur_va, ptep, entry);
+                    mm->total_vm++;
+                    if (vma->vm_flags & VM_LOCKED) {
+                        mm->locked_vm++;
+                    }
+                    spin_unlock(&mm->page_table_lock);
+                    update_mmu_cache(vma, cur_va, ptep);
+                }
+            }
+            
+            cur_va += PAGE_SIZE;
+        }
+        
+        return VM_FAULT_MINOR;
     }
     
     // Validate access permissions
@@ -293,13 +347,51 @@ static int do_linear_fault(mm_struct_t *mm, vm_area_struct_t *vma,
                           unsigned long address, pte_t *ptep, 
                           unsigned int flags)
 {
-    // TODO: Implement page table allocation
-    // This would involve:
-    // 1. Allocating page directory/table pages
-    // 2. Setting up the page table hierarchy
-    // 3. Calling do_anonymous_page() to handle the actual page fault
+    // Page table not allocated - allocate it
+    // For x86 32-bit, we need to allocate page tables
+    unsigned long page_dir = (unsigned long)mm->pgd;
+    unsigned long dir_index = (address >> 22) & 0x3FF;
+    unsigned long table_index = (address >> 12) & 0x3FF;
     
-    return VM_FAULT_SIGBUS;  // Not implemented yet
+    // Check if page directory entry exists and is present
+    page_entry_t *page_dir_entry = &((page_directory_t*)page_dir)[dir_index];
+    if (!page_dir_entry->present) {
+        // Allocate new page table
+        uint32_t table_frame = pmm_alloc_frame();
+        if (!table_frame) {
+            return VM_FAULT_OOM;
+        }
+        
+        // Zero the page table
+        void *table_vaddr = (void*)(0xFFC00000); // Temporary mapping
+        page_directory_t* cur_dir = vmm_get_current_page_directory();
+        vmm_unmap_page(cur_dir, (uint32_t)table_vaddr);
+        vmm_map_page(cur_dir, (uint32_t)table_vaddr, table_frame, PAGE_PRESENT | PAGE_WRITABLE);
+        memset(table_vaddr, 0, PAGE_SIZE);
+        vmm_unmap_page(cur_dir, (uint32_t)table_vaddr);
+        
+        // Set page directory entry
+        page_dir_entry->frame = table_frame >> 12;
+        page_dir_entry->present = 1;
+        page_dir_entry->writable = 1;
+        page_dir_entry->user = 0; // Kernel-only access to page tables
+    }
+    
+    // Now try to get PTE again
+    ptep = get_pte_from_address(mm, address);
+    if (!ptep) {
+        return VM_FAULT_SIGBUS;
+    }
+    
+    // If PTE is now available, handle the fault
+    if (pte_none(*ptep)) {
+        return do_anonymous_page(mm, vma, address, ptep, flags);
+    } else if (!pte_present(*ptep)) {
+        // Handle swapped out page
+        return VM_FAULT_MAJOR;
+    }
+    
+    return VM_FAULT_MINOR;
 }
 
 // =============================================================================
@@ -432,7 +524,7 @@ irq_return_t enhanced_page_fault_handler(int vector, struct interrupt_context *c
 #endif
 
     // Get error code from interrupt frame
-    error_code = ctx->frame.error_code;
+    error_code = ctx->error_code;
 
     // Update statistics
     enhanced_fault_stats.total_faults++;
@@ -473,7 +565,7 @@ irq_return_t enhanced_page_fault_handler(int vector, struct interrupt_context *c
  */
 void install_enhanced_page_fault_handler(void)
 {
-    interrupt_set_handler(EXCEPTION_PAGE_FAULT, enhanced_page_fault_handler);
+    interrupt_set_handler(EXCEPTION_PAGE_FAULT, (interrupt_handler_t)enhanced_page_fault_handler);
 }
 
 /**

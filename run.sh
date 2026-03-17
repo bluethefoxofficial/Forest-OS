@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Forest-OS QEMU Runner Script
-# Automatically sets up QEMU with proper graphics configuration for framebuffer TTY
+# Optimized for testing Canopy desktop environment with proper GUI display
 
 set -e  # Exit on any error
 
@@ -13,15 +13,30 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Default configuration
-DEFAULT_MEMORY="10000"
-DEFAULT_TIMEOUT="3600"
+DEFAULT_MEMORY="512"
+DEFAULT_TIMEOUT="0"
 DEFAULT_ISO=""
 DEFAULT_MODE="graphics"
 DEFAULT_ARCH="64"
+DEFAULT_SOUND="sb16"
 
 # Function to print colored output
 print_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+# Simple usage for Canopy testing
+show_canopy_usage() {
+    echo "Forest OS Canopy Test Runner"
+    echo "Quick usage for testing Canopy desktop environment:"
+    echo ""
+    echo "  ./run.sh                    # Test Canopy with default settings"
+    echo "  ./run.sh --uefi            # Test UEFI version"
+    echo "  ./run.sh --bios            # Test BIOS version"
+    echo "  ./run.sh --debug           # Enable debug output"
+    echo ""
+    echo "Full usage:"
+    echo "  ./run.sh [OPTIONS]"
 }
 
 print_success() {
@@ -38,54 +53,68 @@ print_error() {
 
 # Function to show usage
 show_usage() {
-    echo "Forest-OS QEMU Runner"
+    echo "Forest OS QEMU Runner - Canopy Testing Edition"
     echo "Usage: $0 [OPTIONS]"
     echo ""
-    echo "Options:"
+    echo "Quick Options:"
     echo "  -h, --help           Show this help message"
+    echo "      --uefi            Use UEFI boot (default)"
+    echo "      --bios            Use BIOS boot"
     echo "  -a, --arch 32|64     Set architecture (default: ${DEFAULT_ARCH})"
-    echo "  -i, --iso FILE       Specify ISO file (default: auto-detect latest)"
     echo "  -m, --memory MB      Set memory size in MB (default: ${DEFAULT_MEMORY})"
-    echo "  -t, --timeout SEC    Set timeout in seconds (default: ${DEFAULT_TIMEOUT})"
     echo "  -d, --debug          Enable debug mode with serial output"
+    echo ""
+    echo "Advanced Options:"
+    echo "  -i, --iso FILE       Specify ISO file"
+    echo "  -t, --timeout SEC    Set timeout in seconds (default: ${DEFAULT_TIMEOUT})"
     echo "  -g, --graphics       Run with graphics display (default)"
     echo "  -n, --nographic      Run without graphics (serial only)"
     echo "  -s, --serial FILE    Save serial output to file"
     echo "  --gdb                Enable GDB debugging (port 1234)"
     echo "  --monitor            Enable QEMU monitor on stdio"
     echo "  --build              Build before running"
+    echo "  --sound DEVICE       Set sound device (default: ${DEFAULT_SOUND})"
+    echo "  --dry-run             Show QEMU command without executing"
     echo ""
-    echo "Examples:"
-    echo "  $0                           # Run 64-bit with default settings"
-    echo "  $0 -a 32                     # Run 32-bit version"
-    echo "  $0 --build                   # Build then run"
-    echo "  $0 --debug --serial boot.log # Debug mode with log"
-    echo "  $0 --gdb --nographic        # GDB debugging, no graphics"
-    echo "  $0 -a 32 -m 512             # 32-bit with 512MB RAM"
+    echo "Examples for Canopy testing:"
+    echo "  $0                           # Test Canopy with 64-bit UEFI"
+    echo "  $0 --bios                    # Test Canopy with 64-bit BIOS"
+    echo "  $0 -a 32                     # Test 32-bit version"
+    echo "  $0 -m 1024                    # Test with 1GB RAM"
+    echo "  $0 --debug                    # Test with debug output"
+    echo "  $0 --uefi --dry-run           # Show UEFI command only"
 }
 
-# Function to find latest ISO
-find_latest_iso() {
+# Function to find latest ISO/image
+find_latest_image() {
     local arch="$1"
-    local iso_file=""
-
-    # Look for ISO files in dist/ directory matching our naming pattern
-    if ls dist/forestos_${arch}bit_bios_*.iso >/dev/null 2>&1; then
-        iso_file=$(ls -t dist/forestos_${arch}bit_bios_*.iso | head -n1)
-    elif ls dist/forestos_${arch}bit_*.iso >/dev/null 2>&1; then
-        iso_file=$(ls -t dist/forestos_${arch}bit_*.iso | head -n1)
-    # Fallback to old naming conventions
-    elif ls forest_nightly_*.iso >/dev/null 2>&1; then
-        iso_file=$(ls -t forest_nightly_*.iso | head -n1)
-    elif [ -f "forest.iso" ]; then
-        iso_file="forest.iso"
-    elif ls dist/*.iso >/dev/null 2>&1; then
-        iso_file=$(ls -t dist/*.iso | head -n1)
-    elif ls *.iso >/dev/null 2>&1; then
-        iso_file=$(ls -t *.iso | head -n1)
+    local boot_mode="$2"
+    local image_file=""
+    
+    if [ "$boot_mode" = "uefi" ]; then
+        # Look for UEFI disk images
+        if ls dist/forestos_${arch}bit_uefi_*.img >/dev/null 2>&1; then
+            image_file=$(ls -t dist/forestos_${arch}bit_uefi_*.img | head -n1)
+        fi
+        echo "$image_file"
+    else
+        # Look for BIOS ISO files
+        if ls dist/forestos_${arch}bit_bios_*.iso >/dev/null 2>&1; then
+            image_file=$(ls -t dist/forestos_${arch}bit_bios_*.iso | head -n1)
+        elif ls dist/forestos_${arch}bit_*.iso >/dev/null 2>&1; then
+            image_file=$(ls -t dist/forestos_${arch}bit_*.iso | head -n1)
+        # Fallback to old naming conventions
+        elif ls forest_nightly_*.iso >/dev/null 2>&1; then
+            image_file=$(ls -t forest_nightly_*.iso | head -n1)
+        elif [ -f "forest.iso" ]; then
+            image_file="forest.iso"
+        elif ls dist/*.iso >/dev/null 2>&1; then
+            image_file=$(ls -t dist/*.iso | head -n1)
+        elif ls *.iso >/dev/null 2>&1; then
+            image_file=$(ls -t *.iso | head -n1)
+        fi
+        echo "$image_file"
     fi
-
-    echo "$iso_file"
 }
 
 # Function to build the OS
@@ -115,6 +144,58 @@ check_iso() {
     return 0
 }
 
+# Function to validate sound device
+validate_sound_device() {
+    local sound_device="$1"
+    
+    case "$sound_device" in
+        "none"|"sb16"|"ac97"|"hda"|"es1370"|"adlib"|"gus")
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Function to configure sound device
+configure_sound() {
+    local sound_device="$1"
+    local sound_cmd=""
+    
+    case "$sound_device" in
+        "none")
+            sound_cmd=""
+            ;;
+        "sb16")
+            sound_cmd="-device sb16"
+            ;;
+        "ac97")
+            sound_cmd="-device ac97"
+            ;;
+        "hda")
+            sound_cmd="-device intel-hda -device hda-duplex"
+            ;;
+        "es1370")
+            sound_cmd="-device es1370"
+            ;;
+        "adlib")
+            sound_cmd="-device adlib"
+            ;;
+        "gus")
+            sound_cmd="-device gus"
+            ;;
+        *)
+            echo "Unknown sound device: $sound_device" >&2
+            echo "Available sound devices: sb16, ac97, hda, es1370, adlib, gus, none" >&2
+            echo "Forest OS native support: sb16, ac97, hda, es1370" >&2
+            return 1
+            ;;
+    esac
+    
+    echo "$sound_cmd"
+}
+
 # Function to run QEMU
 run_qemu() {
     local iso_file="$1"
@@ -126,6 +207,8 @@ run_qemu() {
     local enable_gdb="$7"
     local enable_monitor="$8"
     local arch="$9"
+    local sound_device="${10}"
+    local dry_run="${11}"
 
     print_info "Starting Forest-OS in QEMU..."
     print_info "Configuration:"
@@ -134,6 +217,7 @@ run_qemu() {
     print_info "  Memory: ${memory}MB"
     print_info "  Mode: $mode"
     print_info "  Timeout: ${timeout_val}s"
+    print_info "  Sound: $sound_device"
 
     # Select QEMU binary and CPU based on architecture
     local qemu_bin
@@ -146,13 +230,26 @@ run_qemu() {
         cpu_type="qemu32"
     fi
 
-    # Build QEMU command
-    local qemu_cmd="timeout ${timeout_val} ${qemu_bin}"
+    # Build QEMU command (no timeout for GUI testing)
+    if [ "$timeout_val" -gt 0 ]; then
+        qemu_cmd="timeout ${timeout_val} ${qemu_bin}"
+    else
+        qemu_cmd="$qemu_bin"
+    fi
 
     # Basic system configuration
     qemu_cmd="$qemu_cmd -m ${memory}M"
-    qemu_cmd="$qemu_cmd -cdrom $iso_file"
-
+    
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        # UEFI boot configuration
+        qemu_cmd="$qemu_cmd -bios /usr/share/ovmf/OVMF.fd -drive format=raw,file=$iso_file"
+        print_info "  Boot: UEFI with OVMF firmware"
+    else
+        # BIOS boot configuration
+        qemu_cmd="$qemu_cmd -cdrom $iso_file"
+        print_info "  Boot: BIOS from CDROM"
+    fi
+    
     # CPU and acceleration
     qemu_cmd="$qemu_cmd -cpu ${cpu_type}"
     if [ -r /dev/kvm ]; then
@@ -162,14 +259,30 @@ run_qemu() {
         print_warning "  KVM acceleration: disabled (not available)"
     fi
     
-    # Network configuration  
-    qemu_cmd="$qemu_cmd -netdev user,id=net0 -device rtl8139,netdev=net0"
+    # Input devices for Canopy
+    qemu_cmd="$qemu_cmd -device usb-ehci"
+    print_info "  Input: USB mouse and keyboard (for Canopy)"
     
-    # Graphics configuration for framebuffer TTY
+    # Network configuration (for future internet connectivity)
+    qemu_cmd="$qemu_cmd -netdev user,id=net0 -device rtl8139,netdev=net0"
+    print_info "  Network: User-mode networking enabled"
+    
+    # Sound configuration
+    local sound_config
+    sound_config=$(configure_sound "$sound_device")
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+    if [ -n "$sound_config" ]; then
+        qemu_cmd="$qemu_cmd $sound_config"
+    fi
+    
+    # Graphics configuration for Canopy desktop environment
     if [ "$mode" = "graphics" ]; then
-        # Use standard VGA for Bochs BGA support (our framebuffer TTY)
-        qemu_cmd="$qemu_cmd -vga std"
-        print_info "  Graphics: Bochs BGA (framebuffer TTY)"
+        # Use modern graphics with proper GUI display
+        qemu_cmd="$qemu_cmd -device VGA,vgamem_mb=128"
+        print_info "  Graphics: GTK display with OpenGL (for Canopy DE)"
+        print_info "  Device: VGA with 128MB VRAM (for framebuffer)"
     else
         qemu_cmd="$qemu_cmd -nographic"
         print_info "  Graphics: disabled (serial console only)"
@@ -200,7 +313,21 @@ run_qemu() {
     fi
     
     # Boot configuration
-    qemu_cmd="$qemu_cmd -boot d"
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        # UEFI handles boot order automatically
+        print_info "  Boot: EFI system"
+    else
+        qemu_cmd="$qemu_cmd -boot d"
+        print_info "  Boot: From CD-ROM"
+    fi
+    
+    if [ "$dry_run" = "true" ]; then
+        print_info "Dry-run mode: QEMU command would be:"
+        print_info "$qemu_cmd"
+        echo ""
+        print_success "Dry-run completed - command displayed above"
+        return 0
+    fi
     
     print_info "Starting QEMU..."
     print_info "Command: $qemu_cmd"
@@ -232,12 +359,23 @@ serial_file=""
 enable_gdb="false"
 enable_monitor="false"
 should_build="false"
+sound_device="$DEFAULT_SOUND"
+dry_run="false"
+BOOT_MODE="uefi"  # Default to UEFI
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help)
             show_usage
             exit 0
+            ;;
+        --uefi)
+            BOOT_MODE="uefi"
+            shift
+            ;;
+        --bios)
+            BOOT_MODE="bios"
+            shift
             ;;
         -a|--arch)
             arch="$2"
@@ -287,6 +425,20 @@ while [[ $# -gt 0 ]]; do
             should_build="true"
             shift
             ;;
+        --sound)
+            sound_device="$2"
+            if ! validate_sound_device "$sound_device"; then
+                print_error "Invalid sound device: $sound_device"
+                print_info "Available sound devices: sb16, ac97, hda, es1370, adlib, gus, none"
+                print_info "Forest OS native support: sb16, ac97, hda, es1370"
+                exit 1
+            fi
+            shift 2
+            ;;
+        --dry-run)
+            dry_run="true"
+            shift
+            ;;
         *)
             print_error "Unknown option: $1"
             echo "Use --help for usage information"
@@ -297,8 +449,41 @@ done
 
 # Main execution
 main() {
-    print_info "Forest-OS QEMU Runner v1.0"
-    print_info "Framebuffer TTY Edition (${arch}-bit)"
+    # Quick options for Canopy testing
+    uefi_mode="false"
+    bios_mode="false"
+    
+    # Check for quick options first
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --uefi)
+                uefi_mode="true"
+                BOOT_MODE="uefi"
+                shift
+                ;;
+            --bios)
+                bios_mode="true"
+                BOOT_MODE="bios"
+                shift
+                ;;
+            -h|--help)
+                show_usage
+                exit 0
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    
+    # Set defaults if no mode specified
+    if [ "$uefi_mode" = "false" ] && [ "$bios_mode" = "false" ]; then
+        uefi_mode="true"
+        BOOT_MODE="uefi"
+    fi
+    
+    print_info "Forest OS QEMU Runner - Canopy Testing Edition"
+    print_info "Mode: $BOOT_MODE (${arch}-bit)"
     echo ""
 
     # Build if requested
@@ -309,27 +494,84 @@ main() {
         echo ""
     fi
 
-    # Find ISO file if not specified
+    # Find image file if not specified
     if [ -z "$iso_file" ]; then
-        iso_file=$(find_latest_iso "$arch")
+        iso_file=$(find_latest_image "$arch" "$BOOT_MODE")
         if [ -z "$iso_file" ]; then
-            print_error "No ${arch}-bit ISO file found."
-            print_info "Build with: ./build-helper.sh ${arch}-bios-debug"
-            print_info "Available ISOs in dist/:"
-            ls -la dist/*.iso 2>/dev/null || echo "  No ISO files found"
+            if [ "$BOOT_MODE" = "uefi" ]; then
+                print_warning "No ${arch}-bit UEFI image found."
+                # Fallback to BIOS ISO for UEFI mode
+                print_info "Looking for BIOS ISO as fallback..."
+                iso_file=$(find_latest_image "$arch" "bios")
+                if [ -z "$iso_file" ]; then
+                    # Try other architecture if current arch not found
+                    local fallback_arch="32"
+                    if [ "$arch" = "32" ]; then
+                        fallback_arch="64"
+                    fi
+                    print_info "No ${arch}-bit BIOS images found, trying ${fallback_arch}-bit..."
+                    iso_file=$(find_latest_image "$fallback_arch" "bios")
+                    if [ -z "$iso_file" ]; then
+                        print_error "No BIOS or UEFI images found for any architecture."
+                        print_info "Build UEFI with: make ARCH=$arch BOOT_MODE=uefi BUILD_TYPE=release img"
+                        print_info "Build BIOS with: make ARCH=$arch BOOT_MODE=bios BUILD_TYPE=release iso"
+                        print_info "Available files in dist/:"
+                        ls -la dist/*.{iso,img} 2>/dev/null || echo "  No images found"
+                        exit 1
+                    else
+                        print_info "Falling back to ${fallback_arch}-bit BIOS ISO: $iso_file"
+                        print_warning "Note: Running in BIOS mode with ${fallback_arch}-bit architecture"
+                        BOOT_MODE="bios"
+                        arch="$fallback_arch"
+                    fi
+                else
+                    # Check if the found BIOS ISO matches the requested architecture
+                    if echo "$iso_file" | grep -q "_${arch}bit_"; then
+                        print_info "Falling back to BIOS ISO: $iso_file"
+                        print_warning "Note: Running in BIOS mode since no UEFI image available"
+                        BOOT_MODE="bios"
+                    else
+                        # Extract actual architecture from the ISO filename
+                        local actual_arch=$(echo "$iso_file" | sed -n 's/.*forestos_\([0-9]*\)bit_.*/\1/p')
+                        if [ -n "$actual_arch" ] && [ "$actual_arch" != "$arch" ]; then
+                            print_info "Falling back to ${actual_arch}-bit BIOS ISO: $iso_file"
+                            print_warning "Note: Running in BIOS mode with ${actual_arch}-bit architecture (no ${arch}-bit images found)"
+                            BOOT_MODE="bios"
+                            arch="$actual_arch"
+                        else
+                            print_info "Falling back to BIOS ISO: $iso_file"
+                            print_warning "Note: Running in BIOS mode since no UEFI image available"
+                            BOOT_MODE="bios"
+                        fi
+                    fi
+                fi
+            else
+                print_error "No ${arch}-bit BIOS image found."
+                print_info "Build with: make ARCH=$arch BOOT_MODE=bios BUILD_TYPE=release iso"
+                print_info "Available files in dist/:"
+                ls -la dist/*.{iso,img} 2>/dev/null || echo "  No images found"
+                exit 1
+            fi
+        fi
+    fi
+    
+    # Check if image exists
+    if [ "$BOOT_MODE" = "uefi" ]; then
+        if [ ! -f "$iso_file" ]; then
+            print_error "UEFI image file not found: $iso_file"
+            exit 1
+        fi
+        print_success "Using UEFI image: $iso_file"
+    else
+        if ! check_iso "$iso_file"; then
             exit 1
         fi
     fi
 
-    # Check if ISO exists
-    if ! check_iso "$iso_file"; then
-        exit 1
-    fi
-
     echo ""
 
-    # Run QEMU
-    run_qemu "$iso_file" "$memory" "$timeout_val" "$mode" "$debug" "$serial_file" "$enable_gdb" "$enable_monitor" "$arch"
+    # Run QEMU (or show command if dry-run)
+    run_qemu "$iso_file" "$memory" "$timeout_val" "$mode" "$debug" "$serial_file" "$enable_gdb" "$enable_monitor" "$arch" "$sound_device" "$dry_run"
     exit $?
 }
 

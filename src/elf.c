@@ -99,6 +99,8 @@ bool elf_is_valid(const uint8* elf_data, size_t size) {
 }
 
 static bool map_segment_pages(page_directory_t* dir, uint32 start, uint32 end, uint32 flags) {
+    debuglog(DEBUG_INFO, "[ELF] map_segment_pages: start=0x%x end=0x%x flags=0x%x, free_frames=%u\n", 
+             start, end, flags, pmm_get_free_frames());
     for (uint32 va = start; va < end; va += MEMORY_PAGE_SIZE) {
         uint32 frame = pmm_alloc_frame();
         if (!frame) {
@@ -137,6 +139,92 @@ static void zero_bss_region(uint32 start, uint32 end) {
     memory_set((uint8*)start, 0, end - start);
 }
 
+// Temporarily map a user page in the current directory for access
+// Returns the temporary virtual address to use, or 0 on failure
+static uint32 temp_map_for_copy(uint32 user_va, uint32 flags) {
+    // Calculate the physical frame for this user VA
+    // We need to look it up in the new_dir, but we don't have access to it here
+    // Instead, we'll just identity-map the physical frame allocated for the user page
+    // For now, allocate a new frame and map it temporarily
+    uint32 frame = pmm_alloc_frame();
+    if (!frame) {
+        return 0;
+    }
+    
+    // Use a fixed temporary mapping area just above kernel space
+    // 0xFF000000 is the last 16MB, use that for temp mappings
+    static uint32 next_temp_va = 0xFF000000;
+    uint32 temp_va = next_temp_va;
+    next_temp_va += MEMORY_PAGE_SIZE;
+    
+    page_directory_t* cur_dir = vmm_get_current_page_directory();
+    memory_result_t res = vmm_map_page(cur_dir, temp_va, frame, PAGE_PRESENT | PAGE_WRITABLE);
+    if (res != MEMORY_OK) {
+        pmm_free_frame(frame);
+        return 0;
+    }
+    
+    return temp_va;
+}
+
+// Copy data to user space in new_dir by temporarily mapping in current_dir
+static bool copy_to_user_space(page_directory_t* user_dir, uint32 user_va, 
+                                const uint8* src, uint32 size, uint32 flags) {
+    uint32 offset = user_va & (MEMORY_PAGE_SIZE - 1);
+    uint32 remaining = size;
+    const uint8* src_ptr = src;
+    page_directory_t* cur_dir = vmm_get_current_page_directory();
+    uint32 temp_va = 0xFFC00000; // Fixed temporary mapping address
+    
+    while (remaining > 0) {
+        uint32 page_va = align_down(user_va, MEMORY_PAGE_SIZE);
+        
+        // Check if page is already mapped in user_dir
+        uint32 frame = vmm_get_physical_addr(user_dir, page_va);
+        if (!frame) {
+            frame = pmm_alloc_frame();
+            if (!frame) {
+                debuglog(DEBUG_ERROR, "[ELF] copy_to_user_space: out of memory\n");
+                return false;
+            }
+            
+            memory_result_t res = vmm_map_page(user_dir, page_va, frame, flags);
+            if (res != MEMORY_OK && res != MEMORY_ERROR_ALREADY_MAPPED) {
+                pmm_free_frame(frame);
+                debuglog(DEBUG_ERROR, "[ELF] copy_to_user_space: vmm_map_page failed\n");
+                return false;
+            }
+        }
+        
+        // Temporarily map in current directory for copying
+        vmm_unmap_page(cur_dir, temp_va);
+        memory_result_t res = vmm_map_page(cur_dir, temp_va, frame, PAGE_PRESENT | PAGE_WRITABLE);
+        if (res != MEMORY_OK) {
+            debuglog(DEBUG_ERROR, "[ELF] copy_to_user_space: temp map failed\n");
+            return false;
+        }
+        
+        // Copy data to the temp mapping
+        uint32 copy_offset = user_va - page_va;
+        uint32 copy_size = MEMORY_PAGE_SIZE - copy_offset;
+        if (copy_size > remaining) {
+            copy_size = remaining;
+        }
+        
+        memory_copy((char*)(temp_va + copy_offset), (char*)src_ptr, (int)copy_size);
+        
+        // Unmap temp mapping
+        vmm_unmap_page(cur_dir, temp_va);
+        
+        // Advance
+        src_ptr += copy_size;
+        remaining -= copy_size;
+        user_va += copy_size;
+    }
+    
+    return true;
+}
+
 //This is busting my balls.
 //TODO: fix sloppy code later
 int elf_load_executable(const uint8 *elf_data, size_t elf_size,
@@ -162,18 +250,22 @@ int elf_load_executable(const uint8 *elf_data, size_t elf_size,
         return -3;
 
     page_directory_t* new_dir = vmm_create_page_directory();
-    if (!new_dir)
+    if (!new_dir) {
+        debuglog(DEBUG_ERROR, "[ELF] vmm_create_page_directory failed! free_frames=%u\n", pmm_get_free_frames());
         return -4;
+    }
+    debuglog(DEBUG_INFO, "[ELF] Created new page directory at %p\n", (void*)new_dir);
 
-    // Ensure the ELF source buffer is visible in the new page directory while
-    // we copy it. The initrd is identity-mapped in the kernel, but the fresh
-    // directory may not have that range mapped yet.
+    // Ensure the ELF source buffer is visible in the new page directory.
+    // The initrd is identity-mapped in the kernel, so we just copy those mappings.
     uint32 src_start = align_down((uint32)elf_data, MEMORY_PAGE_SIZE);
     uint32 src_end   = align_up((uint32)elf_data + elf_size, MEMORY_PAGE_SIZE);
+    debuglog(DEBUG_INFO, "[ELF] Mapping ELF source: 0x%x-0x%x in new_dir\n", src_start, src_end);
     vmm_identity_map_range(new_dir, src_start, src_end, PAGE_PRESENT | PAGE_WRITABLE);
 
     page_directory_t* prev_dir = vmm_get_current_page_directory();
-    vmm_switch_page_directory(new_dir);
+    debuglog(DEBUG_INFO, "[ELF] Loading segments WITHOUT switching page directory\n");
+    debuglog(DEBUG_INFO, "[ELF] About to iterate over segments\n");
 
     uint32 base = 0xFFFFFFFF;
     uint32 end  = 0;
@@ -225,30 +317,69 @@ int elf_load_executable(const uint8 *elf_data, size_t elf_size,
             goto fail;
         }
 
+        // Copy segment data using temporary mapping (without switching directories)
         const uint8* file_src = elf_data + segment->p_offset;
-        uint8* dest = (uint8*)segment->p_vaddr;
-        memory_copy((char*)file_src, (char*)dest, (int)segment->p_filesz);
+        debuglog(DEBUG_INFO, "[ELF] Copying segment %u: filesz=%u to vaddr=0x%x\n",
+                 i, segment->p_filesz, segment->p_vaddr);
+        if (!copy_to_user_space(new_dir, segment->p_vaddr, file_src, segment->p_filesz, flags)) {
+            debuglog(DEBUG_ERROR, "[ELF] Failed to copy segment %u data\n", i);
+            goto fail;
+        }
 
+        // Zero BSS if present
         if (segment->p_memsz > segment->p_filesz) {
-            uint32 bss_start = segment->p_vaddr + segment->p_filesz;
-            uint32 bss_end = segment->p_vaddr + segment->p_memsz;
-            zero_bss_region(bss_start, bss_end);
+            uint32 bss_size = segment->p_memsz - segment->p_filesz;
+            uint32 bss_va = segment->p_vaddr + segment->p_filesz;
+            debuglog(DEBUG_INFO, "[ELF] Zeroing BSS: 0x%x size=%u\n", bss_va, bss_size);
+            
+            // Zero BSS using temporary mapping
+            page_directory_t* cur_dir = vmm_get_current_page_directory();
+            uint32 temp_va = 0xFFC00000;
+            uint32 remaining_bss = bss_size;
+            uint32 bss_offset = 0;
+            
+            while (remaining_bss > 0) {
+                uint32 page_va = align_down(bss_va + bss_offset, MEMORY_PAGE_SIZE);
+                uint32 frame = vmm_get_physical_addr(new_dir, page_va);
+                if (!frame) {
+                    debuglog(DEBUG_ERROR, "[ELF] BSS page not mapped: 0x%x\n", page_va);
+                    goto fail;
+                }
+                
+                vmm_unmap_page(cur_dir, temp_va);
+                vmm_map_page(cur_dir, temp_va, frame, PAGE_PRESENT | PAGE_WRITABLE);
+                
+                uint32 copy_offset = (bss_va + bss_offset) - page_va;
+                uint32 copy_size = MEMORY_PAGE_SIZE - copy_offset;
+                if (copy_size > remaining_bss) {
+                    copy_size = remaining_bss;
+                }
+                
+                memory_set((char*)(temp_va + copy_offset), 0, copy_size);
+                vmm_unmap_page(cur_dir, temp_va);
+                
+                remaining_bss -= copy_size;
+                bss_offset += copy_size;
+            }
 
-            total_bss += (segment->p_memsz - segment->p_filesz);
+            total_bss += bss_size;
             if (total_bss > ELF_MAX_BSS_SIZE) {
                 debuglog(DEBUG_ERROR, "[ELF] BSS size too large (total=%u, max=%u)\n",
                          total_bss, ELF_MAX_BSS_SIZE);
                 goto fail;
             }
 
-            if (bss_start < bss_min) {
-                bss_min = bss_start;
+            if (bss_va < bss_min) {
+                bss_min = bss_va;
             }
-            if (bss_end > bss_max) {
-                bss_max = bss_end;
+            if (bss_va + bss_size > bss_max) {
+                bss_max = bss_va + bss_size;
             }
         }
 
+        debuglog(DEBUG_INFO, "[ELF] Segment %u: vaddr=0x%x, memsz=0x%x, end=0x%x, flags=0x%x\n",
+                 i, segment->p_vaddr, segment->p_memsz, segment->p_vaddr + segment->p_memsz, segment->p_flags);
+        debuglog(DEBUG_INFO, "[ELF] Entry point: 0x%x\n", eh->e_entry);
         if (eh->e_entry >= segment->p_vaddr && eh->e_entry < segment->p_vaddr + segment->p_memsz) {
             entrypoint_in_segment = true;
             if (segment->p_flags & PF_X) {
@@ -265,8 +396,6 @@ int elf_load_executable(const uint8 *elf_data, size_t elf_size,
         record_segment_info(segment, info);
         any_segment_loaded = true;
     }
-
-    vmm_switch_page_directory(prev_dir);
 
     if (!any_segment_loaded || base == 0xFFFFFFFF)
         goto fail_destroy;
@@ -287,10 +416,11 @@ int elf_load_executable(const uint8 *elf_data, size_t elf_size,
 
     info->valid        = true;
 
+    debuglog(DEBUG_INFO, "[ELF] Successfully loaded ELF, entry=0x%x, pd=0x%x\n", 
+             info->entry_point, info->page_directory);
     return 0;
 
     fail:
-    vmm_switch_page_directory(prev_dir);
     fail_destroy:
     vmm_destroy_page_directory(new_dir);
     return -5;

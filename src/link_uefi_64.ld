@@ -7,12 +7,17 @@
 
 OUTPUT_FORMAT("elf64-x86-64")
 OUTPUT_ARCH("i386:x86-64")
-ENTRY(_start)
+ENTRY(efi_main)
 
 SECTIONS
 {
     . = 0x100000;
     kernel_start = .;
+
+    /* Keep multiboot headers inside the first 8 KiB for GRUB */
+    .multiboot ALIGN(8) : {
+        KEEP(*(.multiboot))
+    }
 
     .text : {
         _text_start = .;

@@ -374,3 +374,11 @@ bool hardware_cpu_has_tsc(void) {
     }
     return (info->features.basic_edx & CPUID_FEAT_EDX_TSC) != 0;
 }
+
+bool hardware_cpu_has_fpu(void) {
+    const cpuid_info_t* info = hardware_get_cpuid_info();
+    if (!info->cpuid_supported) {
+        return false;
+    }
+    return (info->features.basic_edx & CPUID_FEAT_EDX_FPU) != 0;
+}

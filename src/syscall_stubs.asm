@@ -1,71 +1,85 @@
-; Forest OS Syscall Stub
-; Assembly wrapper for system call interrupt
+; ============================================================================
+; Forest OS - Syscall Stub (INT 0x80)
+; Correct, ABI-safe syscall entry for 32-bit x86
+;
+; CPU stack on entry (ring3 -> ring0):
+;   SS
+;   ESP
+;   EFLAGS
+;   CS
+;   EIP
+;
+; This frame MUST remain untouched until IRET.
+; ============================================================================
 
-%ifdef __x86_64__
-BITS 64
-section .text
-extern syscall_handler
-global isr128
-isr128:
-    ; Forward to the main 64-bit interrupt stub so we share the same context logic
-    jmp syscall_handler
+%ifndef __x86_64__
 
-%else
-section .text
-align 4
+BITS 32
+SECTION .text
+ALIGN 4
 
 extern syscall_handle
 extern g_kernel_data_selector
 
 global isr128
+
 isr128:
-    cli                    ; Disable interrupts
-    push byte 0            ; Push dummy error code
-    push byte 128          ; Push interrupt number (0x80)
-    
-    pusha                  ; Push all general purpose registers
-    
-    mov ax, ds             ; Save data segment
-    push eax
-    
+    ; ------------------------------------------------------------------------
+    ; Preserve userspace execution context
+    ; ------------------------------------------------------------------------
+
+    push ds
+    push es
+    push fs
+    push gs
+
+    pusha                   ; EAX ECX EDX EBX ESP EBP ESI EDI
+
+    ; ------------------------------------------------------------------------
+    ; Switch to kernel data segments
+    ; ------------------------------------------------------------------------
+
     mov ax, [g_kernel_data_selector]
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
 
-    ; Create syscall frame structure on stack matching the syscall_frame_t structure
-    ; After pusha, the stack contains (from low address/ESP to high address):
-    ; - DS (saved data segment) <- ESP after push eax
-    ; - EDI (from pusha - pushed last)
-    ; - ESI (from pusha)
-    ; - EBP (from pusha)
-    ; - ESP (from pusha - original ESP, not used)
-    ; - EBX (from pusha)
-    ; - EDX (from pusha)
-    ; - ECX (from pusha)
-    ; - EAX (from pusha - pushed first)
-    ; - Interrupt number (128)
-    ; - Dummy error code (0)
-    ; - Return address (EIP)
-    ; - Code segment (CS)
-    ; - Flags (EFLAGS)
+    ; ------------------------------------------------------------------------
+    ; Call C syscall handler
+    ; Pass pointer to saved register frame (top of pusha)
+    ; ------------------------------------------------------------------------
 
-    ; Calculate pointer to EDI (syscall_frame_t starts at ESP+4, skipping DS)
-    ; Using LEA avoids modifying ESP which would corrupt the saved DS
-    lea eax, [esp + 4]     ; EAX = pointer to EDI (syscall_frame_t)
-    push eax               ; Pass pointer to syscall frame
-    call syscall_handle    ; Call C handler
-    add esp, 4             ; Remove frame pointer from stack
-    
-    pop eax                ; Restore data segment
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    
-    popa                   ; Pop all general purpose registers
-    add esp, 8             ; Remove error code and interrupt number
-    sti                    ; Re-enable interrupts
-    iret                   ; Return from interrupt
+    push esp                ; struct syscall_frame*
+    call syscall_handle
+    add esp, 4
+
+    ; ------------------------------------------------------------------------
+    ; Restore userspace execution context
+    ; ------------------------------------------------------------------------
+
+    popa
+
+    pop gs
+    pop fs
+    pop es
+    pop ds
+
+    ; ------------------------------------------------------------------------
+    ; Return to userspace
+    ; CPU restores: EIP, CS, EFLAGS, ESP, SS
+    ; ------------------------------------------------------------------------
+
+    iret
+
+%else
+; ============================================================================
+; 64-bit build: not supported yet
+; ============================================================================
+BITS 64
+SECTION .text
+global isr128
+isr128:
+    hlt
+    jmp isr128
 %endif

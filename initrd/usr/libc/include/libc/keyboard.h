@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-#include "../types.h"
+#include "../../../libs/forestcore/include/types.h"
 
 // Keyboard event types for userspace applications
 typedef enum {

@@ -7,25 +7,30 @@ SECTIONS
     . = 0x100000;
     kernel_start = .;
 
-    .multiboot_header : {
-        *(.multiboot_header)
+    /* Ensure multiboot headers stay in the first 8 KiB */
+    .multiboot ALIGN(8) : {
+        KEEP(*(.multiboot))
     }
 
-    .text : ALIGN(4096) {
+    .text : {
         *(.text.boot)
         *(.text)
         *(.text.*)
     }
 
-    .rodata : ALIGN(4096) {
+    .rodata : {
         *(.rodata)
         *(.rodata.*)
     }
 
-    .data : ALIGN(4096) {
+    . = LOADADDR(.rodata) + SIZEOF(.rodata);
+
+    .data : AT(.) {
         *(.data)
         *(.data.*)
     }
+
+    .eh_frame : { *(.eh_frame) }
 
     .bss : ALIGN(4096) {
         _bss_start = .;
@@ -47,7 +52,6 @@ SECTIONS
     /DISCARD/ : {
         *(.note.*)
         *(.comment)
-        *(.eh_frame)
         *(.eh_frame_hdr)
     }
 }

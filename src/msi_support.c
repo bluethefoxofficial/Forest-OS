@@ -349,7 +349,7 @@ int msi_register_device(uint8_t bus, uint8_t device, uint8_t function)
     device_id = pci_config_read16(bus, device, function, 0x02);
     
     /* Allocate device structure */
-    dev = (struct pci_msi_device *)kmalloc(sizeof(*dev), GFP_KERNEL);
+    dev = (struct pci_msi_device *)kmalloc(sizeof(*dev));
     if (!dev) {
         return -ENOMEM;
     }

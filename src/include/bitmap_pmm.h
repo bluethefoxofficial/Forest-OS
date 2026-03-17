@@ -38,6 +38,7 @@ typedef enum {
 } page_state_t;
 
 // Physical memory statistics
+#ifndef PMM_STATS_T_DEFINED
 typedef struct pmm_stats {
     uint32_t total_pages;
     uint32_t free_pages;
@@ -61,6 +62,8 @@ typedef struct pmm_stats {
     uint32_t metadata_corruption_detected;
     uint32_t checksum_failures;
 } pmm_stats_t;
+#define PMM_STATS_T_DEFINED 1
+#endif
 
 // Allocation preferences
 typedef enum {

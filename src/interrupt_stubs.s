@@ -188,21 +188,27 @@ section .text
 isr_stub_%1:
     cli
     SAVE_CONTEXT_64
-    
+
     ; Store interrupt vector number
     mov qword [rsp + OFFSET_VECTOR], %1
-    
+
     ; Error code was already pushed by CPU, move it to our context
     mov rax, [rsp + CONTEXT_SIZE]     ; Get error code from stack
     mov [rsp + OFFSET_ERROR_CODE], rax
-    
+
+    ; Save original RSP (context address) before alignment
+    mov rbx, rsp
+
     ; Align stack to 16 bytes for ABI compliance
     and rsp, -16
-    
-    ; Call C handler with context pointer
-    mov rdi, rsp    ; First argument: interrupt context
+
+    ; Call C handler with context pointer (original RSP, NOT aligned)
+    mov rdi, rbx    ; First argument: interrupt context at original RSP
     call interrupt_dispatch_handler
-    
+
+    ; Restore original RSP before context restoration
+    mov rsp, rbx
+
     ; Restore context and return
     RESTORE_CONTEXT_64
     add rsp, 8      ; Remove error code from stack
@@ -215,20 +221,26 @@ isr_stub_%1:
     cli
     push 0          ; Push dummy error code for consistency
     SAVE_CONTEXT_64
-    
+
     ; Store interrupt vector number
     mov qword [rsp + OFFSET_VECTOR], %1
-    
+
     ; Error code is dummy (0)
     mov qword [rsp + OFFSET_ERROR_CODE], 0
-    
+
+    ; Save original RSP (context address) before alignment
+    mov rbx, rsp
+
     ; Align stack to 16 bytes for ABI compliance
     and rsp, -16
-    
-    ; Call C handler with context pointer
-    mov rdi, rsp    ; First argument: interrupt context
+
+    ; Call C handler with context pointer (original RSP, NOT aligned)
+    mov rdi, rbx    ; First argument: interrupt context at original RSP
     call interrupt_dispatch_handler
-    
+
+    ; Restore original RSP before context restoration
+    mov rsp, rbx
+
     ; Restore context and return
     RESTORE_CONTEXT_64
     add rsp, 8      ; Remove dummy error code from stack
@@ -241,18 +253,24 @@ irq_stub_%1:
     cli
     push 0          ; IRQs don't have error codes
     SAVE_CONTEXT_64
-    
+
     ; Store IRQ vector number (IRQ number + 32)
     mov qword [rsp + OFFSET_VECTOR], (%1 + 32)
     mov qword [rsp + OFFSET_ERROR_CODE], 0
-    
+
+    ; Save original RSP (context address) before alignment
+    mov rbx, rsp
+
     ; Align stack to 16 bytes for ABI compliance
     and rsp, -16
-    
-    ; Call C handler with context pointer
-    mov rdi, rsp    ; First argument: interrupt context
+
+    ; Call C handler with context pointer (original RSP, NOT aligned)
+    mov rdi, rbx    ; First argument: interrupt context at original RSP
     call interrupt_dispatch_handler
-    
+
+    ; Restore original RSP before context restoration
+    mov rsp, rbx
+
     ; Restore context and return
     RESTORE_CONTEXT_64
     add rsp, 8      ; Remove dummy error code
@@ -320,9 +338,11 @@ isr_stub_%1:
     SAVE_CONTEXT_64
     mov qword [rsp + OFFSET_VECTOR], %1
     mov qword [rsp + OFFSET_ERROR_CODE], 0
+    mov rbx, rsp
     and rsp, -16
-    mov rdi, rsp
+    mov rdi, rbx
     call interrupt_dispatch_handler
+    mov rsp, rbx
     RESTORE_CONTEXT_64
     add rsp, 8
     iretq
@@ -335,9 +355,11 @@ nmi_handler:
     SAVE_CONTEXT_64
     mov qword [rsp + OFFSET_VECTOR], 2
     mov qword [rsp + OFFSET_ERROR_CODE], 0
+    mov rbx, rsp
     and rsp, -16
-    mov rdi, rsp
+    mov rdi, rbx
     call interrupt_dispatch_handler
+    mov rsp, rbx
     RESTORE_CONTEXT_64
     add rsp, 8
     iretq
@@ -348,8 +370,9 @@ double_fault_handler:
     mov qword [rsp + OFFSET_VECTOR], 8
     mov rax, [rsp + CONTEXT_SIZE]
     mov [rsp + OFFSET_ERROR_CODE], rax
+    mov rbx, rsp
     and rsp, -16
-    mov rdi, rsp
+    mov rdi, rbx
     call interrupt_dispatch_handler
     ; Double fault usually doesn't return
     cli
@@ -361,9 +384,11 @@ machine_check_handler:
     SAVE_CONTEXT_64
     mov qword [rsp + OFFSET_VECTOR], 18
     mov qword [rsp + OFFSET_ERROR_CODE], 0
+    mov rbx, rsp
     and rsp, -16
-    mov rdi, rsp
+    mov rdi, rbx
     call interrupt_dispatch_handler
+    mov rsp, rbx
     RESTORE_CONTEXT_64
     add rsp, 8
     iretq
@@ -374,9 +399,11 @@ syscall_handler:
     SAVE_CONTEXT_64
     mov qword [rsp + OFFSET_VECTOR], 0x80
     mov qword [rsp + OFFSET_ERROR_CODE], 0
+    mov rbx, rsp
     and rsp, -16
-    mov rdi, rsp
+    mov rdi, rbx
     call interrupt_dispatch_handler
+    mov rsp, rbx
     RESTORE_CONTEXT_64
     add rsp, 8
     iretq
@@ -387,9 +414,11 @@ spurious_irq_handler:
     SAVE_CONTEXT_64
     mov qword [rsp + OFFSET_VECTOR], 0xFF
     mov qword [rsp + OFFSET_ERROR_CODE], 0
+    mov rbx, rsp
     and rsp, -16
-    mov rdi, rsp
+    mov rdi, rbx
     call interrupt_dispatch_handler
+    mov rsp, rbx
     RESTORE_CONTEXT_64
     add rsp, 8
     iretq

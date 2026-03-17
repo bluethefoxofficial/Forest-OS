@@ -7,6 +7,8 @@
 typedef enum {
     POWER_ACTION_SHUTDOWN = 0,
     POWER_ACTION_REBOOT = 1,
+    POWER_ACTION_SUSPEND = 2,
+    POWER_ACTION_HIBERNATE = 3,
 } power_action_t;
 
 bool power_request(power_action_t action);

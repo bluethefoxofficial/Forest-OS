@@ -276,10 +276,8 @@ static memory_result_t expand_heap(uint32 needed_size) {
     uint32 expand_size = pages_needed * MEMORY_PAGE_SIZE;
     
     if (heap_state.current_end + expand_size > heap_state.start_addr + heap_state.max_size) {
-        print("[HEAP] ERROR: Heap expansion would exceed maximum size\n");
         return MEMORY_ERROR_OUT_OF_MEMORY; // Hit heap size limit
     }
-    
     
     // Ensure TLB entries for this range are clean before mapping
     tlb_safe_heap_expand(heap_state.current_end, pages_needed);
@@ -290,16 +288,6 @@ static memory_result_t expand_heap(uint32 needed_size) {
     for (uint32 i = 0; i < pages_needed; i++) {
         uint32 phys_frame = pmm_alloc_frame();
         if (phys_frame == 0) {
-            print("[HEAP] ERROR: PMM allocation failed during heap expansion (page ");
-            print_dec(i);
-            print(" of ");
-            print_dec(pages_needed);
-            print(")\n");
-            // Try to report available memory
-            uint32 free_frames = (uint32)pmm_get_free_frames();
-            print("[HEAP] Free frames available: ");
-            print_dec(free_frames);
-            print("\n");
             return MEMORY_ERROR_OUT_OF_MEMORY;
         }
 
@@ -308,9 +296,6 @@ static memory_result_t expand_heap(uint32 needed_size) {
         if (vmm_is_mapped(current_dir, vaddr)) {
             memory_result_t unmap_res = vmm_unmap_page(current_dir, vaddr);
             if (unmap_res != MEMORY_OK && unmap_res != MEMORY_ERROR_NOT_MAPPED) {
-                print("[HEAP] ERROR: Failed to clear stale mapping at vaddr=0x");
-                print_hex(vaddr);
-                print("\n");
                 pmm_free_frame(phys_frame);
                 return unmap_res;
             }
@@ -323,23 +308,7 @@ static memory_result_t expand_heap(uint32 needed_size) {
                                               PAGE_PRESENT | PAGE_WRITABLE);
 
         if (result != MEMORY_OK) {
-            print("[HEAP] ERROR: VMM mapping failed during heap expansion (page ");
-            print_dec(i);
-            print(" of ");
-            print_dec(pages_needed);
-            print(", vaddr=0x");
-            print_hex(vaddr);
-            print(", paddr=0x");
-            print_hex(phys_frame);
-            print(", result=");
-            print_dec(result);
-            print(")\n");
             pmm_free_frame(phys_frame);
-            // Try to report available memory
-            uint32 free_frames = (uint32)pmm_get_free_frames();
-            print("[HEAP] Free frames available: ");
-            print_dec(free_frames);
-            print("\n");
             return result;
         }
         
@@ -370,8 +339,12 @@ static memory_result_t expand_heap(uint32 needed_size) {
 // =============================================================================
 
 memory_result_t heap_init(uint32 start_addr, uint32 initial_size) {
+    print("[HEAP] heap_init: start=0x"); print_hex(start_addr); 
+    print(" size="); print_dec(initial_size); print("\n");
+    
     // Validate parameters
     if (start_addr == 0 || (start_addr & MEMORY_PAGE_MASK) != 0) {
+        print("[HEAP] ERROR: Invalid start address\n");
         return MEMORY_ERROR_INVALID_ADDR;
     }
     
@@ -381,6 +354,7 @@ memory_result_t heap_init(uint32 start_addr, uint32 initial_size) {
     
     // Align initial size to page boundary
     initial_size = memory_align_up(initial_size, MEMORY_PAGE_SIZE);
+    print("[HEAP] Aligned size: "); print_dec(initial_size); print("\n");
     
     heap_state.start_addr = start_addr;
     heap_state.current_end = start_addr;
@@ -417,7 +391,6 @@ void* kmalloc(size_t size) {
         ? heap_state.max_size - sizeof(heap_block_t)
         : 0;
     if (size > (size_t)max_alloc) {
-        print("[HEAP] ERROR: Allocation too large for heap: "); print_dec(size); print("\n");
         return NULL;
     }
     
@@ -430,20 +403,17 @@ void* kmalloc(size_t size) {
     if (!block) {
         // Try to expand heap
         if (expand_heap(total_size) != MEMORY_OK) {
-            print("[HEAP] ERROR: Failed to expand heap for size "); print_dec(total_size); print("\n");
             return NULL; // Out of memory
         }
         
         block = find_free_block(total_size);
         if (!block) {
-            print("[HEAP] ERROR: No suitable block after heap expansion\n");
             return NULL; // Still no suitable block
         }
     }
     
     // Double-check block validity before use
     if (!is_valid_block(block)) {
-        print("[HEAP] ERROR: Found invalid block during allocation\n");
         return NULL;
     }
     

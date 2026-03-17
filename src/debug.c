@@ -58,9 +58,25 @@ void debug_info(const char *format, ...) {
 
 void debug_verbose(const char *format, ...) {
     if (!debug_initialized || current_level < DEBUG_LEVEL_VERBOSE) return;
-    
+
     va_list args;
     va_start(args, format);
-    debuglog(DEBUG_INFO, format, args);
+    debuglog(DEBUG_DETAIL, format, args);
     va_end(args);
+}
+
+void printhex(unsigned int value) {
+    debug_print("0x%x", value);
+}
+
+void printdec(unsigned int value) {
+    debug_print("%u", value);
+}
+
+void debug_print_hex(unsigned int value) {
+    debug_print("0x%x", value);
+}
+
+void debug_print_dec(unsigned int value) {
+    debug_print("%u", value);
 }

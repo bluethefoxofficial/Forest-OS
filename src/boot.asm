@@ -1,36 +1,10 @@
 bits 32
 
 ; Multiboot headers section - support both multiboot1 and multiboot2
-section .multiboot_header
-align 4
-
-; Multiboot1 header (legacy) with graphics mode support
-multiboot1_header:
-    MULTIBOOT1_MAGIC equ 0x2BADB002
-    MULTIBOOT1_FLAGS equ 0x00000007  ; Video mode + memory info + page alignment
-    MULTIBOOT1_CHECKSUM equ -(MULTIBOOT1_MAGIC + MULTIBOOT1_FLAGS)
-    
-    dd MULTIBOOT1_MAGIC
-    dd MULTIBOOT1_FLAGS  
-    dd MULTIBOOT1_CHECKSUM
-    
-    ; Video mode fields (required when flags bit 2 is set)
-    dd 0        ; header_addr (not used)
-    dd 0        ; load_addr (not used)
-    dd 0        ; load_end_addr (not used)
-    dd 0        ; bss_end_addr (not used)
-    dd 0        ; entry_addr (not used)
-    
-    ; Video mode preference - start with text mode for early boot stability
-    dd 0        ; mode_type (0 = text mode, 1 = linear graphics mode)
-    dd 80       ; width (80 columns)
-    dd 25       ; height (25 rows) 
-    dd 0        ; depth (not applicable for text mode)
-
-; Align to 8-byte boundary for multiboot2
+section .multiboot
 align 8
 
-; Multiboot2 header
+; Multiboot2 header (preferred)
 multiboot2_header_start:
     MULTIBOOT2_MAGIC equ 0xE85250D6
     MULTIBOOT2_ARCH equ 0x00000000
@@ -41,9 +15,16 @@ multiboot2_header_start:
     dd MULTIBOOT2_ARCH
     dd MULTIBOOT2_LENGTH
     dd MULTIBOOT2_CHECKSUM
-    
-    ; No framebuffer tag - use default VGA text mode
-    
+
+    ; Framebuffer request tag (type 5) - request current GRUB mode
+    align 8
+    dw 5        ; type: framebuffer
+    dw 0        ; flags
+    dd 20       ; size
+    dd 0        ; width (0 = use current)
+    dd 0        ; height (0 = use current)
+    dd 0        ; bpp (0 = use current)
+
     ; End tag
     align 8
     dw 0    ; type
@@ -51,25 +32,64 @@ multiboot2_header_start:
     dd 8    ; size
 multiboot2_header_end:
 
+; Multiboot1 header (legacy fallback)
+align 4
+multiboot1_header:
+    MULTIBOOT1_MAGIC equ 0x1BADB002
+    ; Memory info + page alignment + video mode request (preserve GRUB mode)
+    MULTIBOOT1_FLAGS equ 0x00000007
+    MULTIBOOT1_CHECKSUM equ -(MULTIBOOT1_MAGIC + MULTIBOOT1_FLAGS)
+
+    dd MULTIBOOT1_MAGIC
+    dd MULTIBOOT1_FLAGS
+    dd MULTIBOOT1_CHECKSUM
+    dd 0        ; mode_type (0 = graphics)
+    dd 0        ; width (0 = use current)
+    dd 0        ; height (0 = use current)
+    dd 0        ; depth (0 = use current)
+
 section .text
 
 global start
 extern startk
 extern _stack_top
+extern _bss_start
+extern _bss_end
 extern kernel_panic_with_stack
+
+section .data
+align 4
+boot_params:
+saved_magic:
+    resd 1
+saved_mbi:
+    resd 1
+
+section .text
 
 start:
     cli                 ; Disable interrupts
     
-    ; Save multiboot parameters immediately (eax = magic, ebx = info)
-    mov edi, eax        ; Save multiboot magic in edi
-    mov esi, ebx        ; Save multiboot info in esi
+    ; Save multiboot parameters immediately to fixed memory locations
+    mov [saved_magic], eax  ; Save multiboot magic to memory
+    mov [saved_mbi], ebx    ; Save multiboot info address to memory
+    mov edi, eax            ; Also keep in EDI for potential debugging
+    mov esi, ebx            ; Also keep in ESI
     
     ; Validate stack pointer is in reasonable range
     mov [boot_loader_stack], esp
     mov esp, _stack_top ; Initialize stack pointer
     cmp esp, 0x100000   ; Ensure stack is above 1MB
     jl stack_panic
+    
+    ; Zero BSS section (required for proper initialization on reboot)
+    mov ecx, _bss_end
+    sub ecx, _bss_start
+    jz .bss_done        ; Skip if BSS is empty
+    mov edi, _bss_start
+    xor eax, eax        ; Clear eax
+    rep stosb           ; Zero memory
+.bss_done:
     
     ; Set up basic exception handling for early boot
     ; Install a temporary page fault handler
@@ -87,9 +107,11 @@ start:
     ; Enable basic exception handling
     sti
     
-    ; Pass saved multiboot parameters to kernel
-    push esi            ; multiboot info address
-    push edi            ; multiboot magic
+    ; Pass saved multiboot parameters to kernel (read from memory to be safe)
+    mov eax, [saved_magic]   ; Reload magic from memory
+    mov ebx, [saved_mbi]     ; Reload MBI from memory
+    push ebx            ; multiboot info address
+    push eax            ; multiboot magic
     call startk
     
     ; If kernel returns, halt safely
@@ -150,14 +172,10 @@ align 16
 early_idt:
     resb 8 * 256        ; 256 IDT entries, 8 bytes each
 
-align 16
+align 4096
 panic_safe_stack:
     resb 4096
 panic_safe_stack_top:
-
-align 16
-boot_stack_snapshot:
-    resd 8
 
 align 16
 boot_fault_snapshot:
@@ -165,6 +183,12 @@ boot_fault_snapshot:
 
 boot_loader_stack:
     resd 1
+
+; Boot snapshot placed in .data to avoid corruption by panic stack
+section .data
+align 4
+boot_stack_snapshot:
+    resd 8
 
 section .data
 align 4

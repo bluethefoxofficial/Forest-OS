@@ -387,7 +387,7 @@ int rtc_interrupt_init(void)
     
     /* Register interrupt handler */
     idt_register_handler(IRQ_RTC, 
-                        rtc_interrupt_handler, 
+                        (interrupt_handler_t)rtc_interrupt_handler, 
                         "RTC");
     
     /* Enable IRQ 8 on interrupt controller */

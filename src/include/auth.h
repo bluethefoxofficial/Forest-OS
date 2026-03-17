@@ -59,6 +59,7 @@ auth_result_t auth_force_login(const char* username);
 uint32 auth_active_uid(void);
 uint32 auth_active_gid(void);
 uint32 auth_active_groups_mask(void);
+uint32 auth_get_group_gid(const char* name);
 #endif
 
 // Shared operation codes for the user management syscall

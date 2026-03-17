@@ -1,6 +1,10 @@
 #include "mouse_interrupt_handler.h"
 #include "interrupt_driven_io.h"
 #include "interrupt_management.h"
+#include "input_event.h"
+#include "input_mux.h"
+#include "devfs.h"
+#include "timer.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -11,7 +15,7 @@
 #define MOUSE_COMMAND_PORT 0x64
 #define MOUSE_STATUS_PORT 0x64
 
-#define MOUSE_BUFFER_SIZE 256
+#define MOUSE_EVENT_BUFFER_SIZE 256
 #define MOUSE_MAX_CALLBACKS 16
 #define MOUSE_PACKET_SIZE 3
 #define MOUSE_WHEEL_PACKET_SIZE 4
@@ -51,11 +55,11 @@ typedef struct {
 } mouse_packet_state_t;
 
 typedef struct {
-    mouse_event_t events[MOUSE_BUFFER_SIZE];
+    mouse_event_t events[MOUSE_EVENT_BUFFER_SIZE];
     size_t head;
     size_t tail;
     size_t count;
-} mouse_buffer_t;
+} mouse_event_buffer_t;
 
 typedef struct {
     mouse_event_callback_t callback;
@@ -65,7 +69,7 @@ typedef struct {
 } mouse_callback_entry_t;
 
 typedef struct {
-    mouse_buffer_t event_buffer;
+    mouse_event_buffer_t event_buffer;
     mouse_packet_state_t packet_state;
     
     mouse_callback_entry_t callbacks[MOUSE_MAX_CALLBACKS];
@@ -87,6 +91,20 @@ typedef struct {
 } mouse_interrupt_context_t;
 
 static mouse_interrupt_context_t mouse_ctx = {0};
+
+static void dispatch_input_event(const input_event_t *ev) {
+    if (!ev) {
+        return;
+    }
+
+    if (devfs_is_initialized()) {
+        devfs_mouse_queue_event(ev);
+    }
+
+    if (input_mux_is_initialized()) {
+        input_mux_dispatch_event(ev);
+    }
+}
 
 static uint8_t mouse_read_data(void) {
     return inb(MOUSE_DATA_PORT);
@@ -150,12 +168,12 @@ static bool mouse_detect_wheel_support(void) {
 }
 
 static bool mouse_buffer_push_event(const mouse_event_t *event) {
-    if (mouse_ctx.event_buffer.count >= MOUSE_BUFFER_SIZE) {
+    if (mouse_ctx.event_buffer.count >= MOUSE_EVENT_BUFFER_SIZE) {
         return false;
     }
     
     mouse_ctx.event_buffer.events[mouse_ctx.event_buffer.tail] = *event;
-    mouse_ctx.event_buffer.tail = (mouse_ctx.event_buffer.tail + 1) % MOUSE_BUFFER_SIZE;
+    mouse_ctx.event_buffer.tail = (mouse_ctx.event_buffer.tail + 1) % MOUSE_EVENT_BUFFER_SIZE;
     mouse_ctx.event_buffer.count++;
     return true;
 }
@@ -166,7 +184,7 @@ static bool mouse_buffer_pop_event(mouse_event_t *event) {
     }
     
     *event = mouse_ctx.event_buffer.events[mouse_ctx.event_buffer.head];
-    mouse_ctx.event_buffer.head = (mouse_ctx.event_buffer.head + 1) % MOUSE_BUFFER_SIZE;
+    mouse_ctx.event_buffer.head = (mouse_ctx.event_buffer.head + 1) % MOUSE_EVENT_BUFFER_SIZE;
     mouse_ctx.event_buffer.count--;
     return true;
 }
@@ -219,6 +237,8 @@ static void process_mouse_packet(void) {
         }
     }
     
+    mouse_buttons_t prev_buttons = mouse_ctx.current_state.buttons;
+
     mouse_ctx.current_state.position.x += event.movement.delta_x;
     mouse_ctx.current_state.position.y += event.movement.delta_y;
     
@@ -229,30 +249,32 @@ static void process_mouse_packet(void) {
         if (mouse_ctx.current_state.position.y < 0) {
             mouse_ctx.current_state.position.y = 0;
         }
-        if (mouse_ctx.current_state.position.x >= mouse_ctx.config.screen_width) {
-            mouse_ctx.current_state.position.x = mouse_ctx.config.screen_width - 1;
+        if (mouse_ctx.current_state.position.x >= (int32_t)mouse_ctx.config.screen_width) {
+            mouse_ctx.current_state.position.x = (int32_t)mouse_ctx.config.screen_width - 1;
         }
-        if (mouse_ctx.current_state.position.y >= mouse_ctx.config.screen_height) {
-            mouse_ctx.current_state.position.y = mouse_ctx.config.screen_height - 1;
+        if (mouse_ctx.current_state.position.y >= (int32_t)mouse_ctx.config.screen_height) {
+            mouse_ctx.current_state.position.y = (int32_t)mouse_ctx.config.screen_height - 1;
         }
     }
     
     event.position = mouse_ctx.current_state.position;
     
-    mouse_ctx.current_state.buttons = event.buttons;
-    
-    event.event_type = MOUSE_EVENT_MOVEMENT;
+    event.event_type = 0;
     if (event.movement.delta_x != 0 || event.movement.delta_y != 0) {
         event.event_type |= MOUSE_EVENT_MOVEMENT;
     }
-    if (event.buttons.left != mouse_ctx.current_state.buttons.left ||
-        event.buttons.right != mouse_ctx.current_state.buttons.right ||
-        event.buttons.middle != mouse_ctx.current_state.buttons.middle) {
+    if (event.buttons.left != prev_buttons.left ||
+        event.buttons.right != prev_buttons.right ||
+        event.buttons.middle != prev_buttons.middle ||
+        event.buttons.button4 != prev_buttons.button4 ||
+        event.buttons.button5 != prev_buttons.button5) {
         event.event_type |= MOUSE_EVENT_BUTTON;
     }
-    if (event.wheel.delta_vertical != 0) {
+    if (event.wheel.delta_vertical != 0 || event.wheel.delta_horizontal != 0) {
         event.event_type |= MOUSE_EVENT_WHEEL;
     }
+    
+    mouse_ctx.current_state.buttons = event.buttons;
     
     mouse_buffer_push_event(&event);
     mouse_ctx.total_events++;
@@ -276,9 +298,86 @@ static void process_mouse_packet(void) {
             }
         }
     }
+
+    /* Publish standardized input events for consumers (devfs, input mux) */
+    if (event.event_type != 0) {
+        input_event_t input_ev = {0};
+        uint32_t ticks = timer_get_ticks();
+        input_ev.tv_sec = ticks / 1000;
+        input_ev.tv_usec = (ticks % 1000) * 1000;
+
+        if (event.movement.delta_x != 0) {
+            input_ev.type = EV_REL;
+            input_ev.code = REL_X;
+            input_ev.value = event.movement.delta_x;
+            dispatch_input_event(&input_ev);
+        }
+
+        if (event.movement.delta_y != 0) {
+            input_ev.type = EV_REL;
+            input_ev.code = REL_Y;
+            input_ev.value = event.movement.delta_y;
+            dispatch_input_event(&input_ev);
+        }
+
+        if (event.wheel.delta_vertical != 0) {
+            input_ev.type = EV_REL;
+            input_ev.code = REL_WHEEL;
+            input_ev.value = event.wheel.delta_vertical;
+            dispatch_input_event(&input_ev);
+        }
+
+        if (event.wheel.delta_horizontal != 0) {
+            input_ev.type = EV_REL;
+            input_ev.code = REL_HWHEEL;
+            input_ev.value = event.wheel.delta_horizontal;
+            dispatch_input_event(&input_ev);
+        }
+
+        if (event.buttons.left != prev_buttons.left) {
+            input_ev.type = EV_KEY;
+            input_ev.code = BTN_LEFT;
+            input_ev.value = event.buttons.left ? KEY_PRESS : KEY_RELEASE;
+            dispatch_input_event(&input_ev);
+        }
+
+        if (event.buttons.right != prev_buttons.right) {
+            input_ev.type = EV_KEY;
+            input_ev.code = BTN_RIGHT;
+            input_ev.value = event.buttons.right ? KEY_PRESS : KEY_RELEASE;
+            dispatch_input_event(&input_ev);
+        }
+
+        if (event.buttons.middle != prev_buttons.middle) {
+            input_ev.type = EV_KEY;
+            input_ev.code = BTN_MIDDLE;
+            input_ev.value = event.buttons.middle ? KEY_PRESS : KEY_RELEASE;
+            dispatch_input_event(&input_ev);
+        }
+
+        if (event.buttons.button4 != prev_buttons.button4) {
+            input_ev.type = EV_KEY;
+            input_ev.code = BTN_FORWARD;
+            input_ev.value = event.buttons.button4 ? KEY_PRESS : KEY_RELEASE;
+            dispatch_input_event(&input_ev);
+        }
+
+        if (event.buttons.button5 != prev_buttons.button5) {
+            input_ev.type = EV_KEY;
+            input_ev.code = BTN_BACK;
+            input_ev.value = event.buttons.button5 ? KEY_PRESS : KEY_RELEASE;
+            dispatch_input_event(&input_ev);
+        }
+
+        input_ev.type = EV_SYN;
+        input_ev.code = SYN_REPORT;
+        input_ev.value = 0;
+        dispatch_input_event(&input_ev);
+    }
 }
 
 static io_operation_result_t mouse_interrupt_handler(void *device_data) {
+    (void)device_data;
     mouse_ctx.total_interrupts++;
     
     uint8_t status = mouse_read_status();
@@ -322,6 +421,7 @@ static io_operation_result_t mouse_interrupt_handler(void *device_data) {
 }
 
 static io_operation_result_t mouse_initialize(void *device_data) {
+    (void)device_data;
     mouse_write_command(MOUSE_CMD_ENABLE_AUX);
     
     mouse_write_command(MOUSE_CMD_TEST_AUX);
@@ -388,6 +488,7 @@ static io_operation_result_t mouse_initialize(void *device_data) {
 }
 
 static void mouse_enable_interrupts(void *device_data, bool enable) {
+    (void)device_data;
     if (enable) {
         mouse_write_command(MOUSE_CMD_ENABLE_AUX);
     } else {
@@ -497,11 +598,11 @@ mouse_error_t mouse_set_position(int32_t x, int32_t y) {
     if (mouse_ctx.config.enable_bounds_checking) {
         if (x < 0) x = 0;
         if (y < 0) y = 0;
-        if (x >= mouse_ctx.config.screen_width) {
-            x = mouse_ctx.config.screen_width - 1;
+        if (x >= (int32_t)mouse_ctx.config.screen_width) {
+            x = (int32_t)mouse_ctx.config.screen_width - 1;
         }
-        if (y >= mouse_ctx.config.screen_height) {
-            y = mouse_ctx.config.screen_height - 1;
+        if (y >= (int32_t)mouse_ctx.config.screen_height) {
+            y = (int32_t)mouse_ctx.config.screen_height - 1;
         }
     }
     

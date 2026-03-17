@@ -22,6 +22,7 @@ void timer_shutdown(void);
 void timer_sleep_ms(uint32_t milliseconds);
 uint64_t timer_get_frequency(void);
 uint64_t rdtsc(void);
+uint64_t get_system_timer_ticks(void);
 
 // Timer source structure is defined in interrupt.h
 

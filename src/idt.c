@@ -376,7 +376,6 @@ int idt_register_handler(uint8_t vector, interrupt_handler_t handler, void *data
     
     interrupt_restore(flags);
     
-    debuglog_printf("IDT: Registered handler for vector %d\n", vector);
     return 0;
 }
 
@@ -397,8 +396,6 @@ void idt_unregister_handler(uint8_t vector)
     g_idt_manager.handler_data[vector] = NULL;
     
     interrupt_restore(flags);
-    
-    debuglog_printf("IDT: Unregistered handler for vector %d\n", vector);
 }
 
 /*

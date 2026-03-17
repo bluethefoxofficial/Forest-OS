@@ -2835,6 +2835,374 @@ static const char* panic_identify_subsystem(const panic_context_t* ctx) {
     return "Core Kernel Runtime";
 }
 
+// =============================================================================
+// SIMPLE DIRECT PANIC SCREEN - Just works, overwrites everything
+// =============================================================================
+
+extern const char font8x8_basic[128][8];
+
+static void panic_draw_pixel_direct(uint8_t* fb, uint32_t width, uint32_t height, 
+                                    uint32_t pitch, uint32_t bpp, 
+                                    int32_t x, int32_t y, uint8_t r, uint8_t g, uint8_t b) {
+    if (x < 0 || x >= (int32_t)width || y < 0 || y >= (int32_t)height) return;
+    
+    uint8_t* pixel = fb + (y * pitch) + (x * (bpp / 8));
+    
+    if (bpp == 32 || bpp == 24) {
+        pixel[0] = b;
+        pixel[1] = g;
+        pixel[2] = r;
+        if (bpp == 32) pixel[3] = 255;
+    } else if (bpp == 16) {
+        uint16_t color = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+        *(uint16_t*)pixel = color;
+    }
+}
+
+static void panic_draw_char_direct(uint8_t* fb, uint32_t width, uint32_t height,
+                                   uint32_t pitch, uint32_t bpp,
+                                   int32_t x, int32_t y, char c,
+                                   uint8_t fg_r, uint8_t fg_g, uint8_t fg_b,
+                                   uint8_t bg_r, uint8_t bg_g, uint8_t bg_b) {
+    if (c < 0 || c >= 127) c = '?';
+    const char* glyph = font8x8_basic[(uint8_t)c];
+    
+    for (int row = 0; row < 8; row++) {
+        uint8_t bits = (uint8_t)glyph[row];
+        for (int col = 0; col < 8; col++) {
+            bool is_fg = (bits & (1 << col)) != 0;
+            if (is_fg) {
+                panic_draw_pixel_direct(fb, width, height, pitch, bpp, x + col, y + row, fg_r, fg_g, fg_b);
+            } else {
+                panic_draw_pixel_direct(fb, width, height, pitch, bpp, x + col, y + row, bg_r, bg_g, bg_b);
+            }
+        }
+    }
+}
+
+static void panic_draw_string_direct(uint8_t* fb, uint32_t width, uint32_t height,
+                                      uint32_t pitch, uint32_t bpp,
+                                      int32_t x, int32_t y, const char* str,
+                                      uint8_t fg_r, uint8_t fg_g, uint8_t fg_b,
+                                      uint8_t bg_r, uint8_t bg_g, uint8_t bg_b) {
+    if (!str) return;
+    int32_t cur_x = x;
+    while (*str) {
+        panic_draw_char_direct(fb, width, height, pitch, bpp, cur_x, y, *str,
+                               fg_r, fg_g, fg_b, bg_r, bg_g, bg_b);
+        cur_x += 8;
+        str++;
+    }
+}
+
+static void panic_fill_screen_direct(uint8_t* fb, uint32_t width, uint32_t height,
+                                      uint32_t pitch, uint32_t bpp,
+                                      uint8_t r, uint8_t g, uint8_t b) {
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x++) {
+            panic_draw_pixel_direct(fb, width, height, pitch, bpp, x, y, r, g, b);
+        }
+    }
+}
+
+static void panic_draw_box_direct(uint8_t* fb, uint32_t width, uint32_t height,
+                                   uint32_t pitch, uint32_t bpp,
+                                   int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                   uint8_t r, uint8_t g, uint8_t b, uint8_t thickness) {
+    for (uint8_t t = 0; t < thickness; t++) {
+        for (uint32_t i = 0; i < w; i++) {
+            panic_draw_pixel_direct(fb, width, height, pitch, bpp, x + i, y + t, r, g, b);
+            panic_draw_pixel_direct(fb, width, height, pitch, bpp, x + i, y + h - 1 - t, r, g, b);
+        }
+        for (uint32_t i = 0; i < h; i++) {
+            panic_draw_pixel_direct(fb, width, height, pitch, bpp, x + t, y + i, r, g, b);
+            panic_draw_pixel_direct(fb, width, height, pitch, bpp, x + w - 1 - t, y + i, r, g, b);
+        }
+    }
+}
+
+static void panic_render_simple(const panic_context_t* ctx) {
+    graphics_device_t* device = graphics_get_primary_device();
+    if (!device || !device->current_fb) {
+        // Try direct hardcoded framebuffer address for QEMU/standard VGA
+        // Physical address 0xF0000000 is standard for QEMU VGA
+        uint8_t* buffer = (uint8_t*)0xF0000000;
+        uint32_t width = 800;
+        uint32_t height = 600;
+        uint32_t pitch = 800 * 3; // 24bpp = 3 bytes per pixel
+        uint32_t bpp = 24;
+        
+        if (!buffer) {
+            return;
+        }
+        
+        panic_fill_screen_direct(buffer, width, height, pitch, bpp, 139, 0, 0);
+        
+        uint32_t box_x = 10;
+        uint32_t box_y = 10;
+        uint32_t box_w = width - 20;
+        uint32_t box_h = height - 20;
+        
+        panic_draw_box_direct(buffer, width, height, pitch, bpp, box_x, box_y, box_w, box_h, 255, 255, 255, 2);
+        panic_draw_box_direct(buffer, width, height, pitch, bpp, box_x + 4, box_y + 4, box_w - 8, box_h - 8, 255, 0, 0, 1);
+        
+        int32_t text_x = 20;
+        int32_t text_y = 30;
+        
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                                "*** KERNEL PANIC ***", 255, 255, 255, 139, 0, 0);
+        
+        text_y += 20;
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                                "========================", 255, 255, 0, 139, 0, 0);
+        
+        text_y += 25;
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                                "Error: ", 255, 255, 255, 139, 0, 0);
+        
+        char msg_buf[64];
+        const char* msg = ctx && ctx->message[0] ? (const char*)ctx->message : "Unknown error";
+        int msg_len = 0;
+        while (msg[msg_len] && msg_len < 50) msg_len++;
+        if (msg_len > 40) {
+            for (int i = 0; i < 40; i++) msg_buf[i] = msg[i];
+            msg_buf[40] = '.';
+            msg_buf[41] = '.';
+            msg_buf[42] = '.';
+            msg_buf[43] = '\0';
+            msg = msg_buf;
+        }
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x + 56, text_y,
+                                msg, 255, 100, 100, 139, 0, 0);
+        
+        text_y += 25;
+        if (ctx && ctx->file[0]) {
+            char loc_buf[80];
+            int pos = 0;
+            const char* file = (const char*)ctx->file;
+            while (*file && pos < 60) loc_buf[pos++] = *file++;
+            if (ctx->line > 0) {
+                loc_buf[pos++] = ':';
+                char num_buf[16];
+                int num_pos = 0;
+                int line = ctx->line;
+                if (line == 0) {
+                    num_buf[num_pos++] = '0';
+                } else {
+                    char rev_buf[16];
+                    while (line > 0) {
+                        rev_buf[num_pos++] = '0' + (line % 10);
+                        line /= 10;
+                    }
+                    for (int i = num_pos - 1; i >= 0; i--) num_buf[num_pos - 1 - i] = rev_buf[i];
+                }
+                num_buf[num_pos] = '\0';
+                int j = 0;
+                while (num_buf[j] && pos < 75) loc_buf[pos++] = num_buf[j++];
+            }
+            loc_buf[pos] = '\0';
+            panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                                    loc_buf, 0, 255, 255, 139, 0, 0);
+        }
+        
+        text_y += 30;
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                                "System halted. Press any key to continue...", 150, 150, 150, 139, 0, 0);
+        
+        // Display stack trace
+        text_y += 30;
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                                "Stack Trace:", 0, 255, 0, 139, 0, 0);
+        text_y += 15;
+        
+        if (ctx && ctx->stack_frame_count > 0) {
+            char stack_buf[64];
+            for (uint32 i = 0; i < ctx->stack_frame_count && text_y < height - 20; i++) {
+                if (ctx->stack_trace[i].valid) {
+                    int pos = 0;
+                    stack_buf[pos++] = '#';
+                    stack_buf[pos++] = '0' + (i % 10);
+                    stack_buf[pos++] = ' ';
+                    
+                    // Hex address
+                    uint32 addr = ctx->stack_trace[i].address;
+                    char hex_chars[] = "0123456789ABCDEF";
+                    stack_buf[pos++] = '0';
+                    stack_buf[pos++] = 'x';
+                    for (int j = 0; j < 8; j++) {
+                        stack_buf[pos++] = hex_chars[(addr >> ((7 - j) * 4)) & 0xF];
+                    }
+                    
+                    // Caller info
+                    stack_buf[pos++] = ' ';
+                    stack_buf[pos++] = '(';
+                    uint32 caller = ctx->stack_trace[i].caller;
+                    for (int j = 0; j < 8; j++) {
+                        stack_buf[pos++] = hex_chars[(caller >> ((7 - j) * 4)) & 0xF];
+                    }
+                    stack_buf[pos++] = ')';
+                    stack_buf[pos++] = '\0';
+                    
+                    graphics_color_t color = (i == 0) ? 
+                        (graphics_color_t){255, 100, 100, 255} :  // Red for first frame
+                        (graphics_color_t){200, 200, 200, 255};  // Gray for others
+                    
+                    panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x + 8, text_y,
+                                            stack_buf, color.r, color.g, color.b, 139, 0, 0);
+                    text_y += 12;
+                }
+            }
+        } else {
+            panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x + 8, text_y,
+                                    "(no stack trace available)", 150, 150, 150, 139, 0, 0);
+        }
+        return;
+    }
+    
+    framebuffer_t* fb = device->current_fb;
+    uint8_t* buffer = (uint8_t*)fb->virtual_addr;
+    uint32_t width = fb->width;
+    uint32_t height = fb->height;
+    uint32_t pitch = fb->pitch;
+    uint32_t bpp = fb->bpp;
+    
+    if (!buffer || width < 80 || height < 25) {
+        return;
+    }
+    
+    panic_fill_screen_direct(buffer, width, height, pitch, bpp, 139, 0, 0);
+    
+    uint32_t box_x = 10;
+    uint32_t box_y = 10;
+    uint32_t box_w = width - 20;
+    uint32_t box_h = height - 20;
+    
+    panic_draw_box_direct(buffer, width, height, pitch, bpp, box_x, box_y, box_w, box_h, 255, 255, 255, 2);
+    panic_draw_box_direct(buffer, width, height, pitch, bpp, box_x + 4, box_y + 4, box_w - 8, box_h - 8, 255, 0, 0, 1);
+    
+    int32_t text_x = 20;
+    int32_t text_y = 30;
+    
+    panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                             "*** KERNEL PANIC ***", 255, 255, 255, 139, 0, 0);
+    
+    text_y += 20;
+    panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                             "========================", 255, 255, 0, 139, 0, 0);
+    
+    text_y += 25;
+    panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                             "Error: ", 255, 255, 255, 139, 0, 0);
+    
+    char msg_buf[64];
+    const char* msg = ctx && ctx->message[0] ? (const char*)ctx->message : "Unknown error";
+    int msg_len = 0;
+    while (msg[msg_len] && msg_len < 50) msg_len++;
+    if (msg_len > 40) {
+        for (int i = 0; i < 40; i++) msg_buf[i] = msg[i];
+        msg_buf[40] = '.';
+        msg_buf[41] = '.';
+        msg_buf[42] = '.';
+        msg_buf[43] = '\0';
+        msg = msg_buf;
+    }
+    panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x + 56, text_y,
+                             msg, 255, 100, 100, 139, 0, 0);
+    
+    text_y += 20;
+    if (ctx && ctx->file[0]) {
+        char loc_buf[80];
+        int pos = 0;
+        const char* file = (const char*)ctx->file;
+        while (*file && pos < 60) loc_buf[pos++] = *file++;
+        if (ctx->line > 0) {
+            loc_buf[pos++] = ':';
+            char num_buf[16];
+            int num_pos = 0;
+            int line = ctx->line;
+            if (line == 0) {
+                num_buf[num_pos++] = '0';
+            } else {
+                char rev_buf[16];
+                while (line > 0) {
+                    rev_buf[num_pos++] = '0' + (line % 10);
+                    line /= 10;
+                }
+                for (int i = num_pos - 1; i >= 0; i--) num_buf[num_pos - 1 - i] = rev_buf[i];
+            }
+            num_buf[num_pos] = '\0';
+            int i = 0;
+            while (num_buf[i] && pos < 60) loc_buf[pos++] = num_buf[i++];
+        }
+        loc_buf[pos] = '\0';
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                                 "Location: ", 200, 200, 200, 139, 0, 0);
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x + 80, text_y,
+                                 loc_buf, 255, 255, 0, 139, 0, 0);
+        text_y += 20;
+    }
+    
+    if (ctx) {
+        char eip_buf[32] = "EIP: 0x00000000";
+        char hex_chars[] = "0123456789ABCDEF";
+        uint32_t eip = ctx->cpu_state.eip;
+        for (int i = 0; i < 8; i++) {
+            eip_buf[6 + i] = hex_chars[(eip >> ((7 - i) * 4)) & 0xF];
+        }
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                                 eip_buf, 0, 255, 255, 139, 0, 0);
+        
+        // Display stack trace
+        text_y += 20;
+        panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                                 "Stack Trace:", 0, 255, 0, 139, 0, 0);
+        text_y += 15;
+        
+        if (ctx->stack_frame_count > 0) {
+            char stack_buf[64];
+            for (uint32 i = 0; i < ctx->stack_frame_count && text_y < height - 20; i++) {
+                if (ctx->stack_trace[i].valid) {
+                    int pos = 0;
+                    stack_buf[pos++] = '#';
+                    stack_buf[pos++] = '0' + (i % 10);
+                    stack_buf[pos++] = ' ';
+                    
+                    uint32 addr = ctx->stack_trace[i].address;
+                    stack_buf[pos++] = '0';
+                    stack_buf[pos++] = 'x';
+                    for (int j = 0; j < 8; j++) {
+                        stack_buf[pos++] = hex_chars[(addr >> ((7 - j) * 4)) & 0xF];
+                    }
+                    
+                    stack_buf[pos++] = ' ';
+                    stack_buf[pos++] = '(';
+                    uint32 caller = ctx->stack_trace[i].caller;
+                    for (int j = 0; j < 8; j++) {
+                        stack_buf[pos++] = hex_chars[(caller >> ((7 - j) * 4)) & 0xF];
+                    }
+                    stack_buf[pos++] = ')';
+                    stack_buf[pos++] = '\0';
+                    
+                    graphics_color_t color = (i == 0) ? 
+                        (graphics_color_t){255, 100, 100, 255} : 
+                        (graphics_color_t){200, 200, 200, 255};
+                    
+                    panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x + 8, text_y,
+                                            stack_buf, color.r, color.g, color.b, 139, 0, 0);
+                    text_y += 12;
+                }
+            }
+        } else {
+            panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x + 8, text_y,
+                                     "(no stack trace available)", 150, 150, 150, 139, 0, 0);
+        }
+    }
+    
+    text_y += 30;
+    panic_draw_string_direct(buffer, width, height, pitch, bpp, text_x, text_y,
+                             "System halted. Press any key to continue...", 150, 150, 150, 139, 0, 0);
+}
+
 // Attempt to render the modern graphics-based panic UI. Falls back to the
 // legacy ANSI/TUI path if graphics are unavailable or initialization fails.
 static bool panic_try_render_panicui(const panic_context_t* ctx) {
@@ -2886,6 +3254,12 @@ static bool panic_try_render_panicui(const panic_context_t* ctx) {
 
 // Simple ANSI/Tty-based panic display
 static void draw_simple_panic_screen(const panic_context_t* ctx) {
+    // First, try our simple direct-to-framebuffer panic screen
+    // This always works if we have a valid framebuffer
+    if (graphics_is_initialized()) {
+        panic_render_simple(ctx);
+    }
+
     if (panic_try_render_panicui(ctx)) {
         return; // Modern graphics UI displayed; halt loop will follow
     }

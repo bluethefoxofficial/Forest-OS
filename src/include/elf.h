@@ -74,6 +74,31 @@
 #define SHF_ALLOC     2  // Occupies memory during execution
 #define SHF_EXECINSTR 4  // Executable
 
+// Special section indices
+#define SHN_UNDEF     0  // Undefined section
+#define SHN_LORESERVE 0xff00  // Start of reserved indices
+#define SHN_LOPROC    0xff00  // Start of processor-specific
+#define SHN_HIPROC    0xff1f  // End of processor-specific
+#define SHN_LOOS      0xff20  // Start of OS-specific
+#define SHN_HIOS      0xff3f  // End of OS-specific
+#define SHN_ABS       0xfff1  // Absolute symbol
+#define SHN_COMMON    0xfff2  // Common symbol
+#define SHN_XINDEX    0xffff  // Index is in extra table
+#define SHN_HIRESERVE 0xffff  // End of reserved indices
+
+// x86 relocation types
+#define R_386_NONE      0  // No reloc
+#define R_386_32        1  // Direct absolute 32-bit
+#define R_386_PC32      2  // PC relative 32-bit
+#define R_386_GOT32     3  // 32-bit GOT entry
+#define R_386_PLT32     4  // 32-bit PLT entry
+#define R_386_COPY      5  // Copy symbol at runtime
+#define R_386_GLOB_DAT  6  // Create GOT entry
+#define R_386_JMP_SLOT  7  // Create PLT entry
+#define R_386_RELATIVE  8  // Adjust by program base
+#define R_386_GOTOFF    9  // 32-bit offset to GOT
+#define R_386_GOTPC     10 // 32-bit PC relative offset to GOT
+
 // ELF identification array indices
 #define EI_MAG0    0  // Magic number byte 0
 #define EI_MAG1    1  // Magic number byte 1
@@ -176,8 +201,15 @@ typedef struct {
 int elf_validate_header(const elf32_ehdr_t* header);
 int elf_load_executable(const uint8* elf_data, size_t elf_size, elf_load_info_t* load_info);
 int elf_load_from_file(const char* filename, elf_load_info_t* load_info);
+int elf_load_executable_with_relocs(const uint8* elf_data, size_t elf_size, 
+                                  elf_load_info_t* load_info, bool allow_relocs);
 uint32 elf_get_entry_point(const uint8* elf_data);
 bool elf_is_valid(const uint8* elf_data, size_t size);
+
+// Relocation processing functions
+int elf_process_relocations(const uint8* elf_data, size_t elf_size, 
+                          const elf_load_info_t* load_info);
+bool elf_resolve_symbol(const char* symbol_name, uint32* symbol_addr);
 
 // ELF utility macros
 #define ELF32_R_SYM(info)  ((info) >> 8)

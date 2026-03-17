@@ -15,5 +15,11 @@
 #define SIGPIPE     13  /* Broken pipe */
 #define SIGALRM     14  /* Alarm clock */
 #define SIGTERM     15  /* Terminated */
+#define SIGSTOP     19  /* Stopped (signal) */
+#define SIGTSTP     20  /* Stopped (user) */
+#define SIGCONT     18  /* Continue */
+#define SIGTTIN     21  /* Stopped (tty input) */
+#define SIGTTOU     22  /* Stopped (tty output) */
+#define SIGWINCH    28  /* Window changed */
 
 #endif /* SIGNAL_H */

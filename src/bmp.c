@@ -136,7 +136,7 @@ bmp_result_t bmp_load_from_file(const char* path, bmp_image_t** image) {
     }
 
     // Allocate image structure
-    bmp_image_t* img = (bmp_image_t*)kmalloc(sizeof(bmp_image_t), GFP_KERNEL);
+    bmp_image_t* img = (bmp_image_t*)kmalloc(sizeof(bmp_image_t));
     if (!img) {
         debuglog(DEBUG_ERROR, "[BMP] Out of memory for image structure\n");
         return BMP_ERROR_OUT_OF_MEMORY;
@@ -146,7 +146,7 @@ bmp_result_t bmp_load_from_file(const char* path, bmp_image_t** image) {
     img->owns_data = false;
 
     // Allocate pixel data buffer
-    uint8* pixel_buffer = (uint8*)kmalloc(pixel_data_size, GFP_KERNEL);
+    uint8* pixel_buffer = (uint8*)kmalloc(pixel_data_size);
     if (!pixel_buffer) {
         debuglog(DEBUG_WARN, "[BMP] OOM for pixel data (%u bytes) for %s, using zero-copy view\n",
                  pixel_data_size, path);

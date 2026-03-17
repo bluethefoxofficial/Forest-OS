@@ -233,7 +233,7 @@ static void slab_destroy(kmem_cache_t *cache, slab_t *slab)
 // Initialize per-CPU cache
 static int cache_alloc_cpucache(kmem_cache_t *cache)
 {
-    cache->cpu_cache = kzalloc(sizeof(struct kmem_cache_cpu), GFP_KERNEL);
+    cache->cpu_cache = kzalloc(sizeof(struct kmem_cache_cpu));
     if (!cache->cpu_cache) {
         return -1;
     }
@@ -244,8 +244,7 @@ static int cache_alloc_cpucache(kmem_cache_t *cache)
     spin_lock_init(&cache->cpu_cache->lock);
     
     // Allocate freelist
-    cache->cpu_cache->freelist = kzalloc(SLAB_LIMIT * sizeof(void *), 
-                                        GFP_KERNEL);
+    cache->cpu_cache->freelist = kzalloc(SLAB_LIMIT * sizeof(void *));
     if (!cache->cpu_cache->freelist) {
         kfree(cache->cpu_cache);
         cache->cpu_cache = NULL;
@@ -286,7 +285,7 @@ kmem_cache_t *kmem_cache_create(const char *name, size_t size, size_t align,
     }
     
     // Allocate cache descriptor
-    cache = kzalloc(sizeof(kmem_cache_t), GFP_KERNEL);
+    cache = kzalloc(sizeof(kmem_cache_t));
     if (!cache) {
         return NULL;
     }
@@ -309,7 +308,7 @@ kmem_cache_t *kmem_cache_create(const char *name, size_t size, size_t align,
     }
     
     // Initialize node
-    cache->node = kzalloc(sizeof(struct kmem_cache_node), GFP_KERNEL);
+    cache->node = kzalloc(sizeof(struct kmem_cache_node));
     if (!cache->node) {
         kfree(cache);
         return NULL;
@@ -573,8 +572,9 @@ void kmem_cache_free(kmem_cache_t *cache, void *obj)
 // GENERAL PURPOSE ALLOCATORS
 // =============================================================================
 
-// General kmalloc implementation
-void *kmalloc(size_t size, gfp_t flags)
+// Slab-based kmalloc implementation (Linux-compatible API with flags)
+// Note: For simple single-argument kmalloc(), see kheap.c
+void *slab_kmalloc(size_t size, gfp_t flags)
 {
     if (!slab_state.initialized || size == 0) {
         return NULL;
@@ -603,10 +603,10 @@ void *kmalloc(size_t size, gfp_t flags)
     return page_address(page);
 }
 
-// Zero-filled allocation
-void *kzalloc(size_t size, gfp_t flags)
+// Slab-based zero-filled allocation
+void *slab_kzalloc(size_t size, gfp_t flags)
 {
-    void *ptr = kmalloc(size, flags);
+    void *ptr = slab_kmalloc(size, flags);
     if (ptr) {
         memset(ptr, 0, size);
     }
@@ -639,8 +639,8 @@ void kfree(void *ptr)
 // INITIALIZATION
 // =============================================================================
 
-// Forward declaration for snprintf
-int snprintf(char *str, size_t size, const char *format, ...);
+// Forward declaration for helper function
+static int slab_format_cache_name(char *str, size_t size, unsigned long val);
 
 // Initialize standard size caches
 static int init_size_caches(void)
@@ -648,7 +648,7 @@ static int init_size_caches(void)
     int i;
     for (i = 0; cache_sizes[i] != 0; i++) {
         char name[CACHE_NAMELEN];
-        snprintf(name, sizeof(name), "kmalloc-%lu", cache_sizes[i]);
+        slab_format_cache_name(name, sizeof(name), cache_sizes[i]);
 
         size_caches[i] = kmem_cache_create(name, cache_sizes[i],
                                           SLAB_ALIGN_SIZE, 0, NULL);
@@ -678,7 +678,7 @@ int slab_init(void)
     slab_state.active_objects = 0;
     
     // Create cache for cache descriptors (bootstrap)
-    cache_cache = kzalloc(sizeof(kmem_cache_t), GFP_KERNEL);
+    cache_cache = kzalloc(sizeof(kmem_cache_t));
     if (!cache_cache) {
         print("[SLAB] Failed to allocate cache_cache\n");
         return -1;
@@ -694,7 +694,7 @@ int slab_init(void)
     cache_cache->objects_per_slab = PAGE_SIZE / sizeof(kmem_cache_t);
     
     // Initialize node
-    cache_cache->node = kzalloc(sizeof(struct kmem_cache_node), GFP_KERNEL);
+    cache_cache->node = kzalloc(sizeof(struct kmem_cache_node));
     if (!cache_cache->node) {
         kfree(cache_cache);
         return -1;
@@ -721,36 +721,27 @@ int slab_init(void)
     return 0;
 }
 
-// Compatibility function for existing Forest OS code
-int snprintf(char *str, size_t size, const char *format, ...)
+// Helper function specifically for slab cache names (does not conflict with libc snprintf)
+static int slab_format_cache_name(char *str, size_t size, unsigned long val)
 {
-    // Simple sprintf implementation for cache names
-    if (strcmp(format, "kmalloc-%lu") == 0) {
-        va_list args;
-        va_start(args, format);
-        unsigned long val = va_arg(args, unsigned long);
-        
-        strcpy(str, "kmalloc-");
-        char num[16];
-        int len = 0;
-        if (val == 0) {
-            num[len++] = '0';
-        } else {
-            while (val > 0) {
-                num[len++] = '0' + (val % 10);
-                val /= 10;
-            }
+    (void)size; // TODO: respect size limit
+    strcpy(str, "kmalloc-");
+    char num[16];
+    int len = 0;
+    if (val == 0) {
+        num[len++] = '0';
+    } else {
+        while (val > 0) {
+            num[len++] = '0' + (val % 10);
+            val /= 10;
         }
-        
-        // Reverse the number
-        for (int i = 0; i < len; i++) {
-            str[8 + i] = num[len - 1 - i];
-        }
-        str[8 + len] = '\0';
-        
-        va_end(args);
-        return 8 + len;
     }
-    
-    return 0;
+
+    // Reverse the number
+    for (int i = 0; i < len; i++) {
+        str[8 + i] = num[len - 1 - i];
+    }
+    str[8 + len] = '\0';
+
+    return 8 + len;
 }

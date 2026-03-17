@@ -3,25 +3,14 @@
 
 bits 32
 
-; Multiboot headers section
-section .multiboot_header
-align 4
+; Multiboot headers section - 64-bit optimized
+section .multiboot
+align 8  ; 8-byte alignment for multiboot2
 
-; Multiboot1 header
-multiboot1_header:
-    MULTIBOOT1_MAGIC equ 0x1BADB002
-    MULTIBOOT1_FLAGS equ 0x00000003  ; Page alignment + memory info
-    MULTIBOOT1_CHECKSUM equ -(MULTIBOOT1_MAGIC + MULTIBOOT1_FLAGS)
-
-    dd MULTIBOOT1_MAGIC
-    dd MULTIBOOT1_FLAGS
-    dd MULTIBOOT1_CHECKSUM
-
-; Multiboot2 header
-align 8
+; Multiboot2 header (primary for 64-bit)
 multiboot2_header_start:
     MULTIBOOT2_MAGIC equ 0xE85250D6
-    MULTIBOOT2_ARCH equ 0x00000000
+    MULTIBOOT2_ARCH equ 0x00000000  ; x86 protected mode
     MULTIBOOT2_LENGTH equ (multiboot2_header_end - multiboot2_header_start)
     MULTIBOOT2_CHECKSUM equ -(MULTIBOOT2_MAGIC + MULTIBOOT2_ARCH + MULTIBOOT2_LENGTH)
 
@@ -30,17 +19,44 @@ multiboot2_header_start:
     dd MULTIBOOT2_LENGTH
     dd MULTIBOOT2_CHECKSUM
 
+    ; Framebuffer request tag (type 5) - request current GRUB mode
+    align 8
+    dw 5    ; type (framebuffer)
+    dw 0    ; flags
+    dd 20   ; size
+    dd 0    ; width (0 = use current)
+    dd 0    ; height (0 = use current)
+    dd 0    ; depth (0 = use current)
+
     ; End tag
     align 8
-    dw 0
-    dw 0
-    dd 8
+    dw 0    ; type
+    dw 0    ; flags
+    dd 8    ; size
 multiboot2_header_end:
+
+; Multiboot1 header (fallback)
+align 4
+multiboot1_header:
+    MULTIBOOT1_MAGIC equ 0x1BADB002
+    ; Memory info + page alignment + video mode request (preserve GRUB mode)
+    MULTIBOOT1_FLAGS equ 0x00000007
+    MULTIBOOT1_CHECKSUM equ -(MULTIBOOT1_MAGIC + MULTIBOOT1_FLAGS)
+
+    dd MULTIBOOT1_MAGIC
+    dd MULTIBOOT1_FLAGS
+    dd MULTIBOOT1_CHECKSUM
+    dd 0      ; mode_type (0 = graphics)
+    dd 0      ; width (0 = use current)
+    dd 0      ; height (0 = use current)
+    dd 0      ; depth (0 = use current)
 
 section .text.boot
 global start
 extern startk
 extern _stack_top
+extern _bss_start
+extern _bss_end
 
 start:
     cli
@@ -48,6 +64,10 @@ start:
     ; Save multiboot info (eax = magic, ebx = info pointer)
     mov edi, eax        ; multiboot magic
     mov esi, ebx        ; multiboot info pointer
+
+    ; Quick validation - write to VGA to confirm we're running
+    mov dword [0xb8000], 0x4f4f4f42  ; "BOO" (Boot start - white on red)
+    mov dword [0xb8004], 0x4f545f54  ; "T_6" (64-bit)
 
     ; Check if CPUID is supported
     pushfd
@@ -145,11 +165,21 @@ start:
     jmp .error
 
 .error:
-    ; Print error character to VGA
-    mov dword [0xb8000], 0x4f524f45  ; "ER"
-    mov dword [0xb8004], 0x4f3a4f52  ; "R:"
-    mov byte [0xb8008], al
-    mov byte [0xb8009], 0x4f
+    ; Print error message to VGA screen (more visible)
+    mov dword [0xb8000], 0x4f424f45  ; "EBO" (Boot Error)
+    mov dword [0xb8004], 0x4f204f4f  ; "OT "
+    mov dword [0xb8008], 0x4f414f45  ; "EA "
+    mov dword [0xb800c], 0x4f524f52  ; "RR:"
+    mov byte [0xb8010], al           ; Error code
+    mov byte [0xb8011], 0x4f         ; Red background
+    ; Fill rest of screen with pattern to make it visible
+    mov ecx, 80*25*2                ; Screen size in bytes
+    mov edi, 0xb8000
+.fill_screen:
+    mov byte [edi], ' '
+    mov byte [edi+1], 0x1f          ; White on blue
+    add edi, 2
+    loop .fill_screen
     cli
     hlt
 
@@ -168,10 +198,19 @@ long_mode_start:
 
     ; Set up 64-bit stack
     mov rsp, _stack_top
-
+    
+    ; Zero BSS section (required for proper initialization on reboot)
+    mov rcx, _bss_end
+    sub rcx, _bss_start
+    jz .bss_done        ; Skip if BSS is empty
+    mov rdi, _bss_start
+    xor rax, rax        ; Clear rax
+    rep stosq           ; Zero memory (8 bytes at a time)
+.bss_done:
+    
     ; Clear direction flag
     cld
-
+    
     ; Zero the upper 32 bits of saved parameters
     mov eax, edi
     mov rdi, rax        ; multiboot magic in rdi (first arg)

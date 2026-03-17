@@ -287,7 +287,7 @@ static int ist_allocate_stacks_for_cpu(int cpu)
         /* Allocate stack memory with extra space for guards */
         size_t total_size = ist_mgr.config.stack_size + 2 * PAGE_SIZE;
         
-        stack_memory = kmalloc(total_size, GFP_KERNEL);
+        stack_memory = kmalloc(total_size);
         if (!stack_memory) {
             debug_printf("Failed to allocate IST stack %d for CPU %d\n", i, cpu);
             goto cleanup_partial;
@@ -393,7 +393,7 @@ static int ist_setup_tss_for_cpu(int cpu)
     cpu_info = &ist_mgr.cpu_info[cpu];
     
     /* Allocate TSS */
-    tss = (struct x86_64_tss *)kmalloc(sizeof(struct x86_64_tss), GFP_KERNEL);
+    tss = (struct x86_64_tss *)kmalloc(sizeof(struct x86_64_tss));
     if (!tss) {
         return -ENOMEM;
     }

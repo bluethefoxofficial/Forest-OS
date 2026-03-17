@@ -27,6 +27,12 @@ void debug_warn(const char *format, ...);
 void debug_info(const char *format, ...);
 void debug_verbose(const char *format, ...);
 
+// Utility debug print functions
+void printhex(unsigned int value);
+void printdec(unsigned int value);
+void debug_print_hex(unsigned int value);
+void debug_print_dec(unsigned int value);
+
 // Conditional debug macros
 #ifdef DEBUG_BUILD
     #define DEBUG_PRINT(fmt, ...) debug_print(fmt, ##__VA_ARGS__)

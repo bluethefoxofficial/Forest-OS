@@ -399,10 +399,40 @@ uint32_t bitmap_pmm_alloc_pages(uint32_t count, pmm_alloc_preference_t preferenc
     }
     
     // If contiguous allocation failed, fall back to individual allocations
-    // This is a simplified approach - a real implementation might return
-    // an array of page frames or use a different allocation strategy
-    pmm_state.stats.allocation_failures++;
-    return 0;
+    // Allocate pages individually and return the first page number
+    // Note: This may result in non-contiguous physical memory
+    uint32_t first_page = 0;
+    uint32_t allocated = 0;
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t page = bitmap_pmm_alloc_page(preference);
+        if (page == 0) {
+            // Failed to allocate, free previously allocated pages
+            for (uint32_t j = 0; j < allocated; j++) {
+                bitmap_clear_bit(first_page + j);
+            }
+            pmm_state.stats.allocation_failures++;
+            return 0;
+        }
+        if (i == 0) {
+            first_page = page;
+        }
+        allocated++;
+    }
+
+    // Update statistics for successful allocation
+    pmm_state.stats.free_pages -= count;
+    pmm_state.stats.used_pages += count;
+    pmm_state.stats.total_allocations++;
+
+    pmm_state.metadata.free_pages -= count;
+
+    // Update checksum
+    if (pmm_state.config.corruption_detection_enabled) {
+        pmm_state.metadata.checksum = calculate_bitmap_checksum();
+    }
+
+    return first_page;
 }
 
 // Allocate contiguous pages with alignment

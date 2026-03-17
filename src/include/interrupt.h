@@ -91,7 +91,7 @@ typedef enum {
 #endif
 
 /* Function type declarations (after enum is defined) */
-typedef irq_return_t (*interrupt_handler_t)(int vector, struct interrupt_context *ctx);
+typedef irq_return_t (*interrupt_handler_t)(int vector, void *dev_id, struct interrupt_context *ctx);
 
 /* Interrupt Request Flags */
 #define IRQF_SHARED                 (1U << 0)
@@ -269,6 +269,7 @@ struct interrupt_context {
     struct cpu_registers regs;
     struct interrupt_frame frame;
     uint64_t vector;
+    uint64_t error_code;          /* Error code (passed separately by assembly stub) */
     uint64_t timestamp;
     void *private_data;
 } __attribute__((packed));
@@ -280,9 +281,12 @@ struct cpu_registers {
     uint32_t ds, es, fs, gs;  /* Segment registers */
 } __attribute__((packed));
 
-/* Stack frame pushed by CPU for 32-bit */
+/* Stack frame pushed by CPU for 32-bit
+ * NOTE: error_code is NOT part of this struct - it's passed separately
+ * to interrupt_common_handler. The assembly stub (interrupt_stubs.asm)
+ * passes a pointer to the CPU-pushed frame starting at EIP.
+ */
 struct interrupt_frame {
-    uint32_t error_code;      /* Error code (if applicable) */
     uint32_t eip;             /* Instruction pointer */
     uint32_t cs;              /* Code segment */
     uint32_t eflags;          /* Processor flags */
@@ -295,13 +299,14 @@ struct interrupt_context {
     struct cpu_registers regs;
     struct interrupt_frame frame;
     uint32_t vector;
+    uint32_t error_code;          /* Error code (passed separately by assembly stub) */
     uint64_t timestamp;
     void *private_data;
 } __attribute__((packed));
 #endif
 
 /* Enhanced Interrupt Handler Function Types */
-typedef irq_return_t (*interrupt_handler_t)(int vector, struct interrupt_context *ctx);
+typedef irq_return_t (*interrupt_handler_t)(int vector, void *dev_id, struct interrupt_context *ctx);
 typedef irq_return_t (*exception_handler_t)(int exception, struct interrupt_context *ctx);
 typedef irq_return_t (*irq_handler_t)(int irq, void *dev_id, struct interrupt_context *ctx);
 
@@ -483,6 +488,10 @@ void idt_set_gate_enhanced(uint8_t vector, void *handler, uint16_t selector,
 void idt_set_user_gate(uint8_t vector, void *handler);
 void idt_set_system_gate(uint8_t vector, void *handler);
 void idt_load_new(void);
+
+/* Standard IRQ management */
+int request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags,
+                const char *name, void *dev_id);
 
 /* Advanced IRQ management */
 int request_irq_advanced(unsigned int irq, irq_handler_t handler, 

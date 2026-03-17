@@ -546,7 +546,7 @@ int setup_process_memory(mm_struct_t *mm, unsigned long code_start,
     mm->end_data = data_end;
     mm->start_brk = brk_start;
     mm->brk = brk_start;
-    mm->start_stack = 0xC0000000 - PAGE_SIZE; // Stack grows down from 3GB
+    mm->start_stack = USER_STACK_TOP - PAGE_SIZE; // Stack grows down from user space top
     
     // Create code segment VMA
     unsigned long code_addr = do_mmap(NULL, code_start, code_end - code_start,

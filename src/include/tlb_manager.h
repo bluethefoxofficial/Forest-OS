@@ -30,7 +30,7 @@ bool tlb_has_invlpg(void);
 bool tlb_has_global_pages(void);
 bool tlb_has_pcid(void);
 
-// Statistics
-void tlb_get_stats(uint32_t *flushes_single, uint32_t *flushes_all);
+// Statistics (renamed to avoid conflict with tlb.h)
+void tlb_manager_get_stats(uint32_t *flushes_single, uint32_t *flushes_all);
 
 #endif /* __TLB_MANAGER_H__ */

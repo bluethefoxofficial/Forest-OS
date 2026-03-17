@@ -12,9 +12,9 @@ static struct {
 } init_state = {
     .display = {
         .graphics_requested = false,
-        .width = 800,
-        .height = 600,
-        .bpp = 32,
+        .width = 0,
+        .height = 0,
+        .bpp = 0,
     },
     .display_applied = false,
     .using_graphics = false,
@@ -22,9 +22,10 @@ static struct {
 
 void init_system_init(void) {
     init_state.display.graphics_requested = true;  // Always request graphics for framebuffer TTY
-    init_state.display.width = 800;
-    init_state.display.height = 600;
-    init_state.display.bpp = 32;
+    /* Preserve the bootloader-selected mode unless explicitly overridden. */
+    init_state.display.width = 0;
+    init_state.display.height = 0;
+    init_state.display.bpp = 0;
     init_state.display_applied = false;
     init_state.using_graphics = false;
 }
@@ -59,8 +60,8 @@ bool init_system_apply_display(void) {
         return false;
     }
 
-    // Try the requested resolution, otherwise allow the TTY helper to fall back
-    // to a safe graphics mode.
+    // Apply an explicit resolution override only when one was requested.
+    // Otherwise keep the bootloader-selected mode (GRUB gfxpayload).
     if (init_state.display.width && init_state.display.height && init_state.display.bpp) {
         graphics_set_mode(init_state.display.width, init_state.display.height,
                           init_state.display.bpp, 60);

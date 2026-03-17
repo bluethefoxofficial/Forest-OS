@@ -66,6 +66,7 @@ struct interrupt_frame;
 #define MEMORY_KERNEL_HEAP_INITIAL_SIZE (1024 * 1024)    // 1MB bootstrap heap
 #define MEMORY_KERNEL_HEAP_MAX_SIZE     (128 * 1024 * 1024) // 128MB max heap (tuned for large assets)
 #define MEMORY_USER_START       0x40000000  // 1GB - user space starts
+#define MEMORY_USER_END         0xC0000000  // 3GB - user space ends
 #define USER_STACK_TOP          0xC0000000  // Top of user-mode stack
 #define MEMORY_MAX_ADDR         0xFFFFF000  // Maximum addressable memory
 

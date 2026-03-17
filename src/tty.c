@@ -2,8 +2,20 @@
 
 #include "include/graphics/graphics_manager.h"
 #include "include/graphics/font_renderer.h"
+#include "include/graphics/tty_font_renderer.h"
+#include "include/graphics/graphics_types.h"
 #include "include/debuglog.h"
 #include "include/libc/stdio.h"
+#include "include/smp.h"
+#include "include/splash.h"
+#include "include/vfs.h"
+#include "include/bmp.h"
+
+// Direct framebuffer crash screen functions
+static void crash_draw_char(int x, int y, char c, uint32_t color);
+static void crash_draw_string(int x, int y, const char* str, uint32_t color);
+static void crash_clear_screen(uint32_t color);
+static void crash_draw_hex(int x, int y, uint64_t value, int digits, uint32_t color);
 #include "include/string.h"
 #include "include/memory.h"
 #include "include/mm.h"
@@ -15,12 +27,53 @@ typedef enum {
 typedef struct {
     char ch;
     uint8_t attr;
+    uint8_t dirty;  // 1 if cell needs redraw, 0 if clean
 } tty_cell_t;
+
+typedef struct {
+    tty_cell_t* cells;
+    size_t cell_count;
+    uint16_t cols;
+    uint16_t rows;
+    uint16_t cursor_x;
+    uint16_t cursor_y;
+    uint16_t saved_cursor_x;
+    uint16_t saved_cursor_y;
+    uint8_t fg;
+    uint8_t bg;
+    bool bold;
+    bool faint;
+    bool underline;
+    bool blink;
+    bool inverse;
+    bool conceal;
+    bool italic;
+    bool strike;
+    bool double_underline;
+    bool overlined;
+    bool framed;
+    bool encircled;
+    bool crossed_out;
+    graphics_color_t true_fg;
+    graphics_color_t true_bg;
+    bool use_true_colors;
+    bool initialized;
+} vt_buffer_t;
+
+#define TTY_VT_COUNT 12
+#define TTY_FIRST_TTY_VT 3
+#define TTY_LAST_TTY_VT 12
+
+static vt_buffer_t g_vt_buffers[TTY_VT_COUNT];
+static uint8_t g_current_vt = 1;
+static bool g_vt_buffers_initialized = false;
 
 static struct {
     tty_backend_t backend;
     uint16_t cols;
     uint16_t rows;
+    uint16_t char_width;
+    uint16_t char_height;
     uint16_t cursor_x;
     uint16_t cursor_y;
     uint8_t fg;
@@ -45,12 +98,16 @@ static struct {
     uint16_t saved_cursor_x;
     uint16_t saved_cursor_y;
     bool initialized;
+    bool boot_mode;     // When true, bypass framebuffer TTY for fast VGA text mode
+    bool graphics_app_active;  // When true, suppress TTY output (graphical app owns the display)
     tty_cell_t* cells;
     size_t cell_count;
 } tty_state = {
     .backend = TTY_BACKEND_FRAMEBUFFER,
     .cols = 80,
     .rows = 25,
+    .char_width = 8,
+    .char_height = 8,  // Match 8x8 bitmap font
     .cursor_x = 0,
     .cursor_y = 0,
     .fg = TEXT_ATTR_LIGHT_GRAY,
@@ -75,6 +132,7 @@ static struct {
     .saved_cursor_x = 0,
     .saved_cursor_y = 0,
     .initialized = false,
+    .boot_mode = true,  // Start in boot mode for fast VGA text output
     .cells = NULL,
     .cell_count = 0,
 };
@@ -120,6 +178,442 @@ static bool palette_initialized = false;
 static bool cursor_drawn = false;
 static uint16_t cursor_drawn_x = 0;
 static uint16_t cursor_drawn_y = 0;
+
+// TTY status bar
+#define TTY_STATUS_BAR_HEIGHT 24
+static bool status_bar_drawn = false;
+static bool status_bar_visible = true;
+
+// Status bar logo cached data
+static bmp_image_t* g_statusbar_logo = NULL;
+static bool g_statusbar_logo_loaded = false;
+
+// Login status tracking
+static char g_login_status[64] = "Logging in...";
+static bool g_user_logged_in = false;
+static char g_current_user[32] = "";
+
+// =============================================================================
+// STATUS BAR LOGO - Load, scale, and render the bootup logo (BMP)
+// =============================================================================
+
+// Load logo from initrd (BMP file)
+static bool tty_load_statusbar_logo(void) {
+    if (g_statusbar_logo_loaded) {
+        return true; // Already loaded
+    }
+
+    // Try to load the logo from initrd (BMP format)
+    // Note: VFS paths should NOT have leading slash
+    bmp_result_t result = bmp_load_from_file("usr/share/images/bootup/logo.bmp", &g_statusbar_logo);
+    if (result != BMP_SUCCESS) {
+        // Try alternative path
+        result = bmp_load_from_file("bootup/logo.bmp", &g_statusbar_logo);
+        if (result != BMP_SUCCESS) {
+            // Try PNG fallback
+            result = bmp_load_from_file("usr/share/images/bootup/logo.png", &g_statusbar_logo);
+            if (result != BMP_SUCCESS) {
+                result = bmp_load_from_file("bootup/logo.png", &g_statusbar_logo);
+                if (result != BMP_SUCCESS) {
+                    debuglog(DEBUG_WARN, "TTY: Could not find logo in initrd (error: %d)\n", result);
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (!g_statusbar_logo || !g_statusbar_logo->pixel_data) {
+        debuglog(DEBUG_WARN, "TTY: logo.bmp is empty or invalid\n");
+        return false;
+    }
+
+    g_statusbar_logo_loaded = true;
+    debuglog(DEBUG_INFO, "TTY: Loaded logo.bmp: %ux%u, %ubpp\n", 
+             g_statusbar_logo->width, g_statusbar_logo->height, g_statusbar_logo->bpp);
+    return true;
+}
+
+// Draw scaled logo to framebuffer at specified position
+static void tty_draw_logo_scaled(int32_t dest_x, int32_t dest_y, int32_t dest_width, int32_t dest_height) {
+    if (!g_statusbar_logo_loaded || !g_statusbar_logo || !g_statusbar_logo->pixel_data) {
+        return;
+    }
+
+    framebuffer_t* fb = graphics_get_framebuffer();
+    if (!fb || !fb->virtual_addr) {
+        return;
+    }
+
+    // Bounds checking
+    if (dest_x < 0 || dest_y < 0 || dest_width <= 0 || dest_height <= 0) {
+        return;
+    }
+    if (dest_x + dest_width > (int32_t)fb->width || dest_y + dest_height > (int32_t)fb->height) {
+        return;
+    }
+
+    // Get BMP image properties
+    uint32_t src_width = g_statusbar_logo->width;
+    uint32_t src_height = g_statusbar_logo->height;
+    uint8_t bpp = g_statusbar_logo->bpp;
+    uint8_t* pixel_data = g_statusbar_logo->pixel_data;
+    bool top_down = g_statusbar_logo->top_down;
+    
+    // Calculate bytes per pixel in source image
+    uint32_t src_bytes_per_pixel = bpp / 8;
+    uint32_t src_row_size = src_width * src_bytes_per_pixel;
+    uint32_t src_row_padding = (4 - (src_row_size % 4)) % 4;
+    uint32_t src_row_size_with_padding = src_row_size + src_row_padding;
+
+    // Calculate scaling factors
+    float scale_x = (float)src_width / (float)dest_width;
+    float scale_y = (float)src_height / (float)dest_height;
+
+    // Use nearest-neighbor scaling for pixel art look
+    uint32_t bytes_per_pixel = (fb->bpp + 7) / 8;
+    volatile uint8_t* framebuffer = (volatile uint8_t*)fb->virtual_addr;
+
+    for (int32_t dy = 0; dy < dest_height; dy++) {
+        // Calculate source Y coordinate
+        int32_t src_y = (int32_t)((float)dy * scale_y);
+        if (src_y >= (int32_t)src_height) src_y = src_height - 1;
+        
+        // Handle BMP row ordering (bottom-up by default)
+        uint32_t bmp_row = top_down ? src_y : (src_height - 1 - src_y);
+        
+        for (int32_t dx = 0; dx < dest_width; dx++) {
+            // Calculate source X coordinate
+            int32_t src_x = (int32_t)((float)dx * scale_x);
+            if (src_x >= (int32_t)src_width) src_x = src_width - 1;
+
+            // Get pixel from source image (BGR or BGRA format)
+            uint32_t src_idx = (bmp_row * src_row_size_with_padding) + (src_x * src_bytes_per_pixel);
+            
+            uint8_t b = pixel_data[src_idx];
+            uint8_t g = pixel_data[src_idx + 1];
+            uint8_t r = pixel_data[src_idx + 2];
+            uint8_t a = (src_bytes_per_pixel == 4) ? pixel_data[src_idx + 3] : 255;
+
+            // Skip fully transparent pixels
+            if (a < 128) {
+                continue;
+            }
+
+            // Calculate destination position
+            int32_t fb_x = dest_x + dx;
+            int32_t fb_y = dest_y + dy;
+            
+            if (fb_x < 0 || fb_x >= (int32_t)fb->width || fb_y < 0 || fb_y >= (int32_t)fb->height) {
+                continue;
+            }
+
+            size_t offset = ((uint32_t)fb_y * fb->pitch) + ((uint32_t)fb_x * bytes_per_pixel);
+
+            if (a >= 250) {
+                // Fully opaque - just write the pixel
+                framebuffer[offset] = b;           // Blue
+                framebuffer[offset + 1] = g;       // Green
+                framebuffer[offset + 2] = r;        // Red
+                if (bytes_per_pixel == 4) {
+                    framebuffer[offset + 3] = 255; // Alpha
+                }
+            } else {
+                // Alpha blend with background
+                float alpha = (float)a / 255.0f;
+                float inv_alpha = 1.0f - alpha;
+                
+                uint8_t bg_b = framebuffer[offset];
+                uint8_t bg_g = framebuffer[offset + 1];
+                uint8_t bg_r = framebuffer[offset + 2];
+
+                framebuffer[offset] = (uint8_t)((float)b * alpha + (float)bg_b * inv_alpha);
+                framebuffer[offset + 1] = (uint8_t)((float)g * alpha + (float)bg_g * inv_alpha);
+                framebuffer[offset + 2] = (uint8_t)((float)r * alpha + (float)bg_r * inv_alpha);
+                if (bytes_per_pixel == 4) {
+                    framebuffer[offset + 3] = 255;
+                }
+            }
+        }
+    }
+}
+
+// Draw tree sprite for CPU cores (simple tree icon)
+static void tty_draw_cpu_tree(int32_t x, int32_t y, int32_t size, graphics_color_t color) {
+    framebuffer_t* fb = graphics_get_framebuffer();
+    if (!fb || !fb->virtual_addr) {
+        return;
+    }
+
+    uint32_t bytes_per_pixel = (fb->bpp + 7) / 8;
+    volatile uint8_t* framebuffer = (volatile uint8_t*)fb->virtual_addr;
+
+    // Simple tree shape: triangle on top, trunk at bottom
+    int32_t trunk_width = size / 3;
+    int32_t trunk_height = size / 4;
+    int32_t tree_top = size - trunk_height;
+
+    for (int32_t dy = 0; dy < size; dy++) {
+        for (int32_t dx = 0; dx < size; dx++) {
+            int32_t fb_x = x + dx;
+            int32_t fb_y = y + dy;
+
+            if (fb_x < 0 || fb_x >= (int32_t)fb->width || fb_y < 0 || fb_y >= (int32_t)fb->height) {
+                continue;
+            }
+
+            bool is_tree = false;
+
+            // Tree foliage (triangle shape)
+            if (dy < tree_top) {
+                int32_t width_at_y = (dy * size) / tree_top;
+                int32_t left_edge = (size - width_at_y) / 2;
+                int32_t right_edge = left_edge + width_at_y;
+                if (dx >= left_edge && dx <= right_edge) {
+                    is_tree = true;
+                }
+            }
+            // Trunk
+            else if (dx >= (size - trunk_width) / 2 && dx < (size + trunk_width) / 2) {
+                is_tree = true;
+            }
+
+            if (is_tree) {
+                size_t offset = ((uint32_t)fb_y * fb->pitch) + ((uint32_t)fb_x * bytes_per_pixel);
+                framebuffer[offset] = color.b;           // Blue
+                framebuffer[offset + 1] = color.g;       // Green
+                framebuffer[offset + 2] = color.r;       // Red
+                if (bytes_per_pixel == 4) {
+                    framebuffer[offset + 3] = 255;       // Alpha
+                }
+            }
+        }
+    }
+}
+
+// CPU core sprites
+#define CPU_SPRITE_SIZE 40
+#define CPU_SPRITE_SPACING 15
+static const graphics_color_t cpu_sprite_colors[] = {
+    {255, 0, 0, 255},       // Bright Red
+    {255, 165, 0, 255},     // Orange
+    {255, 255, 0, 255},     // Yellow
+    {0, 255, 0, 255},       // Lime Green
+    {0, 255, 128, 255},     // Spring Green
+    {0, 255, 255, 255},     // Cyan
+    {0, 128, 255, 255},     // Sky Blue
+    {0, 0, 255, 255},       // Blue
+    {128, 0, 255, 255},     // Purple
+    {255, 0, 255, 255},     // Magenta
+    {255, 0, 128, 255},     // Hot Pink
+    {255, 20, 147, 255},    // Deep Pink
+    {255, 69, 0, 255},      // Red Orange
+    {255, 215, 0, 255},     // Gold
+    {50, 205, 50, 255},     // Lime Green
+    {0, 191, 255, 255},     // Deep Sky Blue
+};
+
+// Draw a CPU core sprite at position (x,y) with given color
+static void tty_draw_cpu_sprite(int32_t x, int32_t y, graphics_color_t color) {
+    // Draw border (2 pixels thick)
+    graphics_color_t border_color = {255, 255, 255, 255}; // White border
+
+    // Outer border
+    graphics_draw_rect(&(graphics_rect_t){x, y, CPU_SPRITE_SIZE, CPU_SPRITE_SIZE}, border_color, false);
+    graphics_draw_rect(&(graphics_rect_t){x+1, y+1, CPU_SPRITE_SIZE-2, CPU_SPRITE_SIZE-2}, border_color, false);
+
+    // Fill inside
+    graphics_draw_rect(&(graphics_rect_t){x+2, y+2, CPU_SPRITE_SIZE-4, CPU_SPRITE_SIZE-4}, color, true);
+}
+
+// Display CPU core sprites on framebuffer
+static void tty_display_cpu_sprites(void) {
+    uint32_t cpu_count = smp_get_cpu_count();
+    if (cpu_count == 0) cpu_count = 1;
+
+    // Get current video mode
+    video_mode_t mode;
+    if (graphics_get_current_mode(&mode) != GRAPHICS_SUCCESS) {
+        return; // Can't get mode, skip sprites
+    }
+
+    // Position sprites below the TTY status bar, in top-right area
+    int32_t start_x = mode.width - (cpu_count * (CPU_SPRITE_SIZE + CPU_SPRITE_SPACING)) - CPU_SPRITE_SPACING;
+    int32_t start_y = TTY_STATUS_BAR_HEIGHT + CPU_SPRITE_SPACING;
+
+    for (uint32_t i = 0; i < cpu_count && i < sizeof(cpu_sprite_colors)/sizeof(cpu_sprite_colors[0]); i++) {
+        tty_draw_cpu_sprite(start_x + i * (CPU_SPRITE_SIZE + CPU_SPRITE_SPACING), start_y, cpu_sprite_colors[i]);
+    }
+}
+
+// Clear CPU core sprites from framebuffer
+static void tty_clear_cpu_sprites(void) {
+    uint32_t cpu_count = smp_get_cpu_count();
+    if (cpu_count == 0) cpu_count = 1;
+
+    // Get current video mode
+    video_mode_t mode;
+    if (graphics_get_current_mode(&mode) != GRAPHICS_SUCCESS) {
+        return; // Can't get mode, skip
+    }
+
+    // Position sprites below the TTY status bar, in top-right area
+    int32_t start_x = mode.width - (cpu_count * (CPU_SPRITE_SIZE + CPU_SPRITE_SPACING)) - CPU_SPRITE_SPACING;
+    int32_t start_y = TTY_STATUS_BAR_HEIGHT + CPU_SPRITE_SPACING;
+
+    graphics_color_t bg_color = {0, 0, 0, 255}; // Black background
+
+    for (uint32_t i = 0; i < cpu_count && i < sizeof(cpu_sprite_colors)/sizeof(cpu_sprite_colors[0]); i++) {
+        graphics_draw_rect(&(graphics_rect_t){
+            start_x + i * (CPU_SPRITE_SIZE + CPU_SPRITE_SPACING),
+            start_y,
+            CPU_SPRITE_SIZE,
+            CPU_SPRITE_SIZE
+        }, bg_color, true);
+    }
+}
+
+// Helper to render a string using 8x8 font directly to framebuffer
+static void tty_render_string_8x8(int32_t x, int32_t y, const char* str, graphics_color_t fg, graphics_color_t bg) {
+    if (!str) return;
+
+    tty_font_t* tty_font = NULL;
+    if (tty_font_load_builtin("tty-8x8", 8, &tty_font) != TTY_FONT_SUCCESS || !tty_font) {
+        return;
+    }
+
+    framebuffer_t* fb = graphics_get_framebuffer();
+    if (!fb || !fb->virtual_addr) {
+        return;
+    }
+
+    graphics_surface_t surface;
+    surface.pixels = (void*)fb->virtual_addr;
+    surface.width = fb->width;
+    surface.height = fb->height;
+    surface.pitch = fb->pitch;
+    surface.format = fb->format;
+    surface.bpp = fb->bpp;
+
+    int32_t px = x;
+    for (const char* p = str; *p; p++) {
+        tty_font_render_char(tty_font, &surface, px, y, (uint32_t)*p, fg, bg);
+        px += 8;  // 8x8 font width
+    }
+}
+
+void tty_draw_status_bar(void) {
+    // Don't draw status bar when hidden or when a graphics app owns the display
+    if (!status_bar_visible || tty_state.graphics_app_active) {
+        return;
+    }
+    
+    framebuffer_t* fb = graphics_get_framebuffer();
+    if (!fb || !fb->virtual_addr) {
+        return;
+    }
+
+    // Draw status bar background
+    graphics_color_t status_bg = {30, 30, 35, 255};
+    graphics_color_t status_text = {200, 200, 200, 255};
+    graphics_rect_t status_rect = {0, 0, fb->width, TTY_STATUS_BAR_HEIGHT};
+
+    graphics_draw_rect(&status_rect, status_bg, true);
+
+    // Draw separator line
+    graphics_color_t separator = {60, 60, 70, 255};
+    graphics_rect_t line_rect = {0, TTY_STATUS_BAR_HEIGHT - 2, fb->width, 2};
+    graphics_draw_rect(&line_rect, separator, true);
+
+    // Load and draw the logo (scaled to fit in status bar)
+    // Logo goes on the left side, after the system name
+    if (!g_statusbar_logo_loaded) {
+        tty_load_statusbar_logo();
+    }
+    
+    if (g_statusbar_logo_loaded && g_statusbar_logo && g_statusbar_logo->pixel_data) {
+        // Scale logo to fit in status bar - max 20px height
+        int32_t max_logo_height = TTY_STATUS_BAR_HEIGHT - 4;
+        int32_t max_logo_width = 100; // Max width for logo
+        
+        // Calculate scaled size maintaining aspect ratio
+        float aspect_ratio = (float)g_statusbar_logo->width / (float)g_statusbar_logo->height;
+        int32_t logo_width = max_logo_height * aspect_ratio;
+        int32_t logo_height = max_logo_height;
+        
+        // Limit width if too large
+        if (logo_width > max_logo_width) {
+            logo_width = max_logo_width;
+            logo_height = max_logo_width / aspect_ratio;
+        }
+        
+        // Position logo after "Forest OS" text (which is at x=10, 8 chars = 64px)
+        // Add some padding
+        int32_t logo_x = 80;
+        int32_t logo_y = (TTY_STATUS_BAR_HEIGHT - logo_height) / 2;
+        
+        tty_draw_logo_scaled(logo_x, logo_y, logo_width, logo_height);
+    }
+
+    // Draw system name
+    tty_render_string_8x8(10, 8, "Forest OS", status_text, status_bg);
+
+    // Get CPU count for tree sprites
+    uint32_t cpu_count = smp_get_cpu_count();
+    if (cpu_count == 0) cpu_count = 1;
+    
+    // Tree sprite size (smaller for status bar)
+    #define TREE_SIZE 16
+    #define TREE_SPACING 4
+    
+    // Calculate position for tree sprites (right side of status bar)
+    int32_t trees_start_x = fb->width - (cpu_count * (TREE_SIZE + TREE_SPACING)) - 10;
+    
+    // Draw tree for each CPU core
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        // Use green color for trees
+        graphics_color_t tree_color = {34, 139, 34, 255}; // Forest Green
+        tty_draw_cpu_tree(trees_start_x + i * (TREE_SIZE + TREE_SPACING), 
+                         (TTY_STATUS_BAR_HEIGHT - TREE_SIZE) / 2, 
+                         TREE_SIZE, tree_color);
+    }
+
+    // Draw login status in the center area
+    // Position between logo area and tree area
+    const char* status_msg = g_user_logged_in ? g_current_user : g_login_status;
+    int32_t status_x = 200; // Position after logo
+    if (status_x + 100 < (int32_t)fb->width - (cpu_count * (TREE_SIZE + TREE_SPACING)) - 20) {
+        tty_render_string_8x8(status_x, 8, status_msg, status_text, status_bg);
+    }
+
+    status_bar_drawn = true;
+}
+
+void tty_clear_status_bar(void) {
+    if (!status_bar_drawn) return;
+    
+    framebuffer_t* fb = graphics_get_framebuffer();
+    if (!fb || !fb->virtual_addr) {
+        return;
+    }
+    
+    // Clear status bar area
+    graphics_color_t black = {0, 0, 0, 255};
+    graphics_rect_t clear_rect = {0, 0, fb->width, TTY_STATUS_BAR_HEIGHT};
+    graphics_draw_rect(&clear_rect, black, true);
+    
+    status_bar_drawn = false;
+}
+
+void tty_set_status_bar_visible(bool visible) {
+    status_bar_visible = visible;
+    if (!visible && status_bar_drawn) {
+        tty_clear_status_bar();
+    }
+}
+
+bool tty_is_status_bar_visible(void) {
+    return status_bar_visible;
+}
 
 static void tty_init_256_palette(void) {
     if (palette_initialized) return;
@@ -212,6 +706,7 @@ static uint8_t tty_map_rgb_to_attr(uint8_t r, uint8_t g, uint8_t b, bool is_back
 }
 
 static uint8_t tty_map_256_color(uint8_t idx, bool is_background) {
+    (void)idx; (void)is_background;
     if (idx < 16) {
         return is_background ? (idx & 0x07) : (idx & 0x0F);
     }
@@ -236,17 +731,19 @@ static void tty_update_dimensions_from_graphics(void) {
         return;
     }
 
-    // Always derive terminal dimensions from framebuffer mode using font metrics
+    // Subtract status bar height from available height
+    uint32_t available_height = mode.height;
+    if (available_height > TTY_STATUS_BAR_HEIGHT) {
+        available_height -= TTY_STATUS_BAR_HEIGHT;
+    }
+
+    // Always derive terminal dimensions from framebuffer mode using 8x8 font metrics
     uint16_t char_w = 8;
     uint16_t char_h = 8;  // Fixed: Changed from 16 to 8 to match 8x8 font
-    font_t* sys_font = NULL;
-    if (font_get_system_font(&sys_font) == GRAPHICS_SUCCESS && sys_font) {
-        if (sys_font->fixed_width > 0) {
-            char_w = sys_font->fixed_width;
-        }
-        if (sys_font->metrics.height > 0) {
-            char_h = sys_font->metrics.height;
-        }
+    tty_font_t* tty_font = NULL;
+    if (tty_font_load_builtin("tty-8x8", 8, &tty_font) == TTY_FONT_SUCCESS && tty_font) {
+        char_w = tty_font->width;
+        char_h = tty_font->height;
     }
 
     if (char_w == 0 || char_h == 0) {
@@ -254,12 +751,14 @@ static void tty_update_dimensions_from_graphics(void) {
     }
 
     uint16_t cols = (uint16_t)(mode.width / char_w);
-    uint16_t rows = (uint16_t)(mode.height / char_h);
+    uint16_t rows = (uint16_t)(available_height / char_h);
     
     // Sanity check for reasonable terminal dimensions
     if (cols > 0 && rows > 0 && cols <= 200 && rows <= 200) {
         tty_state.cols = cols;
         tty_state.rows = rows;
+        tty_state.char_width = char_w;
+        tty_state.char_height = char_h;
     }
 }
 
@@ -313,115 +812,94 @@ static void tty_update_cursor_visual(void) {
     cursor_drawn = true;
 }
 
+// Forward declaration for crash_font (defined below in crash screen section)
+extern const uint16_t crash_font[95][16];
+
 static void tty_render_cell_framebuffer(uint16_t x, uint16_t y, char ch, uint8_t attr) {
-    // Direct framebuffer rendering with enhanced attributes
+    // Use TTY font renderer
+    tty_font_t* tty_font = NULL;
+    if (tty_font_load_builtin("tty-8x8", 8, &tty_font) == TTY_FONT_SUCCESS && tty_font) {
+        framebuffer_t* fb = graphics_get_framebuffer();
+        if (!fb || !fb->virtual_addr) {
+            return;
+        }
+
+        graphics_surface_t surface;
+        surface.pixels = (void*)fb->virtual_addr;
+        surface.width = fb->width;
+        surface.height = fb->height;
+        surface.pitch = fb->pitch;
+        surface.format = fb->format;
+        surface.bpp = fb->bpp;
+
+        int32_t py_offset = TTY_STATUS_BAR_HEIGHT;
+        int32_t px = (int32_t)x * tty_state.char_width;
+        int32_t py = (int32_t)y * tty_state.char_height + py_offset;
+
+        // Get colors
+        graphics_color_t fg_c = tty_color_from_nibble(attr & 0x0F);
+        graphics_color_t bg_c = tty_color_from_nibble((attr >> 4) & 0x0F);
+
+        tty_font_render_char(tty_font, &surface, px, py, (uint32_t)ch, fg_c, bg_c);
+        return;
+    }
+
+    // Fallback: Direct framebuffer rendering using crash_font bitmap
     framebuffer_t* fb = graphics_get_framebuffer();
     if (!fb || !fb->virtual_addr) {
+        return;  // Silently fail - avoid log spam
+    }
+
+    int32_t py_offset = TTY_STATUS_BAR_HEIGHT;
+    int32_t px = (int32_t)x * tty_state.char_width;
+    int32_t py = (int32_t)y * tty_state.char_height + py_offset;
+
+    // Bounds checking
+    if (px < 0 || py < 0 || px + tty_state.char_width > (int32_t)fb->width || py + tty_state.char_height > (int32_t)fb->height) {
         return;
     }
-    
-    // Get font for character rendering
-    font_t* sys_font = NULL;
-    if (font_get_system_font(&sys_font) != GRAPHICS_SUCCESS || !sys_font) {
-        return;
+
+    // Get colors as 32-bit packed values for fast rendering
+    graphics_color_t fg_c = tty_color_from_nibble(attr & 0x0F);
+    graphics_color_t bg_c = tty_color_from_nibble((attr >> 4) & 0x0F);
+    uint32_t fg_color = (fg_c.a << 24) | (fg_c.r << 16) | (fg_c.g << 8) | fg_c.b;
+    uint32_t bg_color = (bg_c.a << 24) | (bg_c.r << 16) | (bg_c.g << 8) | bg_c.b;
+
+    // Get font glyph index (crash_font covers ASCII 32-126)
+    int char_index = ch - 32;
+    if (char_index < 0 || char_index >= 95) {
+        char_index = 0; // Use space for invalid chars
     }
-    
-    uint16_t char_width = sys_font->fixed_width > 0 ? sys_font->fixed_width : 8;
-    uint16_t char_height = sys_font->metrics.height > 0 ? sys_font->metrics.height : 16;
-    
-    int32_t px = (int32_t)x * (int32_t)char_width;
-    int32_t py = (int32_t)y * (int32_t)char_height;
-    
-    // Enhanced bounds checking to prevent corruption
-    if (px < 0 || py < 0 || 
-        px + char_width > (int32_t)fb->width || 
-        py + char_height > (int32_t)fb->height ||
-        px >= (int32_t)fb->width || py >= (int32_t)fb->height) {
-        debuglog(DEBUG_WARN, "TTY: Character at (%u,%u) would render outside framebuffer bounds (%ux%u)\n",
-                x, y, fb->width, fb->height);
-        return;
-    }
-    
-    // Determine colors
-    graphics_color_t fg_color = tty_state.use_true_colors ? tty_state.true_fg : tty_color_from_nibble(attr & 0x0F);
-    graphics_color_t bg_color = tty_state.use_true_colors ? tty_state.true_bg : tty_color_from_nibble((attr >> 4) & 0x0F);
-    
-    // Apply text attributes to colors
-    if (tty_state.bold) {
-        fg_color.r = (uint8_t)(fg_color.r * 1.2 > 255 ? 255 : fg_color.r * 1.2);
-        fg_color.g = (uint8_t)(fg_color.g * 1.2 > 255 ? 255 : fg_color.g * 1.2);
-        fg_color.b = (uint8_t)(fg_color.b * 1.2 > 255 ? 255 : fg_color.b * 1.2);
-    }
-    if (tty_state.faint) {
-        fg_color.r = (uint8_t)(fg_color.r * 0.5);
-        fg_color.g = (uint8_t)(fg_color.g * 0.5);
-        fg_color.b = (uint8_t)(fg_color.b * 0.5);
-    }
-    if (tty_state.inverse) {
-        graphics_color_t temp = fg_color;
-        fg_color = bg_color;
-        bg_color = temp;
-    }
-    if (tty_state.conceal) {
-        fg_color = bg_color;
-    }
-    
-    // Create graphics surface for the framebuffer
-    graphics_surface_t surface;
-    surface.pixels = fb->virtual_addr;
-    surface.width = fb->width;
-    surface.height = fb->height;
-    surface.pitch = fb->pitch;
-    surface.format = fb->format;
-    surface.bpp = fb->bpp;
-    
-    // Render character with enhanced style
-    text_style_t style = {
-        .foreground = fg_color,
-        .background = bg_color,
-        .has_background = true,
-        .bold = tty_state.bold,
-        .italic = tty_state.italic,
-        .underline = tty_state.underline || tty_state.double_underline,
-        .strikethrough = tty_state.strike,
-        .shadow_offset = 0,
-        .shadow_color = {0, 0, 0, 255}
-    };
-    
-    font_render_char(sys_font, &surface, px, py, (uint32_t)ch, &style);
-    
-    // Add additional visual effects
-    if (tty_state.double_underline) {
-        // Draw double underline
-        for (int i = 0; i < char_width; i++) {
-            if (px + i < (int32_t)fb->width) {
-                if (py + char_height - 2 < (int32_t)fb->height) {
-                    graphics_draw_pixel(px + i, py + char_height - 2, fg_color);
-                }
-                if (py + char_height - 4 < (int32_t)fb->height) {
-                    graphics_draw_pixel(px + i, py + char_height - 4, fg_color);
-                }
+
+    // Calculate bytes per pixel from actual bpp
+    uint32_t bytes_per_pixel = (fb->bpp + 7) / 8;
+    volatile uint8_t* framebuffer = (volatile uint8_t*)fb->virtual_addr;
+
+    // Render using actual font bitmap
+    for (int32_t cy = 0; cy < tty_state.char_height; cy++) {
+        uint16_t row_bits = crash_font[char_index][cy];
+        size_t row_offset = ((uint32_t)(py + cy) * fb->pitch) + ((uint32_t)px * bytes_per_pixel);
+
+        for (int32_t cx = 0; cx < tty_state.char_width; cx++) {
+            // Check if bit is set in font bitmap (0x80 >> cx tests each bit from MSB)
+            uint32_t pixel_color = (row_bits & (0x80 >> cx)) ? fg_color : bg_color;
+            size_t pixel_offset = row_offset + (cx * bytes_per_pixel);
+            
+            // Write pixel based on bpp (handles 24bpp and 32bpp)
+            framebuffer[pixel_offset] = pixel_color & 0xFF;         // Blue
+            framebuffer[pixel_offset + 1] = (pixel_color >> 8) & 0xFF;  // Green
+            framebuffer[pixel_offset + 2] = (pixel_color >> 16) & 0xFF; // Red
+            if (bytes_per_pixel == 4) {
+                framebuffer[pixel_offset + 3] = (pixel_color >> 24) & 0xFF; // Alpha (only for 32bpp)
             }
         }
-    }
-    if (tty_state.overlined) {
-        // Draw overline
-        for (int i = 0; i < char_width; i++) {
-            if (px + i < (int32_t)fb->width && py >= 0) {
-                graphics_draw_pixel(px + i, py, fg_color);
-            }
-        }
-    }
-    if (tty_state.framed || tty_state.encircled) {
-        // Draw frame/circle around character
-        graphics_rect_t rect = {px, py, char_width, char_height};
-        graphics_draw_rect(&rect, fg_color, false);
     }
 }
 
 static void tty_render_cell(uint16_t x, uint16_t y, char ch, uint8_t attr) {
-    // Always use framebuffer rendering
-    if (tty_state.use_true_colors && graphics_is_initialized()) {
+    // Always use framebuffer rendering with 8x8 font to avoid TrueType corruption
+    // The 8x8 bitmap font is more reliable for TTY output
+    if (graphics_is_initialized()) {
         framebuffer_t* fb = graphics_get_framebuffer();
         if (fb && fb->virtual_addr) {
             tty_render_cell_framebuffer(x, y, ch, attr);
@@ -433,14 +911,52 @@ static void tty_render_cell(uint16_t x, uint16_t y, char ch, uint8_t attr) {
 }
 
 static void tty_flush_screen(void) {
+    // Don't flush TTY when a graphics app owns the display
+    if (tty_state.graphics_app_active) {
+        return;
+    }
+    
     if (!tty_state.cells || tty_state.cols == 0 || tty_state.rows == 0) {
         return;
     }
 
+    // Draw status bar first
+    tty_draw_status_bar();
+
+    // Only render dirty cells for performance (critical for VirtualBox)
     for (uint16_t y = 0; y < tty_state.rows; y++) {
         for (uint16_t x = 0; x < tty_state.cols; x++) {
-            tty_cell_t cell = tty_state.cells[tty_cell_index(x, y)];
-            tty_render_cell(x, y, cell.ch, cell.attr);
+            size_t idx = tty_cell_index(x, y);
+            tty_cell_t* cell = &tty_state.cells[idx];
+            if (cell->dirty) {
+                tty_render_cell(x, y, cell->ch, cell->attr);
+                cell->dirty = 0;  // Mark as clean after rendering
+            }
+        }
+    }
+    tty_apply_cursor();
+}
+
+// Force full screen redraw (used for tty_clear and initial display)
+static void tty_flush_screen_full(void) {
+    // Don't flush TTY when a graphics app owns the display
+    if (tty_state.graphics_app_active) {
+        return;
+    }
+    
+    if (!tty_state.cells || tty_state.cols == 0 || tty_state.rows == 0) {
+        return;
+    }
+
+    // Draw status bar first
+    tty_draw_status_bar();
+
+    for (uint16_t y = 0; y < tty_state.rows; y++) {
+        for (uint16_t x = 0; x < tty_state.cols; x++) {
+            size_t idx = tty_cell_index(x, y);
+            tty_cell_t* cell = &tty_state.cells[idx];
+            tty_render_cell(x, y, cell->ch, cell->attr);
+            cell->dirty = 0;  // Mark as clean
         }
     }
     tty_apply_cursor();
@@ -460,7 +976,7 @@ static bool tty_set_dimensions(uint16_t cols, uint16_t rows) {
         return true;
     }
 
-    tty_cell_t* new_cells = (tty_cell_t*)kzalloc(new_count * sizeof(tty_cell_t), GFP_KERNEL);
+    tty_cell_t* new_cells = (tty_cell_t*)kzalloc(new_count * sizeof(tty_cell_t));
     if (!new_cells) {
         return false;
     }
@@ -469,6 +985,7 @@ static bool tty_set_dimensions(uint16_t cols, uint16_t rows) {
     for (size_t i = 0; i < new_count; i++) {
         new_cells[i].ch = ' ';
         new_cells[i].attr = attr;
+        new_cells[i].dirty = 1;  // Mark new cells as dirty for initial render
     }
 
     if (tty_state.cells) {
@@ -538,6 +1055,9 @@ static void tty_backend_put(char c) {
     }
 
     tty_render_cell(tty_state.cursor_x, tty_state.cursor_y, c, attr);
+
+    // Also output to serial for debugging
+    debuglog_write_char(c);
 }
 
 static void tty_backend_clear_line_from_cursor(void) {
@@ -562,15 +1082,23 @@ static void tty_scroll_if_needed(void) {
     uint8_t attr = tty_current_attr();
 
     if (tty_state.cells) {
+        // Shift all cells up by one row using memmove
         size_t line_size = (size_t)tty_state.cols * sizeof(tty_cell_t);
         memmove(tty_state.cells,
                 tty_state.cells + tty_state.cols,
                 line_size * (tty_state.rows - 1));
 
+        // Mark ALL cells as dirty since content shifted
+        for (size_t i = 0; i < tty_state.cell_count; i++) {
+            tty_state.cells[i].dirty = 1;
+        }
+
+        // Clear the last row
         for (uint16_t x = 0; x < tty_state.cols; x++) {
             size_t idx = tty_cell_index(x, tty_state.rows - 1);
             tty_state.cells[idx].ch = ' ';
             tty_state.cells[idx].attr = attr;
+            tty_state.cells[idx].dirty = 1;
         }
         tty_state.cursor_y = tty_state.rows - 1;
         tty_flush_screen();
@@ -1010,6 +1538,7 @@ static void tty_handle_csi_command(char command) {
     // Insert/Delete operations
     if (command == 'L' || command == 'M' || command == 'P' || command == '@') {
         int amount = (ansi_parser.param_count > 0 && ansi_parser.params[0] > 0) ? ansi_parser.params[0] : 1;
+        (void)amount;  // TODO: implement insert/delete operations
         // Implement insert/delete lines and characters
         switch (command) {
             case 'L': // Insert lines
@@ -1240,34 +1769,94 @@ bool tty_init(void) {
     // Framebuffer-only TTY - require graphics to be initialized
     if (!graphics_is_initialized()) {
         debuglog(DEBUG_ERROR, "TTY: graphics subsystem required for framebuffer console\n");
+        debuglog(DEBUG_INFO, "TTY: Checking V2 graphics status directly...\n");
+        
+        // Try to get more info about what's available
+        extern bool gfx_is_initialized(void);
+        extern uint32_t gfx_get_fb_width(void);
+        extern uint32_t gfx_get_fb_height(void);
+        extern uint32_t gfx_get_fb_bpp(void);
+        extern void* gfx_get_fb_addr(void);
+        
+        if (gfx_is_initialized()) {
+            debuglog(DEBUG_INFO, "TTY: V2 graphics IS initialized! Trying to use it directly...\n");
+            debuglog(DEBUG_INFO, "TTY: V2 framebuffer: %ux%u %ubpp @ %p\n",
+                    gfx_get_fb_width(), gfx_get_fb_height(), gfx_get_fb_bpp(), gfx_get_fb_addr());
+            
+            // Try to force graphics_init() since V2 is ready
+            extern graphics_result_t graphics_init(void);
+            graphics_result_t init_result = graphics_init();
+            if (init_result == GRAPHICS_SUCCESS) {
+                debuglog(DEBUG_INFO, "TTY: Manually initialized legacy graphics manager!\n");
+            } else {
+                debuglog(DEBUG_ERROR, "TTY: Manual graphics_init() failed\n");
+                return false;
+            }
+        } else {
+            debuglog(DEBUG_ERROR, "TTY: V2 graphics is NOT initialized\n");
+            return false;
+        }
+    }
+
+    // Initialize TTY font renderer
+    if (tty_font_renderer_init() != TTY_FONT_SUCCESS) {
+        debuglog(DEBUG_ERROR, "TTY: failed to initialize TTY font renderer\n");
         return false;
     }
 
     // Try to set a graphics mode suitable for text rendering
-    graphics_result_t result = graphics_set_mode(800, 600, 32, 60);
-    if (result != GRAPHICS_SUCCESS) {
-        // Fallback to VGA mode
-        result = graphics_set_mode(640, 480, 32, 60);
-    }
-    
-    if (result == GRAPHICS_SUCCESS) {
+    debuglog(DEBUG_INFO, "TTY: Attempting to set graphics mode for framebuffer console...\n");
+
+    // Test writing directly to framebuffer since graphics_set_mode is broken
+    debuglog(DEBUG_INFO, "TTY: Testing direct framebuffer access\n");
+
+    framebuffer_t* fb = NULL;
+    graphics_result_t result = graphics_map_framebuffer(&fb);
+    debuglog(DEBUG_INFO, "TTY: graphics_map_framebuffer returned %s\n", graphics_get_error_string(result));
+
+    if (result == GRAPHICS_SUCCESS && fb) {
+        debuglog(DEBUG_INFO, "TTY: Framebuffer mapped at 0x%x, size %u bytes, %ux%u\n",
+                (uint32_t)(uintptr_t)fb->virtual_addr, fb->size, fb->width, fb->height);
+
+        // Set up basic framebuffer console with 8x8 font
         tty_state.backend = TTY_BACKEND_FRAMEBUFFER;
+        tty_state.cols = fb->width / 8;
+        // Reserve space for status bar (24 pixels)
+        tty_state.rows = (fb->height - 24) / 8;  // Use 8x8 font height
+        tty_state.char_width = 8;
+        tty_state.char_height = 8;  // Match 8x8 font
+
+        // Try to update with actual font metrics
         tty_update_dimensions_from_graphics();
-        debuglog(DEBUG_INFO, "TTY: framebuffer console with enhanced ANSI support enabled\n");
+
+        debuglog(DEBUG_INFO, "TTY: framebuffer console size %ux%u, char size %ux%u\n",
+                tty_state.cols, tty_state.rows, tty_state.char_width, tty_state.char_height);
+
+        // Unmap framebuffer
+        graphics_unmap_framebuffer(fb);
+
+        // Now complete the initialization - allocate cell buffer
+        if (!tty_set_dimensions(tty_state.cols, tty_state.rows)) {
+            debuglog(DEBUG_ERROR, "TTY: failed to allocate screen buffer\n");
+            return false;
+        }
+
+        tty_reset_ansi_parser();
+        tty_state.initialized = true;
+        debuglog(DEBUG_INFO, "TTY: framebuffer console fully initialized\n");
+
+        // Initialize virtual terminal buffers for VT 3-12
+        tty_init_vt_buffers();
+
+        // Clear screen after full initialization
+        tty_clear();
+        return true;
     } else {
-        debuglog(DEBUG_ERROR, "TTY: failed to initialize framebuffer console\n");
-        return false;
+        debuglog(DEBUG_ERROR, "TTY: Failed to map framebuffer\n");
     }
 
-    if (!tty_set_dimensions(tty_state.cols, tty_state.rows)) {
-        debuglog(DEBUG_ERROR, "TTY: failed to allocate screen buffer\n");
-        return false;
-    }
-    
-    tty_clear();
-    tty_reset_ansi_parser();
-    tty_state.initialized = true;
-    return true;
+    debuglog(DEBUG_ERROR, "TTY: failed to initialize framebuffer console\n");
+    return false;
 }
 
 void tty_clear(void) {
@@ -1287,8 +1876,9 @@ void tty_clear(void) {
         for (size_t i = 0; i < tty_state.cell_count; i++) {
             tty_state.cells[i].ch = ' ';
             tty_state.cells[i].attr = attr;
+            tty_state.cells[i].dirty = 1;  // Mark all as dirty for full redraw
         }
-        tty_flush_screen();
+        tty_flush_screen_full();  // Use full redraw for clear operation
     } else {
         // Fallback: use graphics subsystem for clearing
         graphics_color_t bg = tty_color_from_nibble((attr >> 4) & 0x0F);
@@ -1299,12 +1889,46 @@ void tty_clear(void) {
     tty_apply_cursor();
 }
 
+void tty_force_redraw(void) {
+    // Force a full screen redraw without clearing content
+    // Used when switching TTY sessions via Ctrl+Alt+Fn
+    if (!tty_state.initialized) {
+        return;
+    }
+
+    // Don't redraw TTY when a graphics app owns the display
+    if (tty_state.graphics_app_active) {
+        return;
+    }
+
+    // Mark all cells as dirty
+    if (tty_state.cells) {
+        for (size_t i = 0; i < tty_state.cell_count; i++) {
+            tty_state.cells[i].dirty = 1;
+        }
+    }
+
+    // Redraw status bar with current TTY session
+    tty_draw_status_bar();
+
+    // Flush entire screen
+    tty_flush_screen_full();
+}
+
 void tty_putc(char c) {
+    // Skip TTY output when a graphics app owns the display
+    if (tty_state.graphics_app_active) {
+        return;
+    }
     tty_process_ansi(c);
 }
 
 void tty_write(const char* text) {
     if (!text) return;
+    // Skip TTY output when a graphics app owns the display
+    if (tty_state.graphics_app_active) {
+        return;
+    }
     while (*text) {
         tty_process_ansi(*text++);
     }
@@ -1312,6 +1936,10 @@ void tty_write(const char* text) {
 
 void tty_write_ansi(const char* text) {
     if (!text) return;
+    // Skip TTY output when a graphics app owns the display
+    if (tty_state.graphics_app_active) {
+        return;
+    }
     while (*text) {
         tty_process_ansi(*text++);
     }
@@ -1342,7 +1970,488 @@ bool tty_try_enable_graphics_backend(void) {
 }
 
 bool tty_is_ready(void) {
+    // Return false during boot mode to use fast VGA text mode for boot messages
+    if (tty_state.boot_mode) {
+        return false;
+    }
     return tty_state.initialized && graphics_is_initialized();
+}
+
+// Exit boot mode and switch to framebuffer TTY for graphics
+// Call this after early boot is complete (e.g., before starting desktop)
+void tty_exit_boot_mode(void) {
+    if (!tty_state.boot_mode) {
+        return;  // Already exited boot mode
+    }
+
+    tty_state.boot_mode = false;
+    debuglog(DEBUG_INFO, "TTY: Exited boot mode, framebuffer TTY now active\n");
+
+    // Clear and redraw screen with framebuffer TTY (skip if splash is still visible)
+    if (tty_state.initialized && !splash_is_running()) {
+        tty_clear();
+    }
+
+    // Display CPU core sprites if graphics is initialized
+    if (graphics_is_initialized()) {
+        tty_display_cpu_sprites();
+    }
+}
+
+// Check if still in boot mode
+bool tty_in_boot_mode(void) {
+    return tty_state.boot_mode;
+}
+
+// =============================================================================
+// GRAPHICS APP MODE - Suppress TTY output when graphical apps own the display
+// =============================================================================
+
+// Clear framebuffer directly - used when switching between GUI and TTY
+void tty_clear_framebuffer_raw(void) {
+    framebuffer_t* fb = NULL;
+    if (graphics_map_framebuffer(&fb) != GRAPHICS_SUCCESS || !fb) {
+        return;
+    }
+
+    if (fb->virtual_addr && fb->size) {
+        memset((uint8_t*)fb->virtual_addr, 0, fb->size);
+        __asm__ volatile("mfence" ::: "memory");
+    }
+    graphics_unmap_framebuffer(fb);
+}
+
+// Enable graphics app mode - TTY output to framebuffer is suppressed
+// Call this before launching a graphical application (like CanopyDM)
+void tty_set_graphics_app_active(bool active) {
+    bool was_active = tty_state.graphics_app_active;
+    tty_state.graphics_app_active = active;
+    
+    if (active && !was_active) {
+        // Entering graphics app mode - clear the status bar so it doesn't overlap
+        tty_clear_status_bar();
+        // Clear the framebuffer so TTY remnants don't show behind GUI apps
+        if (graphics_is_initialized()) {
+            tty_clear_framebuffer_raw();
+        }
+        debuglog(DEBUG_INFO, "TTY: Graphics app mode enabled, TTY output suppressed\n");
+    } else if (!active && was_active) {
+        debuglog(DEBUG_INFO, "TTY: Graphics app mode disabled, TTY output restored\n");
+        // Redraw TTY content when graphical app exits
+        tty_force_redraw();
+    }
+}
+
+// Check if graphics app mode is active
+bool tty_is_graphics_app_active(void) {
+    return tty_state.graphics_app_active;
+}
+
+// =============================================================================
+// CRASH SCREEN FUNCTIONS - Direct framebuffer access bypassing graphics subsystem
+// =============================================================================
+
+// Simple 8x16 bitmap font for crash screen (only essential ASCII characters)
+const uint16_t crash_font[95][16] = {
+    // Space (32)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ! (33)
+    {0x0000, 0x0000, 0x0000, 0x0800, 0x0800, 0x0800, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x0000, 0x0000, 0x0800, 0x0800, 0x0000, 0x0000},
+    // " (34)
+    {0x0000, 0x0000, 0x0000, 0x2400, 0x2400, 0x2400, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // # (35)
+    {0x0000, 0x0000, 0x0000, 0x2400, 0x2400, 0x7E00, 0x2400, 0x2400,
+     0x2400, 0x7E00, 0x2400, 0x2400, 0x0000, 0x0000, 0x0000, 0x0000},
+    // $ (36)
+    {0x0000, 0x0000, 0x0800, 0x1C00, 0x2A00, 0x2800, 0x1C00, 0x0A00,
+     0x0A00, 0x2800, 0x2A00, 0x1C00, 0x0800, 0x0000, 0x0000, 0x0000},
+    // % (37)
+    {0x0000, 0x0000, 0x0000, 0x6200, 0x9200, 0x6400, 0x0800, 0x1000,
+     0x2600, 0x4900, 0x4600, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // & (38)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2200, 0x1C00, 0x1D00,
+     0x2500, 0x2200, 0x1D00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ' (39)
+    {0x0000, 0x0000, 0x0000, 0x0800, 0x0800, 0x0800, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ( (40)
+    {0x0000, 0x0000, 0x0200, 0x0400, 0x0800, 0x0800, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x0400, 0x0200, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ) (41)
+    {0x0000, 0x0000, 0x0800, 0x0400, 0x0200, 0x0200, 0x0200, 0x0200,
+     0x0200, 0x0200, 0x0400, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000},
+    // * (42)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0800, 0x2A00, 0x1C00, 0x2A00,
+     0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // + (43)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0800, 0x0800, 0x3E00, 0x0800,
+     0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // , (44)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0800, 0x0800, 0x1000, 0x0000, 0x0000, 0x0000},
+    // - (45)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x3E00, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // . (46)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0800, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000},
+    // / (47)
+    {0x0000, 0x0000, 0x0200, 0x0200, 0x0400, 0x0400, 0x0800, 0x0800,
+     0x1000, 0x1000, 0x2000, 0x2000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 0 (48)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x3200, 0x2A00, 0x2600,
+     0x2200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 1 (49)
+    {0x0000, 0x0000, 0x0000, 0x0800, 0x1800, 0x0800, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 2 (50)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x0200, 0x0400, 0x0800,
+     0x1000, 0x2000, 0x3E00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 3 (51)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x0200, 0x0C00, 0x0200,
+     0x0200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 4 (52)
+    {0x0000, 0x0000, 0x0000, 0x0400, 0x0C00, 0x1400, 0x2400, 0x4400,
+     0x3E00, 0x0400, 0x0400, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 5 (53)
+    {0x0000, 0x0000, 0x0000, 0x3E00, 0x2000, 0x3C00, 0x0200, 0x0200,
+     0x0200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 6 (54)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2000, 0x3C00, 0x2200, 0x2200,
+     0x2200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 7 (55)
+    {0x0000, 0x0000, 0x0000, 0x3E00, 0x0200, 0x0400, 0x0800, 0x0800,
+     0x1000, 0x1000, 0x1000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 8 (56)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2200, 0x1C00, 0x1C00,
+     0x2200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // 9 (57)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2200, 0x2200, 0x1E00,
+     0x0200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // : (58)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0800, 0x0800, 0x0000, 0x0000,
+     0x0800, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ; (59)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0800, 0x0800, 0x0000, 0x0000,
+     0x0800, 0x0800, 0x1000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // < (60)
+    {0x0000, 0x0000, 0x0000, 0x0200, 0x0400, 0x0800, 0x1000, 0x2000,
+     0x1000, 0x0800, 0x0400, 0x0200, 0x0000, 0x0000, 0x0000, 0x0000},
+    // = (61)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x3E00, 0x0000, 0x3E00,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // > (62)
+    {0x0000, 0x0000, 0x0000, 0x0800, 0x0400, 0x0200, 0x0100, 0x0080,
+     0x0100, 0x0200, 0x0400, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ? (63)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x0200, 0x0400, 0x0800,
+     0x0800, 0x0000, 0x0800, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000},
+    // @ (64)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2E00, 0x2A00, 0x2E00,
+     0x2A00, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // A (65)
+    {0x0000, 0x0000, 0x0000, 0x0800, 0x1400, 0x2200, 0x2200, 0x2200,
+     0x3E00, 0x2200, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // B (66)
+    {0x0000, 0x0000, 0x0000, 0x3C00, 0x2200, 0x2200, 0x3C00, 0x2200,
+     0x2200, 0x2200, 0x3C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // C (67)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2000, 0x2000, 0x2000,
+     0x2000, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // D (68)
+    {0x0000, 0x0000, 0x0000, 0x3800, 0x2400, 0x2200, 0x2200, 0x2200,
+     0x2200, 0x2400, 0x3800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // E (69)
+    {0x0000, 0x0000, 0x0000, 0x3E00, 0x2000, 0x2000, 0x3C00, 0x2000,
+     0x2000, 0x2000, 0x3E00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // F (70)
+    {0x0000, 0x0000, 0x0000, 0x3E00, 0x2000, 0x2000, 0x3C00, 0x2000,
+     0x2000, 0x2000, 0x2000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // G (71)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2000, 0x2000, 0x2E00,
+     0x2200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // H (72)
+    {0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x2200, 0x3E00, 0x2200,
+     0x2200, 0x2200, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // I (73)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x0800, 0x0800, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // J (74)
+    {0x0000, 0x0000, 0x0000, 0x0E00, 0x0400, 0x0400, 0x0400, 0x0400,
+     0x2400, 0x2400, 0x1800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // K (75)
+    {0x0000, 0x0000, 0x0000, 0x2200, 0x2400, 0x2800, 0x3000, 0x2800,
+     0x2400, 0x2200, 0x2100, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // L (76)
+    {0x0000, 0x0000, 0x0000, 0x2000, 0x2000, 0x2000, 0x2000, 0x2000,
+     0x2000, 0x2000, 0x3E00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // M (77)
+    {0x0000, 0x0000, 0x0000, 0x2200, 0x3600, 0x2A00, 0x2A00, 0x2200,
+     0x2200, 0x2200, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // N (78)
+    {0x0000, 0x0000, 0x0000, 0x2200, 0x3200, 0x2A00, 0x2600, 0x2200,
+     0x2200, 0x2200, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // O (79)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2200, 0x2200, 0x2200,
+     0x2200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // P (80)
+    {0x0000, 0x0000, 0x0000, 0x3C00, 0x2200, 0x2200, 0x2200, 0x3C00,
+     0x2000, 0x2000, 0x2000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // Q (81)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2200, 0x2200, 0x2200,
+     0x2600, 0x2200, 0x1D00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // R (82)
+    {0x0000, 0x0000, 0x0000, 0x3C00, 0x2200, 0x2200, 0x2200, 0x3C00,
+     0x2400, 0x2200, 0x2100, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // S (83)
+    {0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2000, 0x1C00, 0x0200,
+     0x0200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // T (84)
+    {0x0000, 0x0000, 0x0000, 0x3E00, 0x0800, 0x0800, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // U (85)
+    {0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x2200, 0x2200, 0x2200,
+     0x2200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // V (86)
+    {0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x2200, 0x2200, 0x2200,
+     0x2200, 0x1400, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // W (87)
+    {0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x2200, 0x2200, 0x2A00,
+     0x2A00, 0x3600, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // X (88)
+    {0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x1400, 0x0800, 0x0800,
+     0x1400, 0x2200, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // Y (89)
+    {0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x2200, 0x1400, 0x0800,
+     0x0800, 0x0800, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // Z (90)
+    {0x0000, 0x0000, 0x0000, 0x3E00, 0x0200, 0x0400, 0x0800, 0x1000,
+     0x2000, 0x2000, 0x3E00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // [ (91)
+    {0x0000, 0x0000, 0x0E00, 0x0800, 0x0800, 0x0800, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x0E00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // \ (92)
+    {0x0000, 0x0000, 0x2000, 0x2000, 0x1000, 0x1000, 0x0800, 0x0800,
+     0x0400, 0x0400, 0x0200, 0x0200, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ] (93)
+    {0x0000, 0x0000, 0x0E00, 0x0200, 0x0200, 0x0200, 0x0200, 0x0200,
+     0x0200, 0x0200, 0x0E00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ^ (94)
+    {0x0000, 0x0000, 0x0000, 0x0800, 0x1400, 0x2200, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // _ (95)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x3E00, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ` (96)
+    {0x0000, 0x0000, 0x0000, 0x1000, 0x0800, 0x0400, 0x0000, 0x0000,
+     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // a (97)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1C00, 0x0200, 0x1E00,
+     0x2200, 0x2200, 0x1E00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // b (98)
+    {0x0000, 0x0000, 0x2000, 0x2000, 0x2C00, 0x3200, 0x2200, 0x2200,
+     0x2200, 0x3200, 0x2C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // c (99)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2000,
+     0x2000, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // d (100)
+    {0x0000, 0x0000, 0x0200, 0x0200, 0x1A00, 0x2600, 0x2200, 0x2200,
+     0x2200, 0x2600, 0x1A00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // e (101)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2200,
+     0x3E00, 0x2000, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // f (102)
+    {0x0000, 0x0000, 0x0600, 0x0800, 0x0800, 0x1C00, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // g (103)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1E00, 0x2200, 0x2200,
+     0x2200, 0x1E00, 0x0200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000},
+    // h (104)
+    {0x0000, 0x0000, 0x2000, 0x2000, 0x2C00, 0x3200, 0x2200, 0x2200,
+     0x2200, 0x2200, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // i (105)
+    {0x0000, 0x0000, 0x0000, 0x0800, 0x0000, 0x1800, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // j (106)
+    {0x0000, 0x0000, 0x0000, 0x0400, 0x0000, 0x0C00, 0x0400, 0x0400,
+     0x0400, 0x0400, 0x2400, 0x1800, 0x0000, 0x0000, 0x0000, 0x0000},
+    // k (107)
+    {0x0000, 0x0000, 0x2000, 0x2000, 0x2400, 0x2800, 0x3000, 0x2800,
+     0x2400, 0x2200, 0x2000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // l (108)
+    {0x0000, 0x0000, 0x1800, 0x0800, 0x0800, 0x0800, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // m (109)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2C00, 0x3200, 0x2200,
+     0x2200, 0x2200, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // n (110)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2C00, 0x3200, 0x2200,
+     0x2200, 0x2200, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // o (111)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1C00, 0x2200, 0x2200,
+     0x2200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // p (112)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2C00, 0x3200, 0x2200,
+     0x2200, 0x3200, 0x2C00, 0x2000, 0x2000, 0x0000, 0x0000, 0x0000},
+    // q (113)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1A00, 0x2600, 0x2200,
+     0x2200, 0x2600, 0x1A00, 0x0200, 0x0200, 0x0000, 0x0000, 0x0000},
+    // r (114)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2E00, 0x3200, 0x2000,
+     0x2000, 0x2000, 0x2000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // s (115)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1E00, 0x2000, 0x1C00,
+     0x0200, 0x0200, 0x3C00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // t (116)
+    {0x0000, 0x0000, 0x0000, 0x0800, 0x0800, 0x1C00, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x0600, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // u (117)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x2200,
+     0x2200, 0x2600, 0x1A00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // v (118)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x2200,
+     0x2200, 0x1400, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // w (119)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x2200,
+     0x2A00, 0x2A00, 0x3600, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // x (120)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2200, 0x1400, 0x0800,
+     0x0800, 0x1400, 0x2200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // y (121)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x2200, 0x2200, 0x2200,
+     0x2200, 0x1E00, 0x0200, 0x2200, 0x1C00, 0x0000, 0x0000, 0x0000},
+    // z (122)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x3E00, 0x0400, 0x0800,
+     0x1000, 0x2000, 0x3E00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // { (123)
+    {0x0000, 0x0000, 0x0200, 0x0400, 0x0400, 0x0800, 0x1000, 0x0800,
+     0x0400, 0x0400, 0x0200, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // | (124)
+    {0x0000, 0x0000, 0x0800, 0x0800, 0x0800, 0x0800, 0x0800, 0x0800,
+     0x0800, 0x0800, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // } (125)
+    {0x0000, 0x0000, 0x0800, 0x0400, 0x0400, 0x0200, 0x0100, 0x0200,
+     0x0400, 0x0400, 0x0800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000},
+    // ~ (126)
+    {0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x1C00, 0x2200,
+     0x0100, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000}
+};
+
+static void crash_draw_char(int x, int y, char c, uint32_t color) {
+    // Get framebuffer directly (bypass graphics subsystem)
+    framebuffer_t* fb = NULL;
+    if (graphics_map_framebuffer(&fb) != GRAPHICS_SUCCESS || !fb) {
+        return;
+    }
+
+    int char_index = c - 32;
+    if (char_index < 0 || char_index >= 96) {
+        char_index = 0; // Use space for invalid chars
+    }
+
+    volatile uint8_t* framebuffer = (volatile uint8_t*)fb->virtual_addr;
+    uint32_t bytes_per_pixel = (fb->bpp + 7) / 8;
+
+    for (int cy = 0; cy < 16; cy++) {
+        uint16_t row_bits = crash_font[char_index][cy];
+        for (int cx = 0; cx < 8; cx++) {
+            // Check if the bit is set in the font bitmap
+            if (row_bits & (0x80 >> cx)) {
+                int fb_x = x + cx;
+                int fb_y = y + cy;
+
+                if (fb_x >= 0 && fb_x < (int)fb->width && fb_y >= 0 && fb_y < (int)fb->height) {
+                    size_t offset = (fb_y * fb->pitch) + (fb_x * bytes_per_pixel);
+                    if (offset + bytes_per_pixel <= fb->size) {
+                        // Write pixel based on bpp (handles 24bpp and 32bpp)
+                        framebuffer[offset] = color & 0xFF;           // Blue
+                        framebuffer[offset + 1] = (color >> 8) & 0xFF;  // Green
+                        framebuffer[offset + 2] = (color >> 16) & 0xFF; // Red
+                        if (bytes_per_pixel == 4) {
+                            framebuffer[offset + 3] = (color >> 24) & 0xFF; // Alpha
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    graphics_unmap_framebuffer(fb);
+}
+
+static void crash_draw_string(int x, int y, const char* str, uint32_t color) {
+    if (!str) return;
+
+    int current_x = x;
+    while (*str) {
+        crash_draw_char(current_x, y, *str, color);
+        current_x += 8;
+        str++;
+    }
+}
+
+static void crash_clear_screen(uint32_t color) {
+    framebuffer_t* fb = NULL;
+    if (graphics_map_framebuffer(&fb) != GRAPHICS_SUCCESS || !fb) {
+        return;
+    }
+
+    volatile uint8_t* framebuffer = (volatile uint8_t*)fb->virtual_addr;
+    uint32_t bytes_per_pixel = (fb->bpp + 7) / 8;
+
+    for (uint32_t y = 0; y < fb->height; y++) {
+        volatile uint8_t* row = framebuffer + y * fb->pitch;
+        for (uint32_t x = 0; x < fb->width; x++) {
+            uint32_t offset = x * bytes_per_pixel;
+            row[offset] = color & 0xFF;              // Blue
+            row[offset + 1] = (color >> 8) & 0xFF;   // Green
+            row[offset + 2] = (color >> 16) & 0xFF;  // Red
+            if (bytes_per_pixel == 4) {
+                row[offset + 3] = (color >> 24) & 0xFF; // Alpha
+            }
+        }
+    }
+
+    graphics_unmap_framebuffer(fb);
+}
+
+static void crash_draw_hex(int x, int y, uint64_t value, int digits, uint32_t color) {
+    char buffer[32];
+    int len = 0;
+
+    // Convert to hex string
+    for (int i = digits - 1; i >= 0; i--) {
+        uint8_t nibble = (value >> (i * 4)) & 0xF;
+        buffer[len++] = nibble < 10 ? ('0' + nibble) : ('A' + nibble - 10);
+    }
+    buffer[len] = '\0';
+
+    crash_draw_string(x, y, buffer, color);
+}
+
+// Public crash screen API
+void tty_show_crash_screen(const char* title, const char* message, uint64_t eip, uint64_t error_code, uint64_t cr2) {
+    // Clear screen with blue background
+    crash_clear_screen(0xFF000080); // Blue background
+
+    // Draw title in white
+    crash_draw_string(10, 10, title, 0xFFFFFFFF);
+
+    // Draw message in yellow
+    crash_draw_string(10, 30, message, 0xFFFFFF00);
+
+    // Draw register info
+    crash_draw_string(10, 60, "EIP: 0x", 0xFFFFFFFF);
+    crash_draw_hex(60, 60, eip, 16, 0xFFFF0000);
+
+    crash_draw_string(10, 80, "Error Code: 0x", 0xFFFFFFFF);
+    crash_draw_hex(120, 80, error_code, 8, 0xFFFF0000);
+
+    crash_draw_string(10, 100, "CR2: 0x", 0xFFFFFFFF);
+    crash_draw_hex(60, 100, cr2, 16, 0xFFFF0000);
 }
 
 bool tty_get_dimensions(uint16_t* cols, uint16_t* rows) {
@@ -1366,15 +2475,11 @@ bool tty_get_cell_metrics(uint16_t* char_width, uint16_t* char_height) {
 
     uint16_t cw = 8;
     uint16_t ch = 16;
-    font_t* sys_font = NULL;
+    tty_font_t* tty_font = NULL;
 
-    if (font_get_system_font(&sys_font) == GRAPHICS_SUCCESS && sys_font) {
-        if (sys_font->fixed_width > 0) {
-            cw = sys_font->fixed_width;
-        }
-        if (sys_font->metrics.height > 0) {
-            ch = sys_font->metrics.height;
-        }
+    if (tty_font_load_builtin("tty-8x8", 8, &tty_font) == TTY_FONT_SUCCESS && tty_font) {
+        cw = tty_font->width;
+        ch = tty_font->height;
     }
 
     if (char_width) {
@@ -1426,4 +2531,212 @@ void tty_redraw_region(uint16_t x, uint16_t y, uint16_t width, uint16_t height) 
     }
 
     tty_apply_cursor();
+}
+
+// =============================================================================
+// VIRTUAL TERMINAL (VT) MANAGEMENT
+// =============================================================================
+
+bool tty_init_vt_buffers(void) {
+    if (g_vt_buffers_initialized) {
+        return true;
+    }
+
+    uint16_t cols = tty_state.cols;
+    uint16_t rows = tty_state.rows;
+
+    if (cols == 0 || rows == 0) {
+        debuglog(DEBUG_ERROR, "TTY: Cannot init VT buffers - invalid dimensions %ux%u\n", cols, rows);
+        return false;
+    }
+
+    size_t cell_count = (size_t)cols * rows;
+
+    // Initialize VT buffers for TTY VTs (3-12)
+    for (int i = TTY_FIRST_TTY_VT - 1; i < TTY_LAST_TTY_VT; i++) {
+        vt_buffer_t* vt = &g_vt_buffers[i];
+        
+        vt->cells = (tty_cell_t*)kzalloc(cell_count * sizeof(tty_cell_t));
+        if (!vt->cells) {
+            debuglog(DEBUG_ERROR, "TTY: Failed to allocate buffer for VT %d\n", i + 1);
+            // Clean up already allocated buffers
+            for (int j = TTY_FIRST_TTY_VT - 1; j < i; j++) {
+                if (g_vt_buffers[j].cells) {
+                    kfree(g_vt_buffers[j].cells);
+                    g_vt_buffers[j].cells = NULL;
+                }
+            }
+            return false;
+        }
+
+        vt->cell_count = cell_count;
+        vt->cols = cols;
+        vt->rows = rows;
+        vt->cursor_x = 0;
+        vt->cursor_y = 0;
+        vt->saved_cursor_x = 0;
+        vt->saved_cursor_y = 0;
+        vt->fg = TEXT_ATTR_LIGHT_GRAY;
+        vt->bg = TEXT_ATTR_BLACK;
+        vt->bold = false;
+        vt->faint = false;
+        vt->underline = false;
+        vt->blink = false;
+        vt->inverse = false;
+        vt->conceal = false;
+        vt->italic = false;
+        vt->strike = false;
+        vt->double_underline = false;
+        vt->overlined = false;
+        vt->framed = false;
+        vt->encircled = false;
+        vt->crossed_out = false;
+        vt->true_fg = (graphics_color_t){170, 170, 170, 255};
+        vt->true_bg = (graphics_color_t){0, 0, 0, 255};
+        vt->use_true_colors = false;
+        vt->initialized = true;
+
+        // Initialize cells to spaces
+        uint8_t attr = (vt->bg << 4) | (vt->fg & 0x0F);
+        for (size_t j = 0; j < cell_count; j++) {
+            vt->cells[j].ch = ' ';
+            vt->cells[j].attr = attr;
+            vt->cells[j].dirty = 1;
+        }
+
+        debuglog(DEBUG_INFO, "TTY: Initialized VT %d buffer (%zu bytes)\n", i + 1, cell_count * sizeof(tty_cell_t));
+    }
+
+    g_vt_buffers_initialized = true;
+    g_current_vt = 1;  // Start at VT1 (graphical)
+    debuglog(DEBUG_INFO, "TTY: Virtual terminal buffers initialized for VTs %d-%d\n", 
+             TTY_FIRST_TTY_VT, TTY_LAST_TTY_VT);
+    return true;
+}
+
+static void tty_save_current_vt_buffer(void) {
+    if (!tty_state.cells || !g_vt_buffers_initialized) {
+        return;
+    }
+
+    // Only save if current VT is a TTY VT (3-12)
+    if (g_current_vt < TTY_FIRST_TTY_VT || g_current_vt > TTY_LAST_TTY_VT) {
+        return;
+    }
+
+    vt_buffer_t* vt = &g_vt_buffers[g_current_vt - 1];
+    if (!vt->cells || vt->cell_count != tty_state.cell_count) {
+        return;
+    }
+
+    // Copy current TTY state to VT buffer
+    memcpy(vt->cells, tty_state.cells, tty_state.cell_count * sizeof(tty_cell_t));
+    vt->cursor_x = tty_state.cursor_x;
+    vt->cursor_y = tty_state.cursor_y;
+    vt->saved_cursor_x = tty_state.saved_cursor_x;
+    vt->saved_cursor_y = tty_state.saved_cursor_y;
+    vt->fg = tty_state.fg;
+    vt->bg = tty_state.bg;
+    vt->bold = tty_state.bold;
+    vt->faint = tty_state.faint;
+    vt->underline = tty_state.underline;
+    vt->blink = tty_state.blink;
+    vt->inverse = tty_state.inverse;
+    vt->conceal = tty_state.conceal;
+    vt->italic = tty_state.italic;
+    vt->strike = tty_state.strike;
+    vt->double_underline = tty_state.double_underline;
+    vt->overlined = tty_state.overlined;
+    vt->framed = tty_state.framed;
+    vt->encircled = tty_state.encircled;
+    vt->crossed_out = tty_state.crossed_out;
+    vt->true_fg = tty_state.true_fg;
+    vt->true_bg = tty_state.true_bg;
+    vt->use_true_colors = tty_state.use_true_colors;
+}
+
+static void tty_restore_vt_buffer(uint8_t vt_num) {
+    if (!g_vt_buffers_initialized) {
+        return;
+    }
+
+    if (vt_num < TTY_FIRST_TTY_VT || vt_num > TTY_LAST_TTY_VT) {
+        return;
+    }
+
+    vt_buffer_t* vt = &g_vt_buffers[vt_num - 1];
+    if (!vt->cells || !tty_state.cells || vt->cell_count != tty_state.cell_count) {
+        return;
+    }
+
+    // Restore VT buffer to current TTY state
+    memcpy(tty_state.cells, vt->cells, tty_state.cell_count * sizeof(tty_cell_t));
+    tty_state.cursor_x = vt->cursor_x;
+    tty_state.cursor_y = vt->cursor_y;
+    tty_state.saved_cursor_x = vt->saved_cursor_x;
+    tty_state.saved_cursor_y = vt->saved_cursor_y;
+    tty_state.fg = vt->fg;
+    tty_state.bg = vt->bg;
+    tty_state.bold = vt->bold;
+    tty_state.faint = vt->faint;
+    tty_state.underline = vt->underline;
+    tty_state.blink = vt->blink;
+    tty_state.inverse = vt->inverse;
+    tty_state.conceal = vt->conceal;
+    tty_state.italic = vt->italic;
+    tty_state.strike = vt->strike;
+    tty_state.double_underline = vt->double_underline;
+    tty_state.overlined = vt->overlined;
+    tty_state.framed = vt->framed;
+    tty_state.encircled = vt->encircled;
+    tty_state.crossed_out = vt->crossed_out;
+    tty_state.true_fg = vt->true_fg;
+    tty_state.true_bg = vt->true_bg;
+    tty_state.use_true_colors = vt->use_true_colors;
+}
+
+bool tty_switch_vt(uint8_t vt_number) {
+    if (vt_number < 1 || vt_number > TTY_VT_COUNT) {
+        debuglog(DEBUG_ERROR, "TTY: Invalid VT number %u (valid: 1-%d)\n", vt_number, TTY_VT_COUNT);
+        return false;
+    }
+
+    // Save current VT buffer if it's a TTY VT
+    tty_save_current_vt_buffer();
+
+    // Update current VT
+    uint8_t old_vt = g_current_vt;
+    g_current_vt = vt_number;
+
+    debuglog(DEBUG_INFO, "TTY: Switching from VT %u to VT %u\n", old_vt, vt_number);
+
+    // If switching to a TTY VT, restore its buffer and bypass double buffering
+    if (vt_number >= TTY_FIRST_TTY_VT && vt_number <= TTY_LAST_TTY_VT) {
+        // Disable double buffering for direct framebuffer access
+        // This ensures TTY writes go directly to the screen
+        graphics_enable_double_buffering(false);
+        
+        // Signal that graphics apps should pause their display output
+        // but continue running in the background
+        tty_set_graphics_app_active(false);
+        
+        tty_restore_vt_buffer(vt_number);
+        tty_force_redraw();
+        return true;
+    }
+
+    // VT 1-2 are graphical - handled by display manager
+    // Re-enable double buffering for graphical mode
+    graphics_enable_double_buffering(true);
+    
+    return true;
+}
+
+uint8_t tty_get_current_vt(void) {
+    return g_current_vt;
+}
+
+bool tty_is_active(void) {
+    // TTY is active when current VT is a TTY VT (not graphical)
+    return (g_current_vt >= TTY_FIRST_TTY_VT && g_current_vt <= TTY_LAST_TTY_VT);
 }

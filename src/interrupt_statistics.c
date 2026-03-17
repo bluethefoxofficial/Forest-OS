@@ -320,7 +320,7 @@ int interrupt_statistics_init(void)
     /* Initialize trace buffer */
     stats_mgr.trace.size = 4096; /* 4K trace entries */
     stats_mgr.trace.entries = (struct interrupt_trace_entry *)
-        kmalloc(stats_mgr.trace.size * sizeof(struct interrupt_trace_entry), GFP_KERNEL);
+        kmalloc(stats_mgr.trace.size * sizeof(struct interrupt_trace_entry));
     
     if (!stats_mgr.trace.entries) {
         debug_printf("Warning: Could not allocate interrupt trace buffer\n");

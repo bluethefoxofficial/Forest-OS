@@ -102,7 +102,7 @@ app_graphics_context_t* app_create_window(const app_window_params_t* params) {
     }
     
     // Create graphics context
-    app_graphics_context_t* ctx = kmalloc(sizeof(app_graphics_context_t), GFP_KERNEL);
+    app_graphics_context_t* ctx = kmalloc(sizeof(app_graphics_context_t));
     if (!ctx) {
         debuglog(DEBUG_ERROR, "Failed to allocate memory for graphics context\n");
         return NULL;
@@ -300,7 +300,21 @@ graphics_result_t app_clear_with_color(app_graphics_context_t* ctx, graphics_col
             break;
         }
         case PIXEL_FORMAT_RGB_888:
-        case PIXEL_FORMAT_RGBA_8888: {
+        case PIXEL_FORMAT_BGR_888: {
+            // 24bpp - iterate row by row with correct pitch
+            uint8_t* pixels = (uint8_t*)ctx->surface->pixels;
+            for (uint32_t y = 0; y < ctx->surface->height; y++) {
+                uint8_t* row = pixels + y * ctx->surface->pitch;
+                for (uint32_t x = 0; x < ctx->surface->width; x++) {
+                    row[x * 3 + 0] = (pixel_value >> 0) & 0xFF;
+                    row[x * 3 + 1] = (pixel_value >> 8) & 0xFF;
+                    row[x * 3 + 2] = (pixel_value >> 16) & 0xFF;
+                }
+            }
+            break;
+        }
+        case PIXEL_FORMAT_RGBA_8888:
+        case PIXEL_FORMAT_BGRA_8888: {
             uint32_t* pixels = (uint32_t*)ctx->surface->pixels;
             uint32_t pixel_count = (ctx->surface->pitch / 4) * ctx->surface->height;
             for (uint32_t i = 0; i < pixel_count; i++) {
@@ -345,7 +359,16 @@ graphics_result_t app_draw_pixel_with_color(app_graphics_context_t* ctx, int32_t
             break;
         }
         case PIXEL_FORMAT_RGB_888:
-        case PIXEL_FORMAT_RGBA_8888: {
+        case PIXEL_FORMAT_BGR_888: {
+            uint8_t* pixels = (uint8_t*)ctx->surface->pixels;
+            uint8_t* row = pixels + y * ctx->surface->pitch;
+            row[x * 3 + 0] = (pixel_value >> 0) & 0xFF;
+            row[x * 3 + 1] = (pixel_value >> 8) & 0xFF;
+            row[x * 3 + 2] = (pixel_value >> 16) & 0xFF;
+            break;
+        }
+        case PIXEL_FORMAT_RGBA_8888:
+        case PIXEL_FORMAT_BGRA_8888: {
             uint32_t* pixels = (uint32_t*)ctx->surface->pixels;
             pixels[y * (ctx->surface->pitch / 4) + x] = pixel_value;
             break;

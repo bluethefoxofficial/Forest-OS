@@ -15,6 +15,9 @@ typedef unsigned int uint32;
 typedef signed long long int64;
 typedef unsigned long long uint64;
 
+// Include standard integer types for portable pointer-sized types
+#include "stdint.h"
+
 typedef char* string;
 
 #define float double

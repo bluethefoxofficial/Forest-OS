@@ -68,16 +68,34 @@ graphics_result_t window_manager_init(void) {
         return GRAPHICS_SUCCESS;
     }
     
+    // Ensure graphics manager is initialized first
+    if (!graphics_is_initialized()) {
+        debuglog(DEBUG_INFO, "Window manager: graphics not initialized, attempting init...\n");
+        graphics_result_t init_result = graphics_init();
+        if (init_result != GRAPHICS_SUCCESS) {
+            debuglog(DEBUG_ERROR, "Window manager: failed to initialize graphics: %s\n",
+                    graphics_get_error_string(init_result));
+            return init_result;
+        }
+    }
+    
     // Get desktop dimensions from graphics system
     video_mode_t current_mode;
-    if (graphics_get_current_mode(&current_mode) != GRAPHICS_SUCCESS) {
-        debuglog(DEBUG_ERROR, "Failed to get current video mode\n");
+    graphics_result_t mode_result = graphics_get_current_mode(&current_mode);
+    if (mode_result != GRAPHICS_SUCCESS) {
+        debuglog(DEBUG_ERROR, "Failed to get current video mode: %s\n",
+                graphics_get_error_string(mode_result));
         return GRAPHICS_ERROR_GENERIC;
     }
+    
+    
+    debuglog(DEBUG_INFO, "Window manager: video mode %ux%ux%u\n",
+            current_mode.width, current_mode.height, current_mode.bpp);
     
     wm_state.desktop_width = current_mode.width;
     wm_state.desktop_height = current_mode.height;
     
+    debuglog(DEBUG_INFO, "WM: Creating desktop surface...\n");
     // Create desktop surface
     graphics_result_t result = graphics_create_surface(
         wm_state.desktop_width, wm_state.desktop_height,
@@ -87,7 +105,9 @@ graphics_result_t window_manager_init(void) {
         debuglog(DEBUG_ERROR, "Failed to create desktop surface\n");
         return result;
     }
+    debuglog(DEBUG_INFO, "WM: Desktop surface created\n");
     
+    debuglog(DEBUG_INFO, "WM: Creating composition buffer...\n");
     // Create composition buffer
     result = graphics_create_surface(
         wm_state.desktop_width, wm_state.desktop_height,
@@ -98,12 +118,12 @@ graphics_result_t window_manager_init(void) {
         graphics_destroy_surface(wm_state.desktop_surface);
         return result;
     }
+    debuglog(DEBUG_INFO, "WM: Composition buffer created\n");
     
     // Initialize configuration
     wm_state.config = default_config;
     
-    // Clear desktop
-    graphics_clear_screen(COLOR_DARK_GRAY);
+    debuglog(DEBUG_INFO, "WM: Skipping screen clear (framebuffer may not be mapped)\n");
     
     wm_state.initialized = true;
     debuglog(DEBUG_INFO, "Window manager initialized successfully (%ux%u)\n",
@@ -167,7 +187,7 @@ window_handle_t window_create(int32_t x, int32_t y, uint32_t width, uint32_t hei
     }
     
     // Create window structure
-    window_t* window = kmalloc(sizeof(window_t), GFP_KERNEL);
+    window_t* window = kmalloc(sizeof(window_t));
     if (!window) {
         debuglog(DEBUG_ERROR, "Failed to allocate memory for window\n");
         return INVALID_WINDOW_HANDLE;

@@ -7,6 +7,7 @@
 #include "include/string.h"
 #include "include/mm.h"
 #include "include/debuglog.h"
+#include "include/graphics/font_renderer.h"
 
 #define TAR_BLOCK_SIZE 512
 #define RAMDISK_MAX_NAME 256
@@ -167,12 +168,12 @@ static bool reserve_file_capacity(uint32 required_capacity) {
     uint32 files_size = sizeof(ramdisk_file_t) * required_capacity;
     uint32 names_size = RAMDISK_MAX_NAME * required_capacity;
 
-    ramdisk_file_t* new_files = (ramdisk_file_t*)kmalloc(files_size, GFP_KERNEL);
+    ramdisk_file_t* new_files = (ramdisk_file_t*)kmalloc(files_size);
     if (!new_files) {
         return false;
     }
 
-    char* new_names = (char*)kmalloc(names_size, GFP_KERNEL);
+    char* new_names = (char*)kmalloc(names_size);
     if (!new_names) {
         kfree(new_files);
         return false;
@@ -272,6 +273,12 @@ static const char* copy_filename(const tar_header_t* header, uint32 index) {
     temp_len = tar_copy_field(temp, temp_len, header->filename, sizeof(header->filename), max_len);
     temp[temp_len] = '\0';
 
+    // Trim trailing spaces
+    while (temp_len > 0 && temp[temp_len - 1] == ' ') {
+        temp_len--;
+    }
+    temp[temp_len] = '\0';
+
     char* dest = filename_slot(index);
     uint32 dpos = 0;
     uint32 i = 0;
@@ -367,6 +374,29 @@ static bool ramdisk_add_virtual_directories(void) {
     return true;
 }
 
+static bool ramdisk_add_parent_directories(void) {
+    char temp[RAMDISK_MAX_NAME];
+    for (uint32 i = 0; i < file_total; i++) {
+        const char* name = files[i].name;
+        if (!name || !name[0]) {
+            continue;
+        }
+        uint32 len = 0;
+        while (name[len] && len < (RAMDISK_MAX_NAME - 1)) {
+            temp[len] = name[len];
+            if (name[len] == '/') {
+                temp[len] = '\0';
+                if (temp[0] && !ramdisk_add_directory_entry(temp)) {
+                    return false;
+                }
+            }
+            len++;
+        }
+        temp[len] = '\0';
+    }
+    return true;
+}
+
 static bool parse_tar(const uint8* base, uint32 size) {
     const uint8* cursor = base;
     const uint8* end = base + size;
@@ -458,6 +488,11 @@ static bool parse_tar(const uint8* base, uint32 size) {
 
     debuglog(DEBUG_INFO, "[RAMDISK] Parsed %u tar entries\n", file_total);
 
+    if (!ramdisk_add_parent_directories()) {
+        print("[RAMDISK] Failed to add parent directories\n");
+        return false;
+    }
+
     if (!ramdisk_add_virtual_directories()) {
         print("[RAMDISK] Failed to provision virtual directories\n");
         return false;
@@ -492,22 +527,7 @@ static bool load_initrd_range(uint32 base, uint32 end) {
     // Ensure this range stays reserved in the PMM in case other code tries to reuse it.
     pmm_reserve_range(base, end);
 
-    uint32 pages = (size + MEMORY_PAGE_SIZE - 1) / MEMORY_PAGE_SIZE;
-    uint32 relocated_phys = pmm_alloc_frames(pages);
-    if (relocated_phys == 0) {
-        kernel_panic("Failed to allocate initrd relocation buffer");
-    }
-    uint32 relocated_end = relocated_phys + pages * MEMORY_PAGE_SIZE;
-    pmm_reserve_range(relocated_phys, relocated_end);
-    memory_result_t reloc_map = vmm_identity_map_range(vmm_get_current_page_directory(),
-                                                       relocated_phys, relocated_end,
-                                                       PAGE_WRITABLE);
-    if (reloc_map != MEMORY_OK) {
-        kernel_panic("Failed to map relocated initrd");
-    }
-    memcpy((void*)relocated_phys, (const void*)base, size);
-
-    if (!parse_tar((const uint8*)relocated_phys, size)) {
+    if (!parse_tar((const uint8*)base, size)) {
         kernel_panic("Failed to parse initrd tar");
     }
 
@@ -515,6 +535,10 @@ static bool load_initrd_range(uint32 base, uint32 end) {
     print("[RAMDISK] Parsed ");
     print(int_to_string(file_total));
     print(" entries\n");
+
+    // Notify font renderer that initrd files are now available for config-based font loading.
+    font_renderer_on_initrd_ready();
+
     return true;
 }
 

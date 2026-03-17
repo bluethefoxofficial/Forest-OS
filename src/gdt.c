@@ -82,11 +82,11 @@ static void gdt_flush_and_load_tss(void) {
     );
 }
 
-void gdt_set_kernel_stack(uint32 stack_top) {
+void gdt_set_kernel_stack(uintptr_t stack_top) {
     tss_entry.rsp0 = (uint64)stack_top;
 }
 
-void gdt_init(uint32 initial_stack_top) {
+void gdt_init(uintptr_t initial_stack_top) {
     memory_set((uint8*)&tss_entry, 0, sizeof(tss_entry));
 
     /* Flat 64-bit segments */
@@ -206,11 +206,11 @@ static void gdt_flush_and_load_tss(void) {
     );
 }
 
-void gdt_set_kernel_stack(uint32 stack_top) {
-    tss_entry.esp0 = stack_top;
+void gdt_set_kernel_stack(uintptr_t stack_top) {
+    tss_entry.esp0 = (uint32)stack_top;
 }
 
-void gdt_init(uint32 initial_stack_top) {
+void gdt_init(uintptr_t initial_stack_top) {
     memory_set((uint8*)&tss_entry, 0, sizeof(tss_entry));
 
     gdt_set_entry(0, 0, 0, 0, 0);                    // Null descriptor

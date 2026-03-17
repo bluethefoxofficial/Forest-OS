@@ -6,6 +6,7 @@
 // =============================================================================
 
 #include "include/mm.h"
+#include "include/memory.h"
 #include "include/atomic_mm.h"
 #include "include/list.h"
 #include "include/interrupt.h"
@@ -408,7 +409,7 @@ mm_struct_t *cow_copy_mm(mm_struct_t *mm)
 
         {  // Scope block for the original loop body
         // Create new VMA
-        new_vma = kmalloc(sizeof(vm_area_struct_t), GFP_KERNEL);
+        new_vma = kmalloc(sizeof(vm_area_struct_t));
         if (!new_vma) {
             up_read(&mm->mmap_sem);
             mm_free(new_mm);

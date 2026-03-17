@@ -9,8 +9,11 @@
 #define DEBUGLOG_SERIAL_PORT 0x3F8
 #define DEBUGLOG_DEBUGCON_PORT 0xE9
 #define DEBUGLOG_SERIAL_TIMEOUT 0xFFFF
+#define DEBUGLOG_BUFFER_SIZE 1024
 
 static bool debuglog_initialized = false;
+static char debuglog_buffer[DEBUGLOG_BUFFER_SIZE];
+static uint32_t debuglog_buffer_pos = 0;
 
 static inline void debuglog_serial_wait_tx(void) {
     uint32 timeout = DEBUGLOG_SERIAL_TIMEOUT;
@@ -21,13 +24,23 @@ static inline void debuglog_serial_wait_tx(void) {
     }
 }
 
+static void debuglog_flush(void) {
+    for (uint32_t i = 0; i < debuglog_buffer_pos; i++) {
+        debuglog_serial_wait_tx();
+        outportb(DEBUGLOG_SERIAL_PORT, (uint8)debuglog_buffer[i]);
+    }
+    debuglog_buffer_pos = 0;
+}
+
 static void debuglog_serial_write_char(char c) {
-    debuglog_serial_wait_tx();
-    outportb(DEBUGLOG_SERIAL_PORT, (uint8)c);
+    debuglog_buffer[debuglog_buffer_pos++] = c;
+    if (debuglog_buffer_pos >= DEBUGLOG_BUFFER_SIZE || c == '\n') {
+        debuglog_flush();
+    }
 }
 
 static void debuglog_serial_init(void) {
-    outportb(DEBUGLOG_SERIAL_PORT + 1, 0x00);      // Disable interrupts
+    outportb(DEBUGLOG_SERIAL_PORT + 1, 0x01);      // Enable receive interrupts (IER = 0x01)
     outportb(DEBUGLOG_SERIAL_PORT + 3, 0x80);      // Enable DLAB
     outportb(DEBUGLOG_SERIAL_PORT + 0, 0x03);      // 38400 baud (divisor = 3)
     outportb(DEBUGLOG_SERIAL_PORT + 1, 0x00);
@@ -80,6 +93,20 @@ void debuglog_write_hex(uint32 value) {
     *ptr++ = '0';
     *ptr++ = 'x';
     for (int i = 28; i >= 0; i -= 4) {
+        *ptr++ = hex_chars[(value >> i) & 0xF];
+    }
+    *ptr = '\0';
+    debuglog_write(buffer);
+}
+
+void debuglog_write_hex64(uint64_t value) {
+    char buffer[19];
+    char* ptr = buffer;
+    static const char hex_chars[] = "0123456789ABCDEF";
+
+    *ptr++ = '0';
+    *ptr++ = 'x';
+    for (int i = 60; i >= 0; i -= 4) {
         *ptr++ = hex_chars[(value >> i) & 0xF];
     }
     *ptr = '\0';
@@ -166,13 +193,39 @@ static void debuglog_vformat(const char* format, va_list args) {
             format++;
         }
 
+        // Parse precision specifier (e.g., %.32s)
+        int precision = -1;
+        if (*format == '.') {
+            format++;
+            precision = 0;
+            while (*format >= '0' && *format <= '9') {
+                precision = precision * 10 + (*format - '0');
+                format++;
+            }
+        }
+
         switch (*format) {
             case '%':
                 debuglog_write_char('%');
                 break;
             case 's': {
                 const char* str = va_arg(args, const char*);
-                debuglog_write(str ? str : "(null)");
+                if (!str) {
+                    debuglog_write("(null)");
+                    break;
+                }
+                if (precision > 0) {
+                    char buf[64];
+                    int len = 0;
+                    while (str[len] && len < precision && len < (int)(sizeof(buf) - 1)) {
+                        buf[len] = str[len];
+                        len++;
+                    }
+                    buf[len] = '\0';
+                    debuglog_write(buf);
+                } else {
+                    debuglog_write(str);
+                }
                 break;
             }
             case 'c': {

@@ -221,9 +221,7 @@ static irq_return_t handle_division_error(struct interrupt_context *ctx)
     debuglog_printf("Exception: Division error at %p\n", (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     if (is_user_mode_exception(ctx)) {
-        /* Terminate user process */
-        debuglog_printf("Exception: Terminating user process due to division error\n");
-        // task_terminate_current(SIGFPE); // TODO: implement task management
+        task_exit(-1, "floating point exception");
         return IRQ_HANDLED;
     }
     
@@ -296,8 +294,7 @@ static irq_return_t handle_breakpoint(struct interrupt_context *ctx)
     FRAME_IP(ctx->frame)--;
     
     if (is_user_mode_exception(ctx)) {
-        /* Send SIGTRAP to user process */
-        // task_send_signal(task_get_current(), SIGTRAP); // TODO
+        task_exit(-1, "trace trap");
         return IRQ_HANDLED;
     }
     
@@ -316,10 +313,10 @@ static irq_return_t handle_overflow(struct interrupt_context *ctx)
     debuglog_printf("Exception: Overflow at %p\n", (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGFPE); // TODO
+        task_exit(-1, "floating point exception");
         return IRQ_HANDLED;
     }
-    
+
     dump_exception_context(ctx);
     panic("Overflow exception in kernel mode");
     return IRQ_NONE;
@@ -333,10 +330,10 @@ static irq_return_t handle_bound_range_exceeded(struct interrupt_context *ctx)
     debuglog_printf("Exception: Bound range exceeded at %p\n", (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGSEGV); // TODO
+        task_exit(-1, "segmentation fault");
         return IRQ_HANDLED;
     }
-    
+
     dump_exception_context(ctx);
     panic("Bound range exceeded in kernel mode");
     return IRQ_NONE;
@@ -350,12 +347,12 @@ static irq_return_t handle_invalid_opcode(struct interrupt_context *ctx)
     debuglog_printf("Exception: Invalid opcode at %p\n", (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     /* Could attempt to emulate instruction here */
-    
+
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGILL); // TODO
+        task_exit(-1, "illegal instruction");
         return IRQ_HANDLED;
     }
-    
+
     dump_exception_context(ctx);
     panic("Invalid opcode in kernel mode");
     return IRQ_NONE;
@@ -380,12 +377,12 @@ static irq_return_t handle_device_not_available(struct interrupt_context *ctx)
         debuglog_printf("FPU: FPU emulation required\n");
         /* Could implement software emulation */
     }
-    
+
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGFPE); // TODO
+        task_exit(-1, "floating point exception");
         return IRQ_HANDLED;
     }
-    
+
     dump_exception_context(ctx);
     panic("Device not available in kernel mode");
     return IRQ_NONE;
@@ -399,7 +396,7 @@ static irq_return_t handle_double_fault_internal(struct interrupt_context *ctx)
 {
     /* Double fault is always fatal */
     debuglog_printf("CRITICAL: Double fault detected!\n");
-    debuglog_printf("Error code: 0x%lx\n", ctx->frame.error_code);
+    debuglog_printf("Error code: 0x%lx\n", ctx->error_code);
     
     dump_exception_context(ctx);
     
@@ -419,7 +416,7 @@ static irq_return_t handle_double_fault_internal(struct interrupt_context *ctx)
 static irq_return_t handle_invalid_tss(struct interrupt_context *ctx)
 {
     debuglog_printf("Exception: Invalid TSS (error=0x%lx) at %p\n", 
-                ctx->frame.error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
+                ctx->error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     dump_exception_context(ctx);
     panic("Invalid TSS");
@@ -432,13 +429,13 @@ static irq_return_t handle_invalid_tss(struct interrupt_context *ctx)
 static irq_return_t handle_segment_not_present(struct interrupt_context *ctx)
 {
     debuglog_printf("Exception: Segment not present (error=0x%lx) at %p\n", 
-                ctx->frame.error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
+                ctx->error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGSEGV); // TODO
+        task_exit(-1, "segmentation fault");
         return IRQ_HANDLED;
     }
-    
+
     dump_exception_context(ctx);
     panic("Segment not present in kernel mode");
     return IRQ_NONE;
@@ -450,13 +447,13 @@ static irq_return_t handle_segment_not_present(struct interrupt_context *ctx)
 static irq_return_t handle_stack_fault(struct interrupt_context *ctx)
 {
     debuglog_printf("Exception: Stack fault (error=0x%lx) at %p\n", 
-                ctx->frame.error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
+                ctx->error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGSEGV); // TODO
+        task_exit(-1, "segmentation fault");
         return IRQ_HANDLED;
     }
-    
+
     dump_exception_context(ctx);
     panic("Stack fault in kernel mode");
     return IRQ_NONE;
@@ -468,23 +465,23 @@ static irq_return_t handle_stack_fault(struct interrupt_context *ctx)
 static irq_return_t handle_general_protection(struct interrupt_context *ctx)
 {
     debuglog_printf("Exception: General protection fault (error=0x%lx) at %p\n", 
-                ctx->frame.error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
+                ctx->error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     /* Decode error code */
-    if (ctx->frame.error_code != 0) {
-        bool external = ctx->frame.error_code & 1;
-        int table = (ctx->frame.error_code >> 1) & 3;
-        int index = (ctx->frame.error_code >> 3) & 0x1FFF;
+    if (ctx->error_code != 0) {
+        bool external = ctx->error_code & 1;
+        int table = (ctx->error_code >> 1) & 3;
+        int index = (ctx->error_code >> 3) & 0x1FFF;
         
         debuglog_printf("GP fault: %s, table %d, index %d\n", 
                    external ? "external" : "internal", table, index);
     }
     
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGSEGV); // TODO
+        task_exit(-1, "segmentation fault");
         return IRQ_HANDLED;
     }
-    
+
     dump_exception_context(ctx);
     panic("General protection fault in kernel mode");
     return IRQ_NONE;
@@ -497,7 +494,7 @@ static irq_return_t handle_general_protection(struct interrupt_context *ctx)
 static irq_return_t handle_page_fault_internal(struct interrupt_context *ctx)
 {
     uint64_t fault_address = cpu_read_cr2();
-    uint64_t error_code = ctx->frame.error_code;
+    uint64_t error_code = ctx->error_code;
     
     bool present = error_code & 1;
     bool write = error_code & 2;
@@ -522,17 +519,7 @@ static irq_return_t handle_page_fault_internal(struct interrupt_context *ctx)
     
     if (user && is_user_mode_exception(ctx)) {
         /* User mode page fault that couldn't be handled */
-        debuglog_printf("Page fault: Terminating user process\n");
-        print_colored("[TASK] User page fault, terminating task.\n", 0x0C, 0x00);
-        print("  addr=0x"); print_hex((uint32)fault_address);
-        print(" ip=0x"); print_hex((uint32)FRAME_IP(ctx->frame));
-        print(" err=0x"); print_hex((uint32)error_code);
-        print("\n");
-        if (current_task) {
-            current_task->state = TASK_STATE_TERMINATED;
-            current_task->pending_signals |= SIGKILL;
-        }
-        task_schedule();
+        task_exit(-1, "segmentation fault");
         return IRQ_HANDLED;
     }
     
@@ -566,9 +553,9 @@ static irq_return_t handle_fpu_error(struct interrupt_context *ctx)
     
     /* Clear FPU exception */
     asm volatile("fnclex");
-    
+
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGFPE); // TODO
+        task_exit(-1, "floating point exception");
         return IRQ_HANDLED;
     }
     
@@ -583,10 +570,10 @@ static irq_return_t handle_alignment_check(struct interrupt_context *ctx)
     debuglog_printf("Exception: Alignment check at %p\n", (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGBUS); // TODO
+        task_exit(-1, "bus error");
         return IRQ_HANDLED;
     }
-    
+
     dump_exception_context(ctx);
     panic("Alignment check in kernel mode");
     return IRQ_NONE;
@@ -620,11 +607,11 @@ static irq_return_t handle_simd_exception(struct interrupt_context *ctx)
     /* Get MXCSR register */
     asm volatile("stmxcsr %0" : "=m" (mxcsr));
     
-    debuglog_printf("Exception: SIMD exception (MXCSR=0x%08x) at %p\n", 
+    debuglog_printf("Exception: SIMD exception (MXCSR=0x%08x) at %p\n",
                 mxcsr, (void*)(uintptr_t)FRAME_IP(ctx->frame));
-    
+
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGFPE); // TODO
+        task_exit(-1, "floating point exception");
         return IRQ_HANDLED;
     }
     
@@ -649,16 +636,16 @@ static irq_return_t handle_virtualization_exception(struct interrupt_context *ct
  */
 static irq_return_t handle_control_protection(struct interrupt_context *ctx)
 {
-    debuglog_printf("Exception: Control protection fault (error=0x%lx) at %p\n", 
-                ctx->frame.error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
+    debuglog_printf("Exception: Control protection fault (error=0x%x) at %p\n",
+                ctx->error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
     
     /* This would integrate with Intel CET support */
-    
+
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGSEGV); // TODO
+        task_exit(-1, "segmentation fault");
         return IRQ_HANDLED;
     }
-    
+
     dump_exception_context(ctx);
     panic("Control protection fault in kernel mode");
     return IRQ_NONE;
@@ -669,11 +656,11 @@ static irq_return_t handle_control_protection(struct interrupt_context *ctx)
  */
 static irq_return_t handle_security_exception(struct interrupt_context *ctx)
 {
-    debuglog_printf("Exception: Security exception (error=0x%lx) at %p\n", 
-                ctx->frame.error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
-    
+    debuglog_printf("Exception: Security exception (error=0x%x) at %p\n",
+                ctx->error_code, (void*)(uintptr_t)FRAME_IP(ctx->frame));
+
     if (is_user_mode_exception(ctx)) {
-        // task_send_signal(task_get_current(), SIGSEGV); // TODO
+        task_exit(-1, "segmentation fault");
         return IRQ_HANDLED;
     }
     
@@ -714,7 +701,7 @@ static void dump_exception_context(struct interrupt_context *ctx)
     debuglog_printf("Description: %s\n", exception_table[exception].description);
     
     if (exception_table[exception].has_error_code) {
-        debuglog_printf("Error Code: 0x%lx\n", ctx->frame.error_code);
+        debuglog_printf("Error Code: 0x%x\n", ctx->error_code);
     }
     
 #if ARCH_64BIT

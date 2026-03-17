@@ -429,7 +429,7 @@ static int context_setup_cpu_stacks(int cpu)
     /* Allocate interrupt stacks for different privilege levels */
     for (stack_level = 0; stack_level < 4; stack_level++) {
         /* Allocate stack with guard pages */
-        void *stack_memory = kmalloc(stack_size + 2 * PAGE_SIZE, GFP_KERNEL);
+        void *stack_memory = kmalloc(stack_size + 2 * PAGE_SIZE);
         if (!stack_memory) {
             debug_printf("Failed to allocate interrupt stack %d for CPU %d\n", stack_level, cpu);
             goto cleanup;
@@ -437,7 +437,7 @@ static int context_setup_cpu_stacks(int cpu)
         
         /* Setup guard pages (simplified - would use memory protection) */
         if (ctx_mgr.config.stack_protection) {
-            state->stack_guard_pages[stack_level] = kmalloc(PAGE_SIZE, GFP_KERNEL);
+            state->stack_guard_pages[stack_level] = kmalloc(PAGE_SIZE);
             if (!state->stack_guard_pages[stack_level]) {
                 kfree(stack_memory);
                 goto cleanup;
@@ -491,7 +491,7 @@ static void context_setup_extended_state(int cpu)
             buffer_size = sizeof(struct extended_state);
         }
         
-        state->fpu_state_buffer = (struct extended_state *)kmalloc(buffer_size, GFP_KERNEL);
+        state->fpu_state_buffer = (struct extended_state *)kmalloc(buffer_size);
         if (state->fpu_state_buffer) {
             memset(state->fpu_state_buffer, 0, buffer_size);
             state->extended_state_enabled = true;
@@ -517,7 +517,7 @@ static struct complete_interrupt_context *context_allocate_context(void)
     struct complete_interrupt_context *ctx;
     static uint64_t next_context_id = 1;
     
-    ctx = (struct complete_interrupt_context *)kmalloc(sizeof(*ctx), GFP_ATOMIC);
+    ctx = (struct complete_interrupt_context *)kmalloc(sizeof(*ctx));
     if (!ctx) {
         return NULL;
     }
@@ -531,7 +531,7 @@ static struct complete_interrupt_context *context_allocate_context(void)
             ext_size = sizeof(struct extended_state);
         }
         
-        ctx->ext_state = (struct extended_state *)kmalloc(ext_size, GFP_ATOMIC);
+        ctx->ext_state = (struct extended_state *)kmalloc(ext_size);
         if (ctx->ext_state) {
             memset(ctx->ext_state, 0, ext_size);
             ctx->ext_state_size = ext_size;

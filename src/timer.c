@@ -4,10 +4,15 @@
  */
 
 #include "include/interrupt.h"
+#include "include/pit.h"
 #include "include/task.h"
 #include "include/io_ports.h"
 #include "include/screen.h"
 #include "include/timer.h"
+#include "include/ps2_mouse.h"
+#include "include/ps2_keyboard.h"
+#include "include/usb/usb.h"
+#include "include/framebuffer.h"
 #include <stdint.h>
 
 static uint32 timer_ticks = 0;
@@ -18,6 +23,12 @@ static void timer_handler(struct interrupt_frame* frame, uint32 error_code) {
     (void)error_code;
     timer_ticks++;
 
+    // Poll keyboard/mouse to prevent stuck buffers when IRQs are missed
+    ps2_keyboard_poll();
+    ps2_mouse_poll();
+
+    // Poll USB input devices (keyboards/mice)
+    usb_poll();
     
     // Call the task scheduler every timer interrupt
     task_schedule();
@@ -78,4 +89,8 @@ void timer_sleep_ms(uint32_t milliseconds) {
     while ((timer_ticks - start) < ticks_to_wait) {
         __asm__ __volatile__("hlt");
     }
+}
+
+uint64_t get_system_timer_ticks(void) {
+    return pit_read_counter();
 }

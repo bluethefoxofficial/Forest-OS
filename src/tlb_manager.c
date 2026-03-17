@@ -21,7 +21,7 @@ void tlb_invalidate_for_mapping(uint32_t virtual_addr, bool was_mapped) { (void)
 void tlb_shootdown_page(uint32_t virtual_addr) { (void)virtual_addr; }
 void tlb_safe_heap_expand(uint32_t start_vaddr, uint32_t num_pages) { (void)start_vaddr; (void)num_pages; }
 void tlb_update_pmap_for_thread(uint32_t new_cr3) { (void)new_cr3; }
-void tlb_get_stats(uint32_t *flushes_single, uint32_t *flushes_all) {
+void tlb_manager_get_stats(uint32_t *flushes_single, uint32_t *flushes_all) {
     if (flushes_single) *flushes_single = 0;
     if (flushes_all) *flushes_all = 0;
 }
@@ -170,7 +170,7 @@ void tlb_safe_pte_update(uint32_t virtual_addr, uint32_t old_pte, uint32_t new_p
 }
 
 // Get TLB statistics (for debugging)
-void tlb_get_stats(uint32_t *flushes_single, uint32_t *flushes_all) {
+void tlb_manager_get_stats(uint32_t *flushes_single, uint32_t *flushes_all) {
     // Simple counters (static variables)
     static uint32_t single_count = 0;
     static uint32_t all_count = 0;

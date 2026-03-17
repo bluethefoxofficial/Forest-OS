@@ -3,6 +3,7 @@
 #include "include/task.h"
 #include "include/interrupt.h"  // Use new safe interrupt functions
 #include "include/tty.h"
+#include "include/debuglog.h"
 
 static uint32 cursorX = 0, cursorY = 0;
 uint16 screen_width = 80, screen_height = 25;
@@ -23,6 +24,12 @@ static console_lock_t console_lock = {0, false, false, 0};
 // No longer need local implementations
 
 static volatile bool console_irq_state = false;
+
+#ifdef __GNUC__
+bool dks_guimode_active __attribute__((weak)) = false;
+#else
+bool dks_guimode_active = false;
+#endif
 
 static inline void console_lock_init(void) {
     if (!console_lock.initialized) {
@@ -152,6 +159,24 @@ static void safe_volatile_memmove(volatile uint8 *dest, const volatile uint8 *sr
     } else {
         for (uint32 i = count; i > 0; i--) {
             dest[i - 1] = src[i - 1];
+        }
+    }
+}
+
+// Scroll helper that assumes the caller already holds the console lock
+static void scrollUp_locked(uint16 lineNumber) {
+    uint32 source_start = lineNumber * screen_width * sd;
+    uint32 dest_start = 0;
+    uint32 copy_size = (screen_height - lineNumber) * screen_width * sd;
+
+    if (lineNumber > 0 && lineNumber < screen_height) {
+        safe_volatile_memmove(&vidmem[dest_start], &vidmem[source_start], copy_size);
+
+        // Clear the bottom lines
+        uint32 clear_start = (screen_height - lineNumber) * screen_width * sd;
+        for (uint32 i = 0; i < lineNumber * screen_width * sd; i += sd) {
+            vidmem[clear_start + i] = ' ';
+            vidmem[clear_start + i + 1] = (uint8)color;
         }
     }
 }
@@ -365,37 +390,14 @@ int tui_get_clicked_menu_item(int mouse_x, int mouse_y, int menu_x, int menu_y, 
 }
 
 // Essential print functions
-void print(const char* message) {
-    if (!message) return;
-    
-    int i = 0;
-    while (message[i] != '\0') {
-        printch(message[i]);
-        i++;
-    }
-}
-
-extern bool dks_guimode_active;
-
-void printch(char c) {
-    if (dks_guimode_active) {
-        return; // Suppress TTY writes while GUI mode is active to avoid framebuffer artifacts
-    }
-    // If the framebuffer TTY is active and ready, delegate to it so output remains visible
-    if (tty_is_ready() && tty_uses_graphics_backend()) {
-        tty_putc(c);
-        return;
-    }
-
-    console_lock_acquire();
-    
+static inline void console_putc_unlocked(char c) {
     if (c == '\n') {
         cursorY++;
         cursorX = 0;
     } else if (c == '\r') {
         cursorX = 0;
     } else if (c == '\t') {
-        cursorX = (cursorX + 8) & ~(8 - 1); // Round up to next multiple of 8
+        cursorX = (cursorX + 8) & ~(8 - 1);
     } else if (c == '\b') {
         if (cursorX > 0) {
             cursorX--;
@@ -406,19 +408,64 @@ void printch(char c) {
         vidmem[index + 1] = color;
         cursorX++;
     }
-    
-    // Handle screen wrapping
+
     if (cursorX >= screen_width) {
         cursorX = 0;
         cursorY++;
     }
-    
-    // Handle scrolling
+
     if (cursorY >= screen_height) {
-        scrollUp(1);
+        scrollUp_locked(1);
         cursorY = screen_height - 1;
     }
+}
+
+void print(const char* message) {
+    if (!message) return;
     
+    if (dks_guimode_active) {
+        return; // Suppress TTY writes while GUI mode is active to avoid framebuffer artifacts
+    }
+
+    // Fast path for graphics TTY: push the entire string through once
+    if (tty_is_ready() && tty_uses_graphics_backend()) {
+        tty_write(message);
+        return;
+    }
+
+    // Mirror to serial outside of the console lock to avoid blocking interrupts
+    if (debuglog_is_ready()) {
+        debuglog_write(message);
+    }
+
+    console_lock_acquire();
+
+    while (*message) {
+        console_putc_unlocked(*message++);
+    }
+
+    updateCursor();
+    console_lock_release();
+}
+
+void printch(char c) {
+    // Always output to serial for debugging
+    if (debuglog_is_ready()) {
+        debuglog_write_char(c);
+    }
+
+    if (dks_guimode_active) {
+        return; // Suppress TTY writes while GUI mode is active to avoid framebuffer artifacts
+    }
+
+    // If the framebuffer TTY is active and ready, delegate to it so output remains visible
+    if (tty_is_ready() && tty_uses_graphics_backend()) {
+        tty_putc(c);
+        return;
+    }
+
+    console_lock_acquire();
+    console_putc_unlocked(c);
     updateCursor();
     console_lock_release();
 }
@@ -431,35 +478,37 @@ void print_colored(const char* message, int foreground, int background) {
 }
 
 void print_dec(uint32 n) {
-    if (n == 0) {
-        printch('0');
-        return;
-    }
-    
     char buffer[12];
-    int i = 0;
-    
-    while (n > 0) {
-        buffer[i++] = '0' + (n % 10);
-        n /= 10;
+    char* end = buffer + sizeof(buffer);
+    char* ptr = end - 1;
+    *ptr = '\0';
+
+    if (n == 0) {
+        *--ptr = '0';
+    } else {
+        while (n > 0 && ptr > buffer) {
+            *--ptr = (char)('0' + (n % 10));
+            n /= 10;
+        }
     }
-    
-    while (i > 0) {
-        printch(buffer[--i]);
-    }
+
+    print(ptr);
 }
 
 void print_hex(uint32 n) {
-    print("0x");
-    
+    char buffer[11];
+    char* ptr = buffer;
+
+    *ptr++ = '0';
+    *ptr++ = 'x';
+
     for (int i = 7; i >= 0; i--) {
         uint8 digit = (n >> (i * 4)) & 0xF;
-        if (digit < 10) {
-            printch('0' + digit);
-        } else {
-            printch('A' + digit - 10);
-        }
+        *ptr++ = (digit < 10) ? (char)('0' + digit) : (char)('A' + digit - 10);
     }
+
+    *ptr = '\0';
+    print(buffer);
 }
 
 void clearScreen(void) {
@@ -519,23 +568,7 @@ void tui_draw_status_bar(int y, const char* left_text, const char* right_text, i
 // Missing basic functions that were referenced but not implemented
 void scrollUp(uint16 lineNumber) {
     console_lock_acquire();
-    
-    // Move all lines up by lineNumber positions
-    uint32 source_start = lineNumber * screen_width * sd;
-    uint32 dest_start = 0;
-    uint32 copy_size = (screen_height - lineNumber) * screen_width * sd;
-    
-    if (lineNumber > 0 && lineNumber < screen_height) {
-        safe_volatile_memmove(&vidmem[dest_start], &vidmem[source_start], copy_size);
-        
-        // Clear the bottom lines
-        uint32 clear_start = (screen_height - lineNumber) * screen_width * sd;
-        for (uint32 i = 0; i < lineNumber * screen_width * sd; i += sd) {
-            vidmem[clear_start + i] = ' ';
-            vidmem[clear_start + i + 1] = (uint8)color;
-        }
-    }
-    
+    scrollUp_locked(lineNumber);
     console_lock_release();
 }
 

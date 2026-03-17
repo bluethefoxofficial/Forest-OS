@@ -1,9 +1,9 @@
 #ifndef GRAPHICS_TYPES_H
 #define GRAPHICS_TYPES_H
 
-#include <stdint.h>
-#include <stdbool.h>
+#include "../stdint.h"
 #include <stddef.h>
+#include <stdbool.h>
 
 // Forward declarations
 typedef struct display_driver display_driver_t;
@@ -53,7 +53,7 @@ struct video_mode {
 
 // Framebuffer structure
 struct framebuffer {
-    void* virtual_addr;         // Mapped virtual address
+    uintptr_t virtual_addr;     // Mapped virtual address
     uintptr_t physical_addr;    // Physical framebuffer address
     size_t size;                // Framebuffer size in bytes
     uint32_t width;
@@ -61,14 +61,14 @@ struct framebuffer {
     uint32_t pitch;
     pixel_format_t format;
     uint32_t bpp;
-    
+
     // Double buffering support
-    void* back_buffer;
+    uintptr_t back_buffer;
     bool double_buffered;
-    
+
     // Hardware cursor support
     bool hw_cursor_available;
-    void* cursor_data;
+    uintptr_t cursor_data;
 };
 
 // Graphics capabilities
@@ -99,6 +99,7 @@ struct graphics_device {
     uint8_t function;
     
     // Memory regions
+    uintptr_t io_base;
     uintptr_t mmio_base;
     size_t mmio_size;
     uintptr_t framebuffer_base;
@@ -159,18 +160,19 @@ typedef struct {
 
 // Input event types for graphics system
 typedef enum {
-    INPUT_EVENT_NONE = 0,
-    INPUT_EVENT_KEY_PRESS,
-    INPUT_EVENT_KEY_RELEASE,
-    INPUT_EVENT_MOUSE_MOVE,
-    INPUT_EVENT_MOUSE_BUTTON_PRESS,
-    INPUT_EVENT_MOUSE_BUTTON_RELEASE,
-    INPUT_EVENT_MOUSE_WHEEL
-} input_event_type_t;
+    GFX_INPUT_EVENT_NONE = 0,
+    GFX_INPUT_EVENT_KEY_PRESS,
+    GFX_INPUT_EVENT_KEY_RELEASE,
+    GFX_INPUT_EVENT_MOUSE_MOVE,
+    GFX_INPUT_EVENT_MOUSE_BUTTON_PRESS,
+    GFX_INPUT_EVENT_MOUSE_BUTTON_RELEASE,
+    GFX_INPUT_EVENT_MOUSE_WHEEL
+} gfx_input_event_type_t;
 
-// Input event structure
+// Graphics-specific input event structure (for internal graphics use)
+// For evdev-compatible events, use input_event_t from input_event.h
 typedef struct {
-    input_event_type_t type;
+    gfx_input_event_type_t type;
     uint32_t timestamp;
     union {
         struct {
@@ -191,6 +193,10 @@ typedef struct {
             int32_t x, y;
         } mouse_wheel;
     };
-} input_event_t;
+} gfx_input_event_t;
+
+// For compatibility: include the standard input_event.h when needed
+// The input_event_t type from input_event.h is the canonical type for input events
+#include "../input_event.h"
 
 #endif // GRAPHICS_TYPES_H

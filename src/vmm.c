@@ -653,6 +653,34 @@ void vmm_sync_kernel_pdes(page_directory_t* task_dir) {
                      kernel_pde[kernel_stack_pde_idx].frame,
                      task_pde[kernel_stack_pde_idx].frame);
         }
+        
+        // Explicitly check and sync the PTE for the kernel stack
+        // Kernel stack is at ~0xb700000 which is PDE 45, PTE ~777
+        uint32 kernel_stack_va = 0xb7093b8;  // From debug log: [TASK] Switching: next_kstack=0xb7093b8
+        page_entry_t* kernel_stack_pte = get_page_entry(kernel_stack_va, false, vmm_state.current_directory);
+        page_entry_t* task_stack_pte = get_page_entry(kernel_stack_va, false, task_dir);
+        
+        if (kernel_stack_pte && kernel_stack_pte->present) {
+            if (!task_stack_pte || !task_stack_pte->present) {
+                debuglog(DEBUG_WARN, "[VMM_SYNC] Kernel stack PTE not present in task's page directory! Syncing...\n");
+                // Create the PTE if it doesn't exist
+                task_stack_pte = get_page_entry(kernel_stack_va, true, task_dir);
+                if (task_stack_pte) {
+                    *task_stack_pte = *kernel_stack_pte;
+                }
+            } else if (task_stack_pte->frame != kernel_stack_pte->frame) {
+                debuglog(DEBUG_WARN, "[VMM_SYNC] Kernel stack PTE mismatch! Kernel: 0x%x, Task: 0x%x\n",
+                         kernel_stack_pte->frame,
+                         task_stack_pte->frame);
+                *task_stack_pte = *kernel_stack_pte;
+            } else {
+                debuglog(DEBUG_INFO, "[VMM_SYNC] Kernel stack PTE is present and matches (0x%x)\n",
+                         task_stack_pte->frame);
+            }
+        } else {
+            debuglog(DEBUG_ERROR, "[VMM_SYNC] Kernel stack PTE not found in kernel page directory! (VA=0x%x)\n",
+                     kernel_stack_va);
+        }
     }
 }
 

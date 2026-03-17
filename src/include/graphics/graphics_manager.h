@@ -31,6 +31,8 @@ graphics_result_t graphics_unmap_framebuffer(framebuffer_t* fb);
 // Drawing operations
 graphics_result_t graphics_clear_screen(graphics_color_t color);
 graphics_result_t graphics_draw_pixel(int32_t x, int32_t y, graphics_color_t color);
+graphics_result_t graphics_draw_pixels_batch(const int32_t* x_coords, const int32_t* y_coords,
+                                           graphics_color_t color, uint32_t count);
 graphics_result_t graphics_get_pixel(int32_t x, int32_t y, graphics_color_t* color);
 graphics_result_t graphics_draw_rect(const graphics_rect_t* rect, 
                                    graphics_color_t color, bool filled);
@@ -82,6 +84,23 @@ graphics_result_t graphics_get_text_bounds(const char* text, font_t* font,
 graphics_result_t graphics_enable_double_buffering(bool enable);
 graphics_result_t graphics_swap_buffers(void);
 graphics_result_t graphics_wait_for_vsync(void);
+
+// Enhanced cursor system
+#include "enhanced_cursor.h"
+
+// Antialiased drawing operations (smooth edges)
+graphics_result_t graphics_draw_circle_aa(int32_t cx, int32_t cy, int32_t radius,
+                                         graphics_color_t color, bool filled);
+graphics_result_t graphics_draw_ring_aa(int32_t cx, int32_t cy, int32_t radius,
+                                       int32_t thickness, graphics_color_t color);
+graphics_result_t graphics_draw_rounded_rect_aa(const graphics_rect_t* rect,
+                                               int32_t corner_radius,
+                                               graphics_color_t color, bool filled);
+graphics_result_t graphics_draw_line_aa(int32_t x1, int32_t y1, int32_t x2, int32_t y2,
+                                       graphics_color_t color);
+
+// Alpha-blended pixel write (for transparency)
+graphics_result_t graphics_draw_pixel_blend(int32_t x, int32_t y, graphics_color_t color);
 
 // Input handling for graphics system
 graphics_result_t graphics_register_input_handler(

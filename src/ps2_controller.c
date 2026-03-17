@@ -17,172 +17,197 @@ static void print_hex8(uint8 value) {
 static ps2_controller_status_t controller_status;
 static bool controller_initialized = false;
 static bool controller_translation_enabled = true;
+static bool mouse_port_available = false;
 
 int ps2_controller_init(void) {
     if (controller_initialized) {
         return 0;
     }
 
+    // Simple debug message to verify this function is called
+    print("PS2_INIT_START\n");
+    print("[PS/2] Starting comprehensive PS/2 controller initialization...\n");
+
     uint8 config_byte;
-    bool mouse_port_available = true;
-    
-    print("[PS/2] Initializing PS/2 controller...\n");
-    
-    // Disable both ports
-    if (!ps2_controller_send_command(PS2_CMD_DISABLE_KEYBOARD_PORT)) {
-        print("[PS/2] Failed to disable keyboard port\n");
-        return -1;
-    }
-    
-    if (!ps2_controller_send_command(PS2_CMD_DISABLE_MOUSE_PORT)) {
-        print("[PS/2] Failed to disable mouse port\n");
-        return -1;
-    }
-    
-    // Flush output buffer multiple times to ensure clean state
-    for (int flush_count = 0; flush_count < 10; flush_count++) {
-        if (!(inportb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT_BUFFER_FULL)) {
-            break;
-        }
-        inportb(PS2_DATA_PORT);
-        // Small delay to let controller settle
-        for (volatile int delay = 0; delay < 1000; delay++);
-    }
-    
-    // Read configuration byte
+    bool dual_channel = false;
+
+    // Step 1: Disable devices (already done in kernel.c)
+    // Step 2: Flush output buffer (already done in kernel.c)
+
+    // Step 3: Set Controller Configuration Byte
+    // Read current configuration byte
     if (!ps2_controller_send_command(PS2_CMD_READ_CONFIG_BYTE)) {
         print("[PS/2] Failed to read config byte\n");
         return -1;
     }
-    
+
     if (!ps2_controller_wait_output_ready()) {
         print("[PS/2] Timeout waiting for config byte\n");
         return -1;
     }
-    
+
     config_byte = ps2_controller_read_data();
     controller_translation_enabled = (config_byte & PS2_CONFIG_KEYBOARD_TRANSLATE) != 0;
     print("[PS/2] Current config byte: 0x");
     print_hex8(config_byte);
     print("\n");
-    
-    // Modify configuration byte: disable translation, interrupts during init
-    config_byte &= ~(PS2_CONFIG_KEYBOARD_INTERRUPT | PS2_CONFIG_MOUSE_INTERRUPT | PS2_CONFIG_KEYBOARD_TRANSLATE);
-    config_byte |= (PS2_CONFIG_KEYBOARD_DISABLE | PS2_CONFIG_MOUSE_DISABLE);
-    
-    // Write configuration byte
+
+     // Disable interrupts and translation during initialization
+     config_byte &= ~(PS2_CONFIG_KEYBOARD_INTERRUPT | PS2_CONFIG_MOUSE_INTERRUPT);
+     config_byte |= PS2_CONFIG_KEYBOARD_TRANSLATE;  // Enable translation for compatibility
+
     if (!ps2_controller_write_config(config_byte)) {
-        print("[PS/2] Failed to write config byte\n");
+        print("[PS/2] Failed to write initial config byte\n");
         return -1;
     }
-    
-    // Controller self-test
+
+    // Step 4: Controller Self Test
     if (!ps2_controller_send_command(PS2_CMD_SELF_TEST)) {
         print("[PS/2] Failed to send self-test command\n");
         return -1;
     }
-    
+
     if (!ps2_controller_wait_output_ready()) {
         print("[PS/2] Timeout waiting for self-test result\n");
         return -1;
     }
-    
+
     uint8 self_test_result = ps2_controller_read_data();
     if (self_test_result != PS2_RESPONSE_CONTROLLER_SELF_TEST_PASSED) {
-        print("[PS/2] Self-test failed: 0x");
+        print("[PS/2] Self-test returned 0x");
         print_hex8(self_test_result);
-        print("\n");
+        print(" (expected 0x55) - continuing anyway as many systems work despite this\n");
+        // Don't fail - many emulators/systems work fine even if self-test fails
+    } else {
+        print("[PS/2] Controller self-test passed\n");
+    }
+
+    // Step 5: Determine if there are 2 channels
+    // Re-enable second port and check if it affects config byte
+    if (!ps2_controller_send_command(PS2_CMD_ENABLE_MOUSE_PORT)) {
+        print("[PS/2] Warning: Could not enable mouse port for dual-channel test\n");
+    }
+
+    // Read config byte again
+    if (!ps2_controller_send_command(PS2_CMD_READ_CONFIG_BYTE)) {
+        print("[PS/2] Failed to re-read config byte for dual-channel test\n");
         return -1;
     }
-    
-    print("[PS/2] Self-test passed\n");
-    
-    // Test keyboard port - but don't fail completely if it doesn't pass
-    // Some emulators and systems without keyboards will fail this test
-    // but still accept keyboard input fine
-    bool keyboard_port_ok = false;
-    if (!ps2_controller_send_command(PS2_CMD_TEST_KEYBOARD_PORT)) {
-        print("[PS/2] Warning: Failed to send keyboard port test command\n");
-    } else if (!ps2_controller_wait_output_ready()) {
-        print("[PS/2] Warning: Timeout waiting for keyboard port test result\n");
+
+    if (!ps2_controller_wait_output_ready()) {
+        print("[PS/2] Timeout waiting for config byte in dual-channel test\n");
+        return -1;
+    }
+
+    uint8 config_after_mouse_enable = ps2_controller_read_data();
+
+    // Check if bit 5 (mouse clock) is clear, indicating dual channel controller
+    if ((config_after_mouse_enable & PS2_CONFIG_MOUSE_DISABLE) == 0) {
+        dual_channel = true;
+        print("[PS/2] Dual-channel controller detected\n");
     } else {
-        uint8 kbd_test_result = ps2_controller_read_data();
-        if (kbd_test_result != 0x00) {
-            print("[PS/2] Warning: Keyboard port test returned: 0x");
-            print_hex8(kbd_test_result);
-            print(" (continuing anyway)\n");
+        print("[PS/2] Single-channel controller detected\n");
+    }
+
+    // Disable mouse port again for now
+    if (!ps2_controller_send_command(PS2_CMD_DISABLE_MOUSE_PORT)) {
+        print("[PS/2] Warning: Could not disable mouse port after dual-channel test\n");
+    }
+
+    // Step 6: Perform Interface Tests
+    print("[PS/2] Testing keyboard port...\n");
+    if (!ps2_controller_send_command(PS2_CMD_TEST_KEYBOARD_PORT)) {
+        print("[PS/2] Failed to send keyboard port test command\n");
+        return -1;
+    }
+
+    if (!ps2_controller_wait_output_ready()) {
+        print("[PS/2] Timeout waiting for keyboard port test result\n");
+        return -1;
+    }
+
+    uint8 keyboard_test_result = ps2_controller_read_data();
+    bool keyboard_ok = (keyboard_test_result == 0x00);
+
+    if (keyboard_ok) {
+        print("[PS/2] Keyboard port test passed\n");
+    } else {
+        print("[PS/2] Keyboard port test failed: 0x");
+        print_hex8(keyboard_test_result);
+        print(" (continuing anyway)\n");
+    }
+
+    if (dual_channel) {
+        print("[PS/2] Testing mouse port...\n");
+        if (!ps2_controller_send_command(PS2_CMD_TEST_MOUSE_PORT)) {
+            print("[PS/2] Failed to send mouse port test command\n");
+            return -1;
+        }
+
+        if (!ps2_controller_wait_output_ready()) {
+            print("[PS/2] Timeout waiting for mouse port test result\n");
+            return -1;
+        }
+
+        uint8 mouse_test_result = ps2_controller_read_data();
+        bool mouse_ok = (mouse_test_result == 0x00);
+
+        if (mouse_ok) {
+            print("[PS/2] Mouse port test passed\n");
         } else {
-            print("[PS/2] Keyboard port test passed\n");
-            keyboard_port_ok = true;
+            print("[PS/2] Mouse port test failed: 0x");
+            print_hex8(mouse_test_result);
+            print(" (continuing anyway)\n");
         }
     }
-    (void)keyboard_port_ok;  // We continue regardless
-    
-    // Enable keyboard port
+
+    // Step 7: Enable Devices
+    print("[PS/2] Enabling keyboard port...\n");
     if (!ps2_controller_send_command(PS2_CMD_ENABLE_KEYBOARD_PORT)) {
         print("[PS/2] Failed to enable keyboard port\n");
         return -1;
     }
 
-    // Test mouse port
-    if (!ps2_controller_send_command(PS2_CMD_TEST_MOUSE_PORT)) {
-        print("[PS/2] Failed to send mouse port test command\n");
-        mouse_port_available = false;
-    } else if (!ps2_controller_wait_output_ready()) {
-        print("[PS/2] Timeout waiting for mouse port test result\n");
-        mouse_port_available = false;
-    } else {
-        uint8 mouse_test_result = ps2_controller_read_data();
-        if (mouse_test_result != 0x00) {
-            print("[PS/2] Mouse port test failed: 0x");
-            print_hex8(mouse_test_result);
-            print("\n");
-            mouse_port_available = false;
-        } else {
-            print("[PS/2] Mouse port test passed\n");
-        }
-    }
-
-    // Enable mouse port if available
-    if (mouse_port_available) {
+    if (dual_channel) {
+        print("[PS/2] Enabling mouse port...\n");
         if (!ps2_controller_send_command(PS2_CMD_ENABLE_MOUSE_PORT)) {
-            print("[PS/2] Failed to enable mouse port\n");
-            mouse_port_available = false;
+            print("[PS/2] Warning: Failed to enable mouse port\n");
         }
     }
 
-    // Re-read and enable interrupts
-    if (!ps2_controller_read_config(&config_byte)) {
-        print("[PS/2] Failed to read config byte for interrupt enable\n");
+    // Step 8: Restore Controller Configuration Byte with interrupts enabled
+    if (!ps2_controller_send_command(PS2_CMD_READ_CONFIG_BYTE)) {
+        print("[PS/2] Failed to read final config byte\n");
         return -1;
     }
 
-    config_byte &= ~(PS2_CONFIG_KEYBOARD_DISABLE | PS2_CONFIG_MOUSE_DISABLE);
+    if (!ps2_controller_wait_output_ready()) {
+        print("[PS/2] Timeout waiting for final config byte\n");
+        return -1;
+    }
+
+    config_byte = ps2_controller_read_data();
+
+    // Enable interrupts for working ports
     config_byte |= PS2_CONFIG_KEYBOARD_INTERRUPT;
-    if (mouse_port_available) {
+    if (dual_channel) {
         config_byte |= PS2_CONFIG_MOUSE_INTERRUPT;
     }
 
+     // Keep translation enabled for compatibility
+     config_byte |= PS2_CONFIG_KEYBOARD_TRANSLATE;
+
     if (!ps2_controller_write_config(config_byte)) {
-        print("[PS/2] Failed to apply interrupt config\n");
+        print("[PS/2] Failed to write final config byte\n");
         return -1;
     }
 
     print("[PS/2] Final config byte: 0x");
     print_hex8(config_byte);
     print("\n");
-    
-    // Update status
-    controller_status.keyboard_enabled = true;
-    controller_status.mouse_enabled = mouse_port_available;
-    controller_status.keyboard_interrupt_enabled = true;
-    controller_status.mouse_interrupt_enabled = mouse_port_available;
-    // Translation is now disabled as part of our initialization
-    controller_translation_enabled = false;
-    controller_status.translation_enabled = false;
+
     controller_initialized = true;
-    
-    print("[PS/2] Controller initialization complete\n");
+    print("[PS/2] PS/2 controller initialization completed successfully\n");
     return 0;
 }
 
@@ -259,6 +284,31 @@ bool ps2_controller_wait_output_ready(void) {
     return false;
 }
 
+static bool ps2_wait_for_device_response(bool expect_aux_data, uint8* response) {
+    uint32 timeout = PS2_TIMEOUT;
+
+    while (timeout-- > 0) {
+        uint8 status = inportb(PS2_STATUS_PORT);
+        if (!(status & PS2_STATUS_OUTPUT_BUFFER_FULL)) {
+            continue;
+        }
+
+        uint8 data = inportb(PS2_DATA_PORT);
+        bool is_aux_data = (status & PS2_STATUS_AUX_OUTPUT_BUFFER) != 0;
+
+        if (is_aux_data == expect_aux_data) {
+            if (response) {
+                *response = data;
+            }
+            return true;
+        }
+
+        /* Drop bytes from the other PS/2 port while waiting for our response. */
+    }
+
+    return false;
+}
+
 bool ps2_send_keyboard_command(uint8 command) {
     int retries = 3;
     
@@ -267,11 +317,11 @@ bool ps2_send_keyboard_command(uint8 command) {
             continue;
         }
         
-        if (!ps2_controller_wait_output_ready()) {
+        uint8 response = 0;
+        if (!ps2_wait_for_device_response(false, &response)) {
             continue;
         }
-        
-        uint8 response = ps2_controller_read_data();
+
         if (response == PS2_RESPONSE_ACK) {
             return true;
         } else if (response == PS2_RESPONSE_RESEND) {
@@ -293,11 +343,11 @@ bool ps2_send_keyboard_data(uint8 data) {
             continue;
         }
         
-        if (!ps2_controller_wait_output_ready()) {
+        uint8 response = 0;
+        if (!ps2_wait_for_device_response(false, &response)) {
             continue;
         }
-        
-        uint8 response = ps2_controller_read_data();
+
         if (response == PS2_RESPONSE_ACK) {
             return true;
         } else if (response == PS2_RESPONSE_RESEND) {
@@ -359,15 +409,15 @@ void ps2_controller_minimal_init(void) {
     // Try to read and modify config to enable keyboard interrupt
     uint8 config = 0;
     if (ps2_controller_read_config(&config)) {
-        config |= PS2_CONFIG_KEYBOARD_INTERRUPT;
-        config &= ~PS2_CONFIG_KEYBOARD_DISABLE;
-        ps2_controller_write_config(config);
-    } else {
-        // If we can't read config, try writing a reasonable default
-        // Enable keyboard interrupt, disable mouse, no translation
-        ps2_controller_send_command(PS2_CMD_WRITE_CONFIG_BYTE);
-        ps2_controller_send_data(PS2_CONFIG_KEYBOARD_INTERRUPT | PS2_CONFIG_SYSTEM_FLAG);
-    }
+         config |= PS2_CONFIG_KEYBOARD_INTERRUPT | PS2_CONFIG_KEYBOARD_TRANSLATE;
+         config &= ~PS2_CONFIG_KEYBOARD_DISABLE;
+         ps2_controller_write_config(config);
+     } else {
+         // If we can't read config, try writing a reasonable default
+         // Enable keyboard interrupt, disable mouse, enable translation
+         ps2_controller_send_command(PS2_CMD_WRITE_CONFIG_BYTE);
+         ps2_controller_send_data(PS2_CONFIG_KEYBOARD_INTERRUPT | PS2_CONFIG_SYSTEM_FLAG | PS2_CONFIG_KEYBOARD_TRANSLATE);
+     }
 
     controller_status.keyboard_enabled = true;
     controller_status.keyboard_interrupt_enabled = true;

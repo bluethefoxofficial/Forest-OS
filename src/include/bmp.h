@@ -33,8 +33,10 @@ typedef struct {
     uint32 width;
     uint32 height;
     uint32 bpp;
+    uint32 row_stride;     // Bytes per row (including padding)
     bool top_down;         // true if height is negative (top-down), false if bottom-up
     bool owns_data;        // true if pixel_data was heap-allocated and must be freed
+    uint8 format;          // 0 = BMP, 1 = TGA, 2 = PNG, 255 = unknown
     uint8* pixel_data;     // Raw pixel data (BGR or BGRA format)
     uint32 pixel_data_size;
 } bmp_image_t;
@@ -46,11 +48,12 @@ typedef enum {
     BMP_ERROR_UNSUPPORTED_FORMAT,
     BMP_ERROR_OUT_OF_MEMORY,
     BMP_ERROR_FILE_NOT_FOUND,
-    BMP_ERROR_INVALID_PARAMETER
+    BMP_ERROR_INVALID_PARAMETER,
+    BMP_ERROR_DECODER_UNAVAILABLE
 } bmp_result_t;
 
-// Load a BMP image from the filesystem
-// Returns BMP_SUCCESS on success, error code otherwise
+// Load an image (BMP/TGA/PNG) from the filesystem.
+// Returns BMP_SUCCESS on success, error code otherwise.
 bmp_result_t bmp_load_from_file(const char* path, bmp_image_t** image);
 
 // Free a loaded BMP image

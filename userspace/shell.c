@@ -7,6 +7,8 @@
 #include "../src/include/libc/auth.h"
 
 #define MAX_INPUT 128
+#define MOTD_PATH "/usr/share/motd"
+#define LOCALE_PATH "/usr/share/locales/default.locale"
 
 static bool starts_with(const char* text, const char* prefix) {
     size_t idx = 0;
@@ -34,6 +36,40 @@ static void handle_help(void) {
     printf("  shutdown    - request ACPI poweroff\n");
     printf("  reboot      - request ACPI reboot\n");
     printf("  exit        - return to kernel\n");
+}
+
+static void show_motd(void) {
+    FILE* fp = fopen(MOTD_PATH, "r");
+    if (!fp) {
+        return;
+    }
+    char line[128];
+    while (fgets(line, sizeof(line), fp)) {
+        printf("%s", line);
+    }
+    fclose(fp);
+    printf("\n");
+}
+
+static void show_locale(void) {
+    FILE* fp = fopen(LOCALE_PATH, "r");
+    if (!fp) {
+        return;
+    }
+    char line[128];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "LANG=", 5) == 0) {
+            char* lang = line + 5;
+            size_t len = strlen(lang);
+            while (len > 0 && (lang[len - 1] == '\n' || lang[len - 1] == '\r')) {
+                lang[len - 1] = '\0';
+                len--;
+            }
+            printf("Locale: %s\n", lang);
+            break;
+        }
+    }
+    fclose(fp);
 }
 
 static void handle_uname(void) {
@@ -156,6 +192,8 @@ int main(int argc, char **argv) {
     (void)argv;
     auth_user_info_t current_user;
     refresh_user(&current_user);
+    show_motd();
+    show_locale();
     printf("Forest Shell (userspace) - logged in as %s\n",
            current_user.name[0] ? current_user.name : "root");
     printf("Type 'help' for a list of commands.\n");

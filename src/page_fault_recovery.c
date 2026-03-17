@@ -279,24 +279,11 @@ bool page_fault_validate_address_access(uint32_t addr, bool is_write) {
 
 void page_fault_premap_critical_regions(void) {
     // Pre-map critical kernel regions to prevent faults during critical operations
+    // NOTE: This is optional and can be skipped if causing boot issues
     
-    // Map kernel stack guard pages
-    for (uint32_t addr = 0x001F0000; addr < 0x00200000; addr += 0x1000) {
-        uint32_t phys_page = pmm_alloc_frame();
-        if (phys_page != 0) {
-            vmm_map_page(vmm_get_current_page_directory(), addr, phys_page, 
-                        PAGE_PRESENT | PAGE_WRITABLE);
-        }
-    }
-    
-    // Pre-map common user space pages to reduce page faults
-    for (uint32_t addr = MEMORY_USER_START; addr < MEMORY_USER_START + 0x10000; addr += 0x1000) {
-        uint32_t phys_page = pmm_alloc_frame();
-        if (phys_page != 0) {
-            vmm_map_page(vmm_get_current_page_directory(), addr, phys_page,
-                        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
-        }
-    }
+    // Skip pre-mapping for now - it's not essential for boot
+    // The page fault handler will map pages on demand
+    return;
 }
 
 void page_fault_recovery_init(void) {

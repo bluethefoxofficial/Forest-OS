@@ -1,6 +1,8 @@
 #include "include/driver.h"
 #include "include/util.h"
 #include "include/string.h"
+#include "include/task.h"
+#include "include/screen.h"
 
 #define DRIVER_MAX_COUNT 32
 #define DRIVER_EVENT_QUEUE_SIZE 64
@@ -75,6 +77,21 @@ bool driver_register(driver_t* driver) {
     if (ok) {
         driver_emit_event(event_id, driver->driver_class,
                           DRIVER_EVENT_STATUS_READY, 0, 0);
+
+        // Create a kernel task for the driver if it has a main function
+        if (driver->main) {
+            task_t* driver_task = task_create_kernel(driver->main, driver->name, 4096);
+            if (driver_task) {
+                print("[DRIVER] Created kernel task for driver: ");
+                print(driver->name);
+                print("\n");
+            } else {
+                print("[DRIVER] Failed to create kernel task for driver: ");
+                print(driver->name);
+                print("\n");
+            }
+        }
+
         return true;
     }
 

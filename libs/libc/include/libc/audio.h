@@ -1,7 +1,7 @@
 #ifndef LIBC_AUDIO_H
 #define LIBC_AUDIO_H
 
-#include "../types.h"
+#include "../../../libs/forestcore/include/types.h"
 #include <stdbool.h>
 #include <stddef.h>
 

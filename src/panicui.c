@@ -18,7 +18,7 @@
 #include "include/ps2_keyboard.h"
 #include "include/libc/stdio.h"
 #include "include/graphics/graphics_manager.h"
-#include "include/graphics/font_renderer.h"
+#include "include/graphics/font8x8.h"
 
 // =============================================================================
 // PANIC UI CONFIGURATION
@@ -187,9 +187,71 @@ static bool panic_poll_direct_key(key_code_t* out_code) {
 // DIRECT GRAPHICS DRAWING HELPERS
 // =============================================================================
 
+static void panic_draw_pixel_direct(int32_t x, int32_t y, graphics_color_t color) {
+    if (x < 0 || x >= (int32_t)g_panic.screen_width || 
+        y < 0 || y >= (int32_t)g_panic.screen_height) {
+        return;
+    }
+    graphics_draw_pixel(x, y, color);
+}
+
 static void panic_fill_rect(int32_t x, int32_t y, uint32_t w, uint32_t h, graphics_color_t color) {
-    graphics_rect_t rect = {x, y, w, h};
-    graphics_draw_rect(&rect, color, true);
+    for (uint32_t dy = 0; dy < h; dy++) {
+        for (uint32_t dx = 0; dx < w; dx++) {
+            panic_draw_pixel_direct(x + dx, y + dy, color);
+        }
+    }
+}
+
+static void panic_draw_line_direct(int32_t x1, int32_t y1, int32_t x2, int32_t y2, graphics_color_t color) {
+    int32_t dx = x2 - x1;
+    int32_t dy = y2 - y1;
+    int32_t steps = (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx) : (dy < 0 ? -dy : dy);
+    if (steps == 0) steps = 1;
+    
+    float x_inc = (float)dx / steps;
+    float y_inc = (float)dy / steps;
+    
+    float x = x1;
+    float y = y1;
+    for (int32_t i = 0; i <= steps; i++) {
+        panic_draw_pixel_direct((int32_t)x, (int32_t)y, color);
+        x += x_inc;
+        y += y_inc;
+    }
+}
+
+// Draw a single character using built-in 8x8 font
+static void panic_draw_char(int32_t x, int32_t y, char c, graphics_color_t fg_color, graphics_color_t bg_color) {
+    if (c < 0 || c >= 127) c = '?';
+    
+    const char* glyph = font8x8_basic[(uint8_t)c];
+    
+    for (int row = 0; row < 8; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 8; col++) {
+            bool is_fg = (bits & (1 << col)) != 0;
+            if (is_fg) {
+                panic_draw_pixel_direct(x + col, y + row, fg_color);
+            } else {
+                panic_draw_pixel_direct(x + col, y + row, bg_color);
+            }
+        }
+    }
+}
+
+// Draw text at pixel position using built-in font
+static void panic_draw_text(int32_t x, int32_t y, const char* text, graphics_color_t color) {
+    if (!text) return;
+    
+    graphics_color_t bg_color = PANIC_COLOR_BG;
+    int32_t cur_x = x;
+    
+    while (*text) {
+        panic_draw_char(cur_x, y, *text, color, bg_color);
+        cur_x += 8;
+        text++;
+    }
 }
 
 // Simple crosshair cursor for panic UI
@@ -202,16 +264,11 @@ static void panic_draw_cursor(void) {
     int32_t y = g_panic.mouse_y;
 
     // Horizontal line
-    graphics_draw_line(x - 6, y, x + 6, y, PANIC_COLOR_WHITE);
+    panic_draw_line_direct(x - 6, y, x + 6, y, PANIC_COLOR_WHITE);
     // Vertical line
-    graphics_draw_line(x, y - 6, x, y + 6, PANIC_COLOR_WHITE);
+    panic_draw_line_direct(x, y - 6, x, y + 6, PANIC_COLOR_WHITE);
     // Center dot
-    graphics_draw_pixel(x, y, PANIC_COLOR_RED);
-}
-
-// Draw text at pixel position
-static void panic_draw_text(int32_t x, int32_t y, const char* text, graphics_color_t color) {
-    graphics_draw_text(x, y, text, g_panic.font, color);
+    panic_draw_pixel_direct(x, y, PANIC_COLOR_RED);
 }
 
 // =============================================================================
@@ -540,7 +597,7 @@ static void panic_render_frame(void) {
     // Draw mouse cursor last so it sits on top
     panic_draw_cursor();
 
-    // Swap buffers
+    // Swap buffers for double buffering
     graphics_swap_buffers();
 }
 
@@ -685,8 +742,13 @@ static void panic_collect_registers(void) {
 }
 
 static void panic_collect_stack_trace(void) {
-    uint32_t* ebp;
-    __asm__ volatile("mov %%ebp, %0" : "=r"(ebp));
+#ifdef __x86_64__
+    uint64_t* rbp;
+    __asm__ volatile("mov %%rbp, %0" : "=r"(rbp));
+#else
+    uint32_t* rbp;
+    __asm__ volatile("mov %%ebp, %0" : "=r"(rbp));
+#endif
 
     g_panic.stack_count = 0;
 
@@ -694,18 +756,32 @@ static void panic_collect_stack_trace(void) {
         g_panic.stack_trace[g_panic.stack_count++] = g_panic.regs.eip;
     }
 
-    for (int i = 0; i < 15 && ebp != NULL && g_panic.stack_count < 16; i++) {
-        if ((uint32_t)ebp < 0xC0000000 || (uint32_t)ebp > 0xFFFFFFFF) {
+    for (int i = 0; i < 15 && rbp != NULL && g_panic.stack_count < 16; i++) {
+#ifdef __x86_64__
+        if ((uint64_t)rbp < 0xC0000000 || (uint64_t)rbp > 0xFFFFFFFFFFFFFFFF) {
+            return;
+        }
+
+        uint64_t ret_addr = *(rbp + 1);
+        if (ret_addr < 0xC0000000 || ret_addr > 0xFFFFFFFFFFFFFFFF) {
             break;
         }
 
-        uint32_t ret_addr = *(ebp + 1);
+        g_panic.stack_trace[g_panic.stack_count++] = (uint32_t)ret_addr;
+        rbp = (uint64_t*)*rbp;
+#else
+        if ((uint32_t)rbp < 0xC0000000 || (uint32_t)rbp > 0xFFFFFFFF) {
+            return;
+        }
+
+        uint32_t ret_addr = *(rbp + 1);
         if (ret_addr < 0xC0000000 || ret_addr > 0xFFFFFFFF) {
             break;
         }
 
         g_panic.stack_trace[g_panic.stack_count++] = ret_addr;
-        ebp = (uint32_t*)*ebp;
+        rbp = (uint32_t*)*rbp;
+#endif
     }
 }
 
@@ -738,18 +814,9 @@ graphics_result_t panicui_init(void) {
     g_panic.mouse_right = false;
     g_panic.mouse_enabled = false;
 
-    // Get system font
-    if (!font_renderer_is_initialized()) {
-        font_renderer_init();
-    }
+    g_panic.font = NULL;
 
-    if (font_get_system_font(&g_panic.font) != GRAPHICS_SUCCESS || !g_panic.font) {
-        g_panic.font = NULL;
-        debuglog(DEBUG_WARN, "[PanicUI] No system font available, using default\n");
-    }
-
-    // Disable double buffering for panic - write directly to screen
-    graphics_enable_double_buffering(false);
+    graphics_enable_double_buffering(true);
 
     g_panic.initialized = true;
     g_panic.current_page = PANIC_PAGE_OVERVIEW;

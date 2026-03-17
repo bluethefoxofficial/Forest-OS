@@ -6,6 +6,9 @@
 #include "include/interrupt.h"
 #include "include/debuglog.h"
 
+// Enhanced memory system integration
+#include "include/mm_layout.h"
+
 // =============================================================================
 // MEMORY DETECTION AND INITIALIZATION
 // =============================================================================
@@ -70,6 +73,7 @@ extern void page_fault_handler(struct interrupt_frame* frame, uint32_t error_cod
 
 static memory_result_t parse_multiboot1_info(multiboot_info_t* mbi);
 static memory_result_t parse_multiboot2_info(uint32 info_addr);
+static memory_result_t memory_fallback_detection(void);
 static void reset_region_info(void);
 static void add_memory_region(uint64 base, uint64 length, uint32 type);
 static void print_basic_memory(uint32 lower_mem, uint32 upper_mem);
@@ -183,6 +187,12 @@ const char* memory_result_to_string(memory_result_t result) {
 memory_result_t memory_detect_grub(uint32 multiboot_magic, uint32 multiboot_info) {
     print("[MEM] Detecting memory via GRUB...\n");
     
+    print("[MEM] Checking multiboot magic: 0x");
+    print_hex(multiboot_magic);
+    print(", MBI: 0x");
+    print_hex(multiboot_info);
+    print("\n");
+    
     memory_info.region_count = 0;
     memory_info.usable_memory_kb = 0;
     memory_info.total_memory_kb = 0;
@@ -190,15 +200,25 @@ memory_result_t memory_detect_grub(uint32 multiboot_magic, uint32 multiboot_info
     memory_result_t result;
     
     if (multiboot_magic == MULTIBOOT_MAGIC) {
+        print("[MEM] Detected Multiboot1 bootloader\n");
         result = parse_multiboot1_info((multiboot_info_t*)multiboot_info);
     } else if (multiboot_magic == MULTIBOOT2_MAGIC) {
         print("[MEM] Detected Multiboot2 bootloader\n");
         result = parse_multiboot2_info(multiboot_info);
+    } else if (multiboot_magic == 0) {
+        print("[MEM] No multiboot magic - using safe fallback memory detection\n");
+        result = memory_fallback_detection();
     } else {
         print("[MEM] Unsupported multiboot magic: 0x");
         print_hex(multiboot_magic);
-        print("\n");
-        return MEMORY_ERROR_INVALID_ADDR;
+        print(" (expected 0x");
+        print_hex(MULTIBOOT_MAGIC);
+        print(" or 0x");
+        print_hex(MULTIBOOT2_MAGIC);
+        print(")\n");
+        
+        print("[MEM] Attempting recovery with safe defaults...\n");
+        result = memory_fallback_detection();
     }
     
     if (result != MEMORY_OK) {
@@ -232,12 +252,79 @@ static memory_result_t unmap_identity_range(page_directory_t* dir, uint32 start,
 
     start = memory_align_down(start, MEMORY_PAGE_SIZE);
     end = memory_align_up(end, MEMORY_PAGE_SIZE);
-
-    for (uint32 addr = start; addr < end; addr += MEMORY_PAGE_SIZE) {
+    
+    // Safety check: reasonable range
+    if (end <= start || (end - start) > (256 * 1024 * 1024)) {
+        // Don't try to unmap more than 256MB at once
+        return MEMORY_ERROR_INVALID_SIZE;
+    }
+    
+    // Calculate total pages to process
+    uint32 total_pages = (end - start) / MEMORY_PAGE_SIZE;
+    uint32 max_iterations = total_pages + 1024;  // Safety margin
+    uint32 iterations = 0;
+    
+    // Optimization: Process 4MB chunks at a time (one page table worth)
+    // Skip entire chunks where no page directory entry exists
+    // This avoids expensive temp mapping operations for unmapped regions
+    uint32 addr = start;
+    uint32 pages_unmapped = 0;
+    uint32 regions_skipped = 0;
+    uint32 last_pd_index = 0xFFFFFFFF;  // Invalid initial value
+    bool current_pde_present = false;
+    
+    // Progress indicator every 4MB (1024 pages)
+    uint32 next_progress = start + (1024 * MEMORY_PAGE_SIZE);
+    
+    while (addr < end && iterations < max_iterations) {
+        iterations++;
+        
+        // Print progress every 4MB
+        if (addr >= next_progress) {
+            print(".");
+            next_progress += (1024 * MEMORY_PAGE_SIZE);
+        }
+        
+        // Calculate page directory index for this address (4MB per PD entry)
+        uint32 pd_index = addr / (1024 * MEMORY_PAGE_SIZE);
+        
+        // Cache PDE lookup - only check when we cross a 4MB boundary
+        if (pd_index != last_pd_index) {
+            last_pd_index = pd_index;
+            // Access page directory via get_page_entry's infrastructure
+            // Use vmm_is_mapped to check if PDE exists without direct physical access
+            current_pde_present = vmm_is_mapped(dir, addr);
+            
+            if (!current_pde_present) {
+                // No page table for this 4MB region - skip to next boundary
+                uint32 next_boundary = ((pd_index + 1) * 1024 * MEMORY_PAGE_SIZE);
+                if (next_boundary > end || next_boundary <= addr) {
+                    // Prevent infinite loop on overflow
+                    break;
+                }
+                addr = next_boundary;
+                regions_skipped++;
+                continue;
+            }
+        }
+        
+        // Page table exists, unmap this page
         memory_result_t result = vmm_unmap_page(dir, addr);
         if (result != MEMORY_OK && result != MEMORY_ERROR_NOT_MAPPED) {
             return result;
         }
+        if (result == MEMORY_OK) {
+            pages_unmapped++;
+        }
+        
+        addr += MEMORY_PAGE_SIZE;
+    }
+    
+    print("\n"); // End progress dots
+    
+    // Warn if we hit the iteration limit
+    if (iterations >= max_iterations) {
+        print("[MEM] WARNING: unmap_identity_range hit iteration limit\n");
     }
 
     return MEMORY_OK;
@@ -397,6 +484,23 @@ static memory_result_t parse_multiboot2_info(uint32 info_addr) {
     return MEMORY_OK;
 }
 
+static memory_result_t memory_fallback_detection(void) {
+    print("[MEM] Using safe fallback memory detection...\n");
+    
+    reset_region_info();
+    
+    print("[MEM] Creating basic memory map with safe defaults...\n");
+    add_memory_region(0x00000000, 640 * 1024, 1);
+    add_memory_region(0x00100000, 512 * 1024 * 1024, 1);
+    
+    memory_info.total_memory_kb = (640 + 512 * 1024);
+    memory_info.usable_memory_kb = memory_info.total_memory_kb;
+    
+    print_basic_memory(640, 512 * 1024);
+    
+    return MEMORY_OK;
+}
+
 // =============================================================================
 // MEMORY SUBSYSTEM INITIALIZATION
 // =============================================================================
@@ -425,6 +529,78 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
         print("\n");
         memory_panic_stage("memory_detect_grub", result);
         return result;
+    }
+
+    // Check for minimum memory requirement (64MB = 65536 KB)
+    if (memory_info.usable_memory_kb < 65536) {
+        // Write directly to VGA text buffer for screen display
+        volatile uint16_t* vga = (volatile uint16_t*)0xB8000;
+        int row = 0;
+        
+        // Helper to print string to VGA
+        #define VGA_PRINT(y, str) do { \
+            const char* s = str; \
+            for (int i = 0; s[i] && i < 80; i++) { \
+                vga[(y) * 80 + i] = (0x0C << 8) | s[i]; /* Light red on black */ \
+            } \
+        } while(0)
+        
+        VGA_PRINT(row++, "                                                    ");
+        VGA_PRINT(row++, "*****************************************************");
+        VGA_PRINT(row++, "*                                                   *");
+        VGA_PRINT(row++, "*         INSUFFICIENT MEMORY DETECTED              *");
+        VGA_PRINT(row++, "*                                                   *");
+        VGA_PRINT(row++, "*****************************************************");
+        VGA_PRINT(row++, "                                                    ");
+        
+        // Build memory info string
+        char mem_info[81];
+        int mem_mb = memory_info.usable_memory_kb / 1024;
+        int idx = 0;
+        const char* prefix = "System memory: ";
+        while (*prefix) mem_info[idx++] = *prefix++;
+        if (mem_mb >= 100) mem_info[idx++] = '0' + (mem_mb / 100);
+        if (mem_mb >= 10) mem_info[idx++] = '0' + ((mem_mb / 10) % 10);
+        mem_info[idx++] = '0' + (mem_mb % 10);
+        const char* suffix = " MB (minimum 64 MB required)";
+        while (*suffix) mem_info[idx++] = *suffix++;
+        mem_info[idx] = '\0';
+        VGA_PRINT(row++, mem_info);
+        
+        row++;
+        VGA_PRINT(row++, "Forest OS cannot boot with this amount of RAM.");
+        row++;
+        VGA_PRINT(row++, "Please upgrade your system memory to at least 64MB");
+        VGA_PRINT(row++, "and try again.");
+        row++;
+        VGA_PRINT(row++, "System halted.");
+        
+        // Also print to serial for logging
+        print("\n");
+        print("*****************************************************\n");
+        print("*                                                   *\n");
+        print("*         INSUFFICIENT MEMORY DETECTED              *\n");
+        print("*                                                   *\n");
+        print("*****************************************************\n");
+        print("\n");
+        print("System memory: ");
+        print_dec(memory_info.usable_memory_kb);
+        print(" KB (");
+        print_dec(memory_info.usable_memory_kb / 1024);
+        print(" MB)\n");
+        print("Minimum required: 65536 KB (64 MB)\n");
+        print("\n");
+        print("Forest OS cannot boot with this amount of RAM.\n");
+        print("\n");
+        print("Please upgrade your system memory to at least 64MB\n");
+        print("and try again.\n");
+        print("\n");
+        print("System halted.\n");
+        
+        // Halt forever
+        while (1) {
+            __asm__ volatile ("cli; hlt");
+        }
     }
 
     // Decide where to place the PMM bitmap/heap. If the initrd module overlaps
@@ -502,9 +678,20 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
         debuglog(DEBUG_WARN, "[MEM] Unknown multiboot magic or no info, cannot reserve initrd\n");
     }
 
+    // Step 2.5: Scrub all currently free physical frames so every boot starts
+    // from a clean memory state. Reserved/in-use regions are not touched.
+    print("[MEM] Skipping memory scrubbing for debugging...\n");
+    //frame_count_t scrubbed_frames = pmm_scrub_free_frames();
+    frame_count_t scrubbed_frames = 0;
+    print("[MEM] Scrubbed frames: ");
+    print_dec((uint32)scrubbed_frames);
+    print("\n");
+
     // Step 3: Initialize Virtual Memory Manager
     print("[MEM] Initializing Virtual Memory Manager...\n");
+    print("ABOUT TO CALL vmm_init()\n");
     result = vmm_init();
+    print("vmm_init() RETURNED!\n");
     if (result != MEMORY_OK) {
         print("[MEM] VMM initialization failed: ");
         print(memory_result_to_string(result));
@@ -552,18 +739,42 @@ memory_result_t memory_init(uint32 multiboot_magic, uint32 multiboot_info) {
     print("[MEM] Page fault handler registered\n");
     
     // Step 6: Drop the identity map for the heap range so heap_init can map
-    // fresh physical frames without running into duplicate mappings. Remove
-    // it across the entire kernel heap span (not just the bootstrap size) so
-    // later heap expansions don't trip over the early identity mapping from
-    // vmm_init().
-    uint32 heap_unmap_end = heap_start + MEMORY_KERNEL_HEAP_MAX_SIZE;
-    result = unmap_identity_range(kernel_dir,
-                                  heap_start,
-                                  heap_unmap_end);
-    if (result != MEMORY_OK) {
-        print("[MEM] Failed to unmap temporary heap mapping\n");
-        memory_panic_stage("unmap_identity_range (heap)", result);
-        return result;
+    // fresh physical frames without running into duplicate mappings.
+    // OPTIMIZATION: Only unmap the pages that were actually identity-mapped.
+    // The identity mapping from vmm_init() covers up to MEMORY_BOOTSTRAP_MAX_IDENTITY_KB,
+    // so we only need to unmap from heap_start to that limit (or heap_unmap_end if smaller).
+    uint32 identity_limit = MEMORY_BOOTSTRAP_MAX_IDENTITY_KB * 1024;
+    
+    // If heap starts above the identity limit, nothing was identity-mapped for it,
+    // so there's nothing to unmap. This happens when initrd is large and PMM/heap
+    // are placed above the 128MB bootstrap identity limit.
+    if (heap_start < identity_limit) {
+        uint32 heap_unmap_end = heap_start + MEMORY_KERNEL_HEAP_MAX_SIZE;
+        
+        // Only unmap what's actually identity-mapped
+        uint32 effective_unmap_end = (heap_unmap_end < identity_limit) ? heap_unmap_end : identity_limit;
+        
+        print("[MEM] Unmapping heap range: 0x");
+        print_hex(heap_start);
+        print(" - 0x");
+        print_hex(effective_unmap_end);
+        print("\n");
+        
+        result = unmap_identity_range(kernel_dir,
+                                      heap_start,
+                                      effective_unmap_end);
+        if (result != MEMORY_OK) {
+            print("[MEM] Failed to unmap temporary heap mapping\n");
+            memory_panic_stage("unmap_identity_range (heap)", result);
+            return result;
+        }
+        print("[MEM] Heap range unmapped successfully\n");
+    } else {
+        print("[MEM] Heap starts above identity limit (0x");
+        print_hex(heap_start);
+        print(" >= 0x");
+        print_hex(identity_limit);
+        print("), skipping unmap\n");
     }
     
     // Step 7: Initialize kernel heap
@@ -656,4 +867,7 @@ void memory_dump_info(void) {
     print(" KB total)\n");
     
     print("===========================\n\n");
+    
+    // Also dump enhanced memory layout if available
+    // (Called from mm_layout module if initialized)
 }

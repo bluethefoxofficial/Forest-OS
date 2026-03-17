@@ -6,6 +6,7 @@
 // =============================================================================
 
 #include "include/mm.h"
+#include "include/memory.h"
 #include "include/atomic_mm.h"
 #include "include/list.h"
 #include "include/interrupt.h"
@@ -381,7 +382,7 @@ static void oom_update_task_list(void)
     // with current memory usage information
     
     // Placeholder implementation
-    struct oom_task *task = kmalloc(sizeof(struct oom_task), GFP_ATOMIC);
+    struct oom_task *task = kmalloc(sizeof(struct oom_task));
     if (task) {
         task->pid = 1234;
         task->rss = 1000;

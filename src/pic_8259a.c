@@ -103,10 +103,10 @@ int pic_8259a_init_advanced(void)
     
     /* Register spurious interrupt handlers */
     idt_register_handler(PIC1_VECTOR_BASE + PIC1_SPURIOUS_IRQ, 
-                        pic_spurious_handler, 
+                        (interrupt_handler_t)pic_spurious_handler, 
                         "PIC1 Spurious IRQ");
     idt_register_handler(PIC2_VECTOR_BASE + PIC2_SPURIOUS_IRQ, 
-                        pic_spurious_handler, 
+                        (interrupt_handler_t)pic_spurious_handler, 
                         "PIC2 Spurious IRQ");
     
     pic_state.initialized = true;

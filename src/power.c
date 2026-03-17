@@ -87,20 +87,23 @@ bool power_request(power_action_t action) {
         power_log("Shutdown requested");
     }
 
-    irq_disable_safe();
-    cleanup_subsystems();
-
     if (action == POWER_ACTION_SHUTDOWN) {
         if (acpi_shutdown()) {
+            power_log("ACPI shutdown dispatched");
             fallback_shutdown_halt();
         }
-        power_log("ACPI shutdown failed, trying legacy ports");
+        power_log("ACPI shutdown failed, preparing legacy fallback");
+        cleanup_subsystems();
+        irq_disable_safe();
         fallback_shutdown();
     } else {
         if (acpi_reboot()) {
-            fallback_triple_fault();
+            power_log("ACPI reboot dispatched");
+            timer_sleep_ms(100);
         }
-        power_log("ACPI reboot failed, falling back to keyboard controller");
+        power_log("ACPI reboot did not complete, preparing fallback");
+        cleanup_subsystems();
+        irq_disable_safe();
         fallback_reboot();
     }
 

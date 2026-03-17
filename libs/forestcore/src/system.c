@@ -247,6 +247,42 @@ bool rtc_read_time(rtc_time_t* out) {
     return true;
 }
 
+// Software division for 64-bit integers (libgcc replacement)
+long long __divdi3(long long dividend, long long divisor) {
+    if (divisor == 0) return 0; // division by zero
+    int sign = ((dividend < 0) ^ (divisor < 0)) ? -1 : 1;
+    unsigned long long u_dividend = dividend < 0 ? - (unsigned long long)dividend : (unsigned long long)dividend;
+    unsigned long long u_divisor = divisor < 0 ? - (unsigned long long)divisor : (unsigned long long)divisor;
+    unsigned long long quotient = 0;
+    for (int i = 63; i >= 0; i--) {
+        if ((u_dividend >> i) >= u_divisor) {
+            u_dividend -= u_divisor << i;
+            quotient |= 1ULL << i;
+        }
+    }
+    return sign * (long long)quotient;
+}
+
+unsigned long long __udivdi3(unsigned long long dividend, unsigned long long divisor) {
+    if (divisor == 0) return 0;
+    unsigned long long quotient = 0;
+    for (int i = 63; i >= 0; i--) {
+        if ((dividend >> i) >= divisor) {
+            dividend -= divisor << i;
+            quotient |= 1ULL << i;
+        }
+    }
+    return quotient;
+}
+
+long long __moddi3(long long a, long long b) {
+    return a - __divdi3(a, b) * b;
+}
+
+unsigned long long __umoddi3(unsigned long long a, unsigned long long b) {
+    return a - __udivdi3(a, b) * b;
+}
+
 void timer_sleep_ms(uint32 milliseconds) {
     uint64 start = cpu_read_tsc();
     // Fallback to a simple port-delay loop when TSC frequency is unknown.

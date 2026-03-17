@@ -749,7 +749,7 @@ static void irq_setup_descriptor(int irq, const char *name, irq_handler_t handle
     desc = &interrupt_mgr.irq_desc[irq];
     
     /* Allocate IRQ action structure */
-    action = (struct irq_action *)kmalloc(sizeof(struct irq_action), GFP_KERNEL);
+    action = (struct irq_action *)kmalloc(sizeof(struct irq_action));
     if (!action) {
         return;
     }

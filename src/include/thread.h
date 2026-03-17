@@ -124,57 +124,14 @@ struct thread {
 };
 
 /* Thread creation and management */
-static inline struct thread *thread_create(const char *name, thread_entry_t entry, void *arg)
-{
-    /* Stub - returns NULL (thread creation not yet implemented) */
-    (void)name;
-    (void)entry;
-    (void)arg;
-    return NULL;
-}
-
-static inline int thread_start(struct thread *thread)
-{
-    /* Stub - returns -1 (not implemented) */
-    (void)thread;
-    return -1;
-}
-
-static inline int thread_join(struct thread *thread, void **retval)
-{
-    /* Stub - returns -1 (not implemented) */
-    (void)thread;
-    (void)retval;
-    return -1;
-}
-
-static inline void thread_destroy(struct thread *thread)
-{
-    /* Stub - no-op */
-    (void)thread;
-}
-
-static inline void thread_exit(void *retval)
-{
-    /* Stub - no-op */
-    (void)retval;
-}
-
-static inline struct thread *thread_current(void)
-{
-    /* Stub - returns NULL */
-    return NULL;
-}
-
-static inline uint32_t thread_get_tid(struct thread *thread)
-{
-    return thread ? thread->tid : 0;
-}
-
-static inline void thread_yield(void)
-{
-    /* Stub - no-op */
-}
+struct thread *thread_create(const char *name, thread_entry_t entry, void *arg);
+int thread_start(struct thread *thread);
+int thread_join(struct thread *thread, void **retval);
+void thread_destroy(struct thread *thread);
+void thread_exit(void *retval);
+struct thread *thread_current(void);
+uint32_t thread_get_tid(struct thread *thread);
+void thread_yield(void);
 
 /* Semaphore operations */
 static inline void semaphore_init(struct semaphore *sem, int initial_count)

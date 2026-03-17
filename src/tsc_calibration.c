@@ -824,7 +824,7 @@ int tsc_register_timer_source(void)
         return -ENODEV;
     }
     
-    tsc_source = (struct timer_source *)kmalloc(sizeof(*tsc_source), GFP_KERNEL);
+    tsc_source = (struct timer_source *)kmalloc(sizeof(*tsc_source));
     if (!tsc_source) {
         return -ENOMEM;
     }

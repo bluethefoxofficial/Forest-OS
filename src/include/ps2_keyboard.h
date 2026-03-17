@@ -40,54 +40,187 @@ typedef enum {
     KEY_STATE_REPEAT
 } key_state_t;
 
-// Key codes - standardized across all keyboard drivers
+// PS/2 driver internal key codes
+// Note: These are different from the Linux evdev key codes in input_event.h
+// Use these for PS/2 driver internals; use input_event.h KEY_* for system-wide events
 typedef enum {
-    KEY_UNKNOWN = 0,
-    
+    PS2_KEY_UNKNOWN = 0,
+
     // Function keys
-    KEY_F1 = 0x10, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
-    KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
-    
+    PS2_KEY_F1 = 0x10, PS2_KEY_F2, PS2_KEY_F3, PS2_KEY_F4, PS2_KEY_F5, PS2_KEY_F6,
+    PS2_KEY_F7, PS2_KEY_F8, PS2_KEY_F9, PS2_KEY_F10, PS2_KEY_F11, PS2_KEY_F12,
+
     // Number row
-    KEY_ESC = 0x20, KEY_1, KEY_2, KEY_3, KEY_4, KEY_5,
-    KEY_6, KEY_7, KEY_8, KEY_9, KEY_0, KEY_MINUS, KEY_EQUALS,
-    KEY_BACKSPACE, KEY_TAB,
-    
+    PS2_KEY_ESC = 0x20, PS2_KEY_1, PS2_KEY_2, PS2_KEY_3, PS2_KEY_4, PS2_KEY_5,
+    PS2_KEY_6, PS2_KEY_7, PS2_KEY_8, PS2_KEY_9, PS2_KEY_0, PS2_KEY_MINUS, PS2_KEY_EQUALS,
+    PS2_KEY_BACKSPACE, PS2_KEY_TAB,
+
     // Letters
-    KEY_Q = 0x30, KEY_W, KEY_E, KEY_R, KEY_T, KEY_Y,
-    KEY_U, KEY_I, KEY_O, KEY_P, KEY_LEFT_BRACKET, KEY_RIGHT_BRACKET,
-    KEY_ENTER, KEY_LEFT_CTRL, KEY_A, KEY_S,
-    KEY_D = 0x40, KEY_F, KEY_G, KEY_H, KEY_J, KEY_K,
-    KEY_L, KEY_SEMICOLON, KEY_APOSTROPHE, KEY_GRAVE,
-    KEY_LEFT_SHIFT, KEY_BACKSLASH, KEY_OEM_102, KEY_Z, KEY_X, KEY_C, KEY_V,
-    KEY_B = 0x50, KEY_N, KEY_M, KEY_COMMA, KEY_PERIOD, KEY_SLASH,
-    KEY_RIGHT_SHIFT, KEY_KEYPAD_MULTIPLY, KEY_LEFT_ALT, KEY_SPACE,
-    KEY_CAPS_LOCK,
-    
+    PS2_KEY_Q = 0x30, PS2_KEY_W, PS2_KEY_E, PS2_KEY_R, PS2_KEY_T, PS2_KEY_Y,
+    PS2_KEY_U, PS2_KEY_I, PS2_KEY_O, PS2_KEY_P, PS2_KEY_LEFT_BRACKET, PS2_KEY_RIGHT_BRACKET,
+    PS2_KEY_ENTER, PS2_KEY_LEFT_CTRL, PS2_KEY_A, PS2_KEY_S,
+    PS2_KEY_D = 0x40, PS2_KEY_F, PS2_KEY_G, PS2_KEY_H, PS2_KEY_J, PS2_KEY_K,
+    PS2_KEY_L, PS2_KEY_SEMICOLON, PS2_KEY_APOSTROPHE, PS2_KEY_GRAVE,
+    PS2_KEY_LEFT_SHIFT, PS2_KEY_BACKSLASH, PS2_KEY_OEM_102, PS2_KEY_Z, PS2_KEY_X, PS2_KEY_C, PS2_KEY_V,
+    PS2_KEY_B = 0x50, PS2_KEY_N, PS2_KEY_M, PS2_KEY_COMMA, PS2_KEY_PERIOD, PS2_KEY_SLASH,
+    PS2_KEY_RIGHT_SHIFT, PS2_KEY_KEYPAD_MULTIPLY, PS2_KEY_LEFT_ALT, PS2_KEY_SPACE,
+    PS2_KEY_CAPS_LOCK,
+
     // Keypad
-    KEY_KEYPAD_7 = 0x60, KEY_KEYPAD_8, KEY_KEYPAD_9, KEY_KEYPAD_MINUS,
-    KEY_KEYPAD_4, KEY_KEYPAD_5, KEY_KEYPAD_6, KEY_KEYPAD_PLUS,
-    KEY_KEYPAD_1, KEY_KEYPAD_2, KEY_KEYPAD_3, KEY_KEYPAD_0,
-    KEY_KEYPAD_PERIOD, KEY_KEYPAD_ENTER, KEY_KEYPAD_DIVIDE,
-    
+    PS2_KEY_KEYPAD_7 = 0x60, PS2_KEY_KEYPAD_8, PS2_KEY_KEYPAD_9, PS2_KEY_KEYPAD_MINUS,
+    PS2_KEY_KEYPAD_4, PS2_KEY_KEYPAD_5, PS2_KEY_KEYPAD_6, PS2_KEY_KEYPAD_PLUS,
+    PS2_KEY_KEYPAD_1, PS2_KEY_KEYPAD_2, PS2_KEY_KEYPAD_3, PS2_KEY_KEYPAD_0,
+    PS2_KEY_KEYPAD_PERIOD, PS2_KEY_KEYPAD_ENTER, PS2_KEY_KEYPAD_DIVIDE,
+
     // Arrow keys and navigation
-    KEY_HOME = 0x70, KEY_UP, KEY_PAGE_UP, KEY_LEFT, KEY_RIGHT,
-    KEY_END, KEY_DOWN, KEY_PAGE_DOWN, KEY_INSERT, KEY_DELETE,
-    
+    PS2_KEY_HOME = 0x70, PS2_KEY_UP, PS2_KEY_PAGE_UP, PS2_KEY_LEFT, PS2_KEY_RIGHT,
+    PS2_KEY_END, PS2_KEY_DOWN, PS2_KEY_PAGE_DOWN, PS2_KEY_INSERT, PS2_KEY_DELETE,
+
     // Modifier keys
-    KEY_RIGHT_CTRL = 0x80, KEY_RIGHT_ALT, KEY_LEFT_GUI, KEY_RIGHT_GUI,
-    KEY_MENU, KEY_NUM_LOCK, KEY_SCROLL_LOCK,
-    
+    PS2_KEY_RIGHT_CTRL = 0x80, PS2_KEY_RIGHT_ALT, PS2_KEY_LEFT_GUI, PS2_KEY_RIGHT_GUI,
+    PS2_KEY_MENU, PS2_KEY_NUM_LOCK, PS2_KEY_SCROLL_LOCK,
+
     // Multimedia keys
-    KEY_VOLUME_DOWN = 0x90, KEY_VOLUME_UP, KEY_MUTE, KEY_POWER,
-    KEY_SLEEP, KEY_WAKE, KEY_WWW_SEARCH, KEY_WWW_FAVORITES,
-    KEY_WWW_REFRESH, KEY_WWW_STOP, KEY_WWW_FORWARD, KEY_WWW_BACK,
-    KEY_MY_COMPUTER, KEY_EMAIL, KEY_MEDIA_SELECT, KEY_CALCULATOR,
-    
-    KEY_PRINT_SCREEN = 0xA0, KEY_PAUSE,
-    
-    KEY_MAX = 0xFF
-} key_code_t;
+    PS2_KEY_VOLUME_DOWN = 0x90, PS2_KEY_VOLUME_UP, PS2_KEY_MUTE, PS2_KEY_POWER,
+    PS2_KEY_SLEEP, PS2_KEY_WAKE, PS2_KEY_WWW_SEARCH, PS2_KEY_WWW_FAVORITES,
+    PS2_KEY_WWW_REFRESH, PS2_KEY_WWW_STOP, PS2_KEY_WWW_FORWARD, PS2_KEY_WWW_BACK,
+    PS2_KEY_MY_COMPUTER, PS2_KEY_EMAIL, PS2_KEY_MEDIA_SELECT, PS2_KEY_CALCULATOR,
+
+    PS2_KEY_PRINT_SCREEN = 0xA0, PS2_KEY_PAUSE,
+
+    PS2_KEY_MAX = 0xFF
+} ps2_key_code_t;
+
+// Alias for backwards compatibility within PS/2 driver code
+typedef ps2_key_code_t key_code_t;
+
+// Backward-compatibility macros for KEY_* names (only if input_event.h not included)
+// These allow existing PS/2 driver code to continue using KEY_* names
+#ifndef KEY_ESC  // input_event.h defines KEY_ESC, so check for it
+#define KEY_UNKNOWN         PS2_KEY_UNKNOWN
+#define KEY_F1              PS2_KEY_F1
+#define KEY_F2              PS2_KEY_F2
+#define KEY_F3              PS2_KEY_F3
+#define KEY_F4              PS2_KEY_F4
+#define KEY_F5              PS2_KEY_F5
+#define KEY_F6              PS2_KEY_F6
+#define KEY_F7              PS2_KEY_F7
+#define KEY_F8              PS2_KEY_F8
+#define KEY_F9              PS2_KEY_F9
+#define KEY_F10             PS2_KEY_F10
+#define KEY_F11             PS2_KEY_F11
+#define KEY_F12             PS2_KEY_F12
+#define KEY_ESC             PS2_KEY_ESC
+#define KEY_1               PS2_KEY_1
+#define KEY_2               PS2_KEY_2
+#define KEY_3               PS2_KEY_3
+#define KEY_4               PS2_KEY_4
+#define KEY_5               PS2_KEY_5
+#define KEY_6               PS2_KEY_6
+#define KEY_7               PS2_KEY_7
+#define KEY_8               PS2_KEY_8
+#define KEY_9               PS2_KEY_9
+#define KEY_0               PS2_KEY_0
+#define KEY_MINUS           PS2_KEY_MINUS
+#define KEY_EQUALS          PS2_KEY_EQUALS
+#define KEY_BACKSPACE       PS2_KEY_BACKSPACE
+#define KEY_TAB             PS2_KEY_TAB
+#define KEY_Q               PS2_KEY_Q
+#define KEY_W               PS2_KEY_W
+#define KEY_E               PS2_KEY_E
+#define KEY_R               PS2_KEY_R
+#define KEY_T               PS2_KEY_T
+#define KEY_Y               PS2_KEY_Y
+#define KEY_U               PS2_KEY_U
+#define KEY_I               PS2_KEY_I
+#define KEY_O               PS2_KEY_O
+#define KEY_P               PS2_KEY_P
+#define KEY_LEFT_BRACKET    PS2_KEY_LEFT_BRACKET
+#define KEY_RIGHT_BRACKET   PS2_KEY_RIGHT_BRACKET
+#define KEY_ENTER           PS2_KEY_ENTER
+#define KEY_LEFT_CTRL       PS2_KEY_LEFT_CTRL
+#define KEY_A               PS2_KEY_A
+#define KEY_S               PS2_KEY_S
+#define KEY_D               PS2_KEY_D
+#define KEY_F               PS2_KEY_F
+#define KEY_G               PS2_KEY_G
+#define KEY_H               PS2_KEY_H
+#define KEY_J               PS2_KEY_J
+#define KEY_K               PS2_KEY_K
+#define KEY_L               PS2_KEY_L
+#define KEY_SEMICOLON       PS2_KEY_SEMICOLON
+#define KEY_APOSTROPHE      PS2_KEY_APOSTROPHE
+#define KEY_GRAVE           PS2_KEY_GRAVE
+#define KEY_LEFT_SHIFT      PS2_KEY_LEFT_SHIFT
+#define KEY_BACKSLASH       PS2_KEY_BACKSLASH
+#define KEY_OEM_102         PS2_KEY_OEM_102
+#define KEY_Z               PS2_KEY_Z
+#define KEY_X               PS2_KEY_X
+#define KEY_C               PS2_KEY_C
+#define KEY_V               PS2_KEY_V
+#define KEY_B               PS2_KEY_B
+#define KEY_N               PS2_KEY_N
+#define KEY_M               PS2_KEY_M
+#define KEY_COMMA           PS2_KEY_COMMA
+#define KEY_PERIOD          PS2_KEY_PERIOD
+#define KEY_SLASH           PS2_KEY_SLASH
+#define KEY_RIGHT_SHIFT     PS2_KEY_RIGHT_SHIFT
+#define KEY_KEYPAD_MULTIPLY PS2_KEY_KEYPAD_MULTIPLY
+#define KEY_LEFT_ALT        PS2_KEY_LEFT_ALT
+#define KEY_SPACE           PS2_KEY_SPACE
+#define KEY_CAPS_LOCK       PS2_KEY_CAPS_LOCK
+#define KEY_KEYPAD_7        PS2_KEY_KEYPAD_7
+#define KEY_KEYPAD_8        PS2_KEY_KEYPAD_8
+#define KEY_KEYPAD_9        PS2_KEY_KEYPAD_9
+#define KEY_KEYPAD_MINUS    PS2_KEY_KEYPAD_MINUS
+#define KEY_KEYPAD_4        PS2_KEY_KEYPAD_4
+#define KEY_KEYPAD_5        PS2_KEY_KEYPAD_5
+#define KEY_KEYPAD_6        PS2_KEY_KEYPAD_6
+#define KEY_KEYPAD_PLUS     PS2_KEY_KEYPAD_PLUS
+#define KEY_KEYPAD_1        PS2_KEY_KEYPAD_1
+#define KEY_KEYPAD_2        PS2_KEY_KEYPAD_2
+#define KEY_KEYPAD_3        PS2_KEY_KEYPAD_3
+#define KEY_KEYPAD_0        PS2_KEY_KEYPAD_0
+#define KEY_KEYPAD_PERIOD   PS2_KEY_KEYPAD_PERIOD
+#define KEY_KEYPAD_ENTER    PS2_KEY_KEYPAD_ENTER
+#define KEY_KEYPAD_DIVIDE   PS2_KEY_KEYPAD_DIVIDE
+#define KEY_HOME            PS2_KEY_HOME
+#define KEY_UP              PS2_KEY_UP
+#define KEY_PAGE_UP         PS2_KEY_PAGE_UP
+#define KEY_LEFT            PS2_KEY_LEFT
+#define KEY_RIGHT           PS2_KEY_RIGHT
+#define KEY_END             PS2_KEY_END
+#define KEY_DOWN            PS2_KEY_DOWN
+#define KEY_PAGE_DOWN       PS2_KEY_PAGE_DOWN
+#define KEY_INSERT          PS2_KEY_INSERT
+#define KEY_DELETE          PS2_KEY_DELETE
+#define KEY_RIGHT_CTRL      PS2_KEY_RIGHT_CTRL
+#define KEY_RIGHT_ALT       PS2_KEY_RIGHT_ALT
+#define KEY_LEFT_GUI        PS2_KEY_LEFT_GUI
+#define KEY_RIGHT_GUI       PS2_KEY_RIGHT_GUI
+#define KEY_MENU            PS2_KEY_MENU
+#define KEY_NUM_LOCK        PS2_KEY_NUM_LOCK
+#define KEY_SCROLL_LOCK     PS2_KEY_SCROLL_LOCK
+#define KEY_VOLUME_DOWN     PS2_KEY_VOLUME_DOWN
+#define KEY_VOLUME_UP       PS2_KEY_VOLUME_UP
+#define KEY_MUTE            PS2_KEY_MUTE
+#define KEY_POWER           PS2_KEY_POWER
+#define KEY_SLEEP           PS2_KEY_SLEEP
+#define KEY_WAKE            PS2_KEY_WAKE
+#define KEY_WWW_SEARCH      PS2_KEY_WWW_SEARCH
+#define KEY_WWW_FAVORITES   PS2_KEY_WWW_FAVORITES
+#define KEY_WWW_REFRESH     PS2_KEY_WWW_REFRESH
+#define KEY_WWW_STOP        PS2_KEY_WWW_STOP
+#define KEY_WWW_FORWARD     PS2_KEY_WWW_FORWARD
+#define KEY_WWW_BACK        PS2_KEY_WWW_BACK
+#define KEY_MY_COMPUTER     PS2_KEY_MY_COMPUTER
+#define KEY_EMAIL           PS2_KEY_EMAIL
+#define KEY_MEDIA_SELECT    PS2_KEY_MEDIA_SELECT
+#define KEY_CALCULATOR      PS2_KEY_CALCULATOR
+#define KEY_PRINT_SCREEN    PS2_KEY_PRINT_SCREEN
+#define KEY_PAUSE           PS2_KEY_PAUSE
+#define KEY_MAX             PS2_KEY_MAX
+#endif /* KEY_ESC */
 
 // Keyboard event structure
 typedef struct {
@@ -141,6 +274,7 @@ int ps2_keyboard_init(void);
 void ps2_keyboard_irq_handler(struct interrupt_frame* frame, uint32 error_code);
 bool ps2_keyboard_set_leds(uint8 led_state);
 bool ps2_keyboard_set_scancode_set(uint8 scancode_set);
+uint8 ps2_keyboard_get_scancode_set(void);
 bool ps2_keyboard_set_typematic(uint8 rate, uint8 delay);
 bool ps2_keyboard_enable_scanning(void);
 bool ps2_keyboard_disable_scanning(void);
@@ -151,5 +285,12 @@ keyboard_driver_state_t* ps2_keyboard_get_state(void);
 bool ps2_keyboard_poll_ascii(char* out_char);
 void ps2_keyboard_clear_ascii_buffer(void);
 void ps2_keyboard_select_layout(keyboard_layout_id_t layout);
+void ps2_keyboard_debug_status(void);
+void ps2_keyboard_process_scancode(uint8 scancode);
+void ps2_keyboard_poll(void);
+
+// Device presence checking and hot reload
+bool ps2_keyboard_is_present(void);
+int ps2_keyboard_reinit(void);
 
 #endif

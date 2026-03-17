@@ -10,6 +10,7 @@
 #include "include/list.h"
 #include "include/interrupt.h"
 #include "include/system.h"
+#include "include/memory.h" // For kmalloc declaration
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -379,7 +380,7 @@ int mm_create_guard_pages(unsigned long start, size_t size, const char *purpose)
     guard_end = start + size;
     
     // Allocate guard page descriptor
-    guard = kmalloc(sizeof(struct guard_page), GFP_KERNEL);
+    guard = kmalloc(sizeof(struct guard_page));
     if (!guard) {
         return -1;
     }

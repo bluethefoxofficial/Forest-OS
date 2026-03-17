@@ -40,7 +40,7 @@
 #define MEMORY_KERNEL_HEAP_START     0x00400000U   // 4MB
 #endif
 #define MEMORY_USER_SPACE_START      0x40000000U   // 1GB
-#define MEMORY_USER_STACK_TOP        0xC0000000U   // 3GB
+#define MEMORY_USER_STACK_TOP        0xBFFFF000U   // Just below kernel (user stack top)
 #define MEMORY_KERNEL_SPACE_START    0xC0000000U   // Higher half kernel
 
 // Frame state tracking - explicit state machine
@@ -255,6 +255,14 @@ memory_validation_result_t memory_vmm_destroy_page_directory(memory_page_directo
 void* memory_heap_alloc(size_t size);
 void* memory_heap_alloc_aligned(size_t size, uint32 alignment);
 memory_validation_result_t memory_heap_free(void* ptr);
+
+// Compatibility macros for kernel memory allocation
+#ifndef kmalloc
+#define kmalloc(size) memory_heap_alloc(size)
+#endif
+#ifndef kfree
+#define kfree(ptr) memory_heap_free(ptr)
+#endif
 memory_validation_result_t memory_heap_check_integrity(void);
 
 // Memory utilities and validation

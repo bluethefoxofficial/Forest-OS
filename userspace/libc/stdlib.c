@@ -1,8 +1,134 @@
-#include "libc/errno.h"
+#include "../../src/include/libc/errno.h"
 #include "../../src/include/libc/stdlib.h"
 #include "../../src/include/libc/unistd.h"
 #include "../../src/include/libc/string.h"
 #include "../../src/include/types.h"
+
+// Additional process and environment functions
+
+int atexit(void (*function)(void)) {
+    // Not implemented - always fails
+    (void)function;
+    errno = ENOSYS;
+    return -1;
+}
+
+void _Exit(int status) {
+    _exit(status);
+}
+
+int mkstemp(char *template) {
+    // Not implemented
+    (void)template;
+    errno = ENOSYS;
+    return -1;
+}
+
+char *mkdtemp(char *template) {
+    // Not implemented
+    (void)template;
+    errno = ENOSYS;
+    return NULL;
+}
+
+int system_compat(const char *command) {
+    // Forest OS doesn't support shell command execution
+    (void)command;
+    errno = ENOSYS;
+    return -1;
+}
+
+// Searching and sorting algorithms implementation
+static void swap(void *a, void *b, size_t size) {
+    char *pa = (char*)a;
+    char *pb = (char*)b;
+    char tmp;
+    for (size_t i = 0; i < size; i++) {
+        tmp = pa[i];
+        pa[i] = pb[i];
+        pb[i] = tmp;
+    }
+}
+
+void qsort(void *base, size_t num, size_t size,
+           int (*compare)(const void *, const void *)) {
+    if (!base || num < 2 || size == 0 || !compare) {
+        return;
+    }
+    
+    // Simple bubble sort implementation (inefficient but functional)
+    char *arr = (char*)base;
+    for (size_t i = 0; i < num - 1; i++) {
+        for (size_t j = 0; j < num - i - 1; j++) {
+            void *elem1 = arr + j * size;
+            void *elem2 = arr + (j + 1) * size;
+            if (compare(elem1, elem2) > 0) {
+                swap(elem1, elem2, size);
+            }
+        }
+    }
+}
+
+void *bsearch(const void *key, const void *base, size_t num, size_t size,
+              int (*compare)(const void *, const void *)) {
+    if (!key || !base || num == 0 || size == 0 || !compare) {
+        return NULL;
+    }
+    
+    size_t low = 0, high = num - 1;
+    const char *arr = (const char*)base;
+    
+    while (low <= high) {
+        size_t mid = low + (high - low) / 2;
+        const void *mid_elem = arr + mid * size;
+        int cmp = compare(key, mid_elem);
+        
+        if (cmp == 0) {
+            return (void*)mid_elem;
+        } else if (cmp < 0) {
+            high = mid - 1;
+        } else {
+            low = mid + 1;
+        }
+    }
+    
+    return NULL;
+}
+
+// Additional utility functions
+int getloadavg(double loadavg[], int nelem) {
+    // Not implemented in Forest OS
+    (void)loadavg; (void)nelem;
+    errno = ENOSYS;
+    return -1;
+}
+
+char *realpath(const char *path, char *resolved_path) {
+    // Forest OS VFS is simple - just copy the path if it's absolute
+    if (!path) {
+        errno = EINVAL;
+        return NULL;
+    }
+    
+    if (!resolved_path) {
+        // Need to allocate
+        resolved_path = malloc(4096);
+        if (!resolved_path) {
+            errno = ENOMEM;
+            return NULL;
+        }
+    }
+    
+    if (path[0] != '/') {
+        errno = EINVAL;
+        if (resolved_path) free(resolved_path);
+        return NULL;
+    }
+    
+    strncpy(resolved_path, path, 4095);
+    resolved_path[4095] = '\0';
+    return resolved_path;
+}
 
 #ifndef ARCH_64BIT
 #if defined(__x86_64__) || defined(_M_X64)
@@ -19,12 +145,6 @@ static char *default_environ[] = { default_path_env, NULL };
 char **environ = default_environ;
 static size_t env_count = 1;
 static size_t env_capacity = 2;
-
-static int _errno_value = 0;
-
-int *__errno_location(void) {
-    return &_errno_value;
-}
 
 static int find_env_index(const char *name, size_t name_len) {
     if (!environ) {

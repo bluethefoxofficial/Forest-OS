@@ -38,6 +38,7 @@ struct driver {
     driver_class_t driver_class;
     bool (*init)(driver_t* driver);
     void (*shutdown)(driver_t* driver);
+    void (*main)(void);  // Main driver task function
     void* context;
     uint16 id;
     bool initialized;
