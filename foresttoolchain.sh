@@ -332,6 +332,40 @@ build_gcc() {
 }
 
 # ---------------------------------------------------------------------------
+# Create symlinks for Forest OS naming convention
+# ---------------------------------------------------------------------------
+create_forestos_symlinks() {
+    local target="$1"
+    local forrest_target=""
+
+    # Map target to forestos naming
+    case "$target" in
+        i686-linux-gnu)
+            forrest_target="i686-forestos"
+            ;;
+        x86_64-linux-gnu)
+            forrest_target="x86_64-forestos"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    step "Creating Forest OS symlinks (${forrest_target})..."
+
+    # Create symlinks for all binaries
+    for bin in "${INSTALL_DIR}"/bin/${target}-*; do
+        if [[ -f "$bin" ]]; then
+            local basename
+            basename=$(basename "$bin" "${target}-")
+            ln -sf "${target}-${basename}" "${INSTALL_DIR}/bin/${forrest_target}-${basename}" 2>/dev/null || true
+        fi
+    done
+
+    success "Forest OS symlinks created."
+}
+
+# ---------------------------------------------------------------------------
 # Verify a built toolchain
 # ---------------------------------------------------------------------------
 verify_toolchain() {
@@ -350,15 +384,32 @@ verify_toolchain() {
         return 1
     fi
 
-    # Quick compile test
+    # Create Forest OS naming symlinks
+    create_forestos_symlinks "$target"
+
+    # Quick compile test (try both target names)
     local test_src
     test_src="$(mktemp /tmp/forestos_tc_test_XXXXXX.c)"
     echo 'void _start(void) { __asm__("hlt"); }' > "$test_src"
 
     local test_out="/tmp/forestos_tc_test_out"
+    local forrest_target=""
+    case "$target" in
+        i686-linux-gnu) forrest_target="i686-forestos" ;;
+        x86_64-linux-gnu) forrest_target="x86_64-forestos" ;;
+    esac
+
     if "$gcc_bin" -ffreestanding -nostdlib -o "$test_out" "$test_src" 2>/dev/null; then
         success "Compile test passed for ${target}."
         rm -f "$test_src" "$test_out"
+    elif [[ -n "$forrest_target" ]] && [[ -x "${INSTALL_DIR}/bin/${forrest_target}-gcc" ]]; then
+        if "${INSTALL_DIR}/bin/${forrest_target}-gcc" -ffreestanding -nostdlib -o "$test_out" "$test_src" 2>/dev/null; then
+            success "Compile test passed for ${forrest_target}."
+            rm -f "$test_src" "$test_out"
+        else
+            warn "Compile test failed for ${target} — toolchain may still be usable."
+            rm -f "$test_src"
+        fi
     else
         warn "Compile test failed for ${target} — toolchain may still be usable."
         rm -f "$test_src"
