@@ -9,7 +9,10 @@
 #define KERNEL_HIGHER_HALF_BASE   0xC0000000
 
 // Temporary mapping area for page table access
-#define VMM_TEMP_MAP_BASE         0x10000000  // 256MB, temporary mapping area
+// MUST be above the kernel heap range (heap_start + 128MB max = ~0x14094000)
+// and below user space (MEMORY_USER_START = 0x40000000).
+// Using 0x3F000000 (just below user space) to avoid heap overlap.
+#define VMM_TEMP_MAP_BASE         0x3F000000  // ~1008MB, temporary mapping area
 #define VMM_TEMP_MAP_SIZE         0x400000    // 4MB for temporary mappings
 #define VMM_TEMP_MAP_PAGES        (VMM_TEMP_MAP_SIZE / MEMORY_PAGE_SIZE)  // 1024 pages
 
@@ -31,6 +34,12 @@ static inline void vmm_pretouch_identity_page(uint32 addr) {
         volatile uint8_t* ptr = (volatile uint8_t*)addr;
         (void)*ptr;
     }
+}
+
+static inline uint32 vmm_get_active_cr3_phys(void) {
+    uint32 cr3;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
+    return cr3;
 }
 
 #if VMM_DEBUG_LOG
@@ -281,9 +290,12 @@ memory_result_t vmm_map_page(page_directory_t* dir, uint32 vaddr, uint32 paddr, 
     page->dirty = (flags & PAGE_DIRTY) ? 1 : 0;
     print("[VMM_DBG] vmm_map_page: PTE updated. page->frame=0x"); print_hex(page->frame << MEMORY_PAGE_SHIFT); print(", present="); print_dec(page->present); print("\n");
 
-    // Invalidate TLB for this virtual address if paging is enabled
-    // If paging is enabled, we need to invalidate the TLB entry.
-    // asm volatile("invlpg (%0)" ::"r" (vaddr) : "memory"); // This is for later, when paging is actually active.
+    // Invalidate TLB for this virtual address if paging is enabled.
+    // Without this, stale TLB entries can cause writes to go to old physical
+    // frames — catastrophic for the ELF loader's temp-mapping copy path.
+    if (vmm_state.paging_enabled) {
+        __asm__ __volatile__("invlpg (%0)" :: "r"(vaddr) : "memory");
+    }
 
     return MEMORY_OK;
 }
@@ -310,8 +322,10 @@ memory_result_t vmm_unmap_page(page_directory_t* dir, uint32 vaddr) {
     page->present = 0; // Mark as not present
     // Clear other flags if necessary, but hardware usually ignores if not present
 
-    // Invalidate TLB
-    // asm volatile("invlpg (%0)" ::"r" (vaddr) : "memory"); // This is for later
+    // Invalidate TLB so the CPU doesn't use the stale mapping.
+    if (vmm_state.paging_enabled) {
+        __asm__ __volatile__("invlpg (%0)" :: "r"(vaddr) : "memory");
+    }
 
     // TODO: if page table becomes empty, free its frame
 
@@ -374,13 +388,16 @@ memory_result_t vmm_init(void) {
     }
 
     uint32 identity_limit = identity_limit_kb * 1024;
-    // Ensure identity limit covers all possible physical frame allocations
-    // For now, identity map enough memory to handle a 512MB system
+    // Ensure identity limit covers all possible physical frame allocations.
+    // The heap and PMM bitmap may be pushed above 128MB by a large initrd,
+    // so we must identity-map ALL usable RAM.  The ceiling is MEMORY_USER_START
+    // (1GB) — everything below that is kernel virtual space available for
+    // identity mapping; user space begins above it.
     if (identity_limit < 0x04000000) {
         identity_limit = 0x04000000; // always map at least first 64MB
     }
-    if (identity_limit > MEMORY_MAX_ADDR) {
-        identity_limit = MEMORY_MAX_ADDR;
+    if (identity_limit > MEMORY_USER_START) {
+        identity_limit = MEMORY_USER_START; // don't overlap user virtual space
     }
     identity_limit = (identity_limit + MEMORY_PAGE_SIZE - 1) & ~(MEMORY_PAGE_SIZE - 1);
 
@@ -532,6 +549,14 @@ page_directory_t* vmm_get_current_page_directory(void) {
     return vmm_state.current_directory;
 }
 
+// Update the software-tracked current directory without switching CR3.
+// Used by the task switcher to keep vmm_state in sync with the hardware CR3.
+void vmm_set_current_directory(page_directory_t* dir) {
+    if (dir) {
+        vmm_state.current_directory = dir;
+    }
+}
+
 page_directory_t* vmm_create_page_directory(void) {
     if (!vmm_state.initialized) {
         return NULL;
@@ -567,18 +592,22 @@ page_directory_t* vmm_create_page_directory(void) {
                            dir_phys + MEMORY_PAGE_SIZE,
                            PAGE_WRITABLE);
 
-    // CRITICAL — identity-map every page table referenced by the source
-    // directory.  Page tables live at arbitrary physical addresses (often above
-    // the early identity window).  Without identity-mapping them, get_page_entry
-    // would fault when it tries to dereference (pde->frame << PAGE_SHIFT) as a
-    // virtual address after a CR3 switch.
+    // Identity-map page-table frames referenced by kernel-space PDEs so that
+    // get_page_entry() can access them via the temp-map mechanism (which needs
+    // page tables to be reachable through the active CR3).
     //
-    // Note: this does not apply to the temp-map area page tables because those
-    // are accessed via the identity-mapped invariant (see vmm_temp_map_page).
+    // IMPORTANT: only identity-map frames whose physical address falls below
+    // MEMORY_USER_START.  On a typical 512MB system all physical frames are
+    // below 0x20000000 so this is always true.  Skipping frames above the
+    // user virtual base avoids accidentally clobbering ELF / user-space PTEs
+    // that will be created later.
     page_entry_t* src_pde = (page_entry_t*)src_dir;
     for (int i = 0; i < 1024; i++) {
         if (src_pde[i].present) {
             uint32 pt_phys = src_pde[i].frame << MEMORY_PAGE_SHIFT;
+            if (pt_phys >= MEMORY_USER_START) {
+                continue; // Don't identity-map into user virtual range
+            }
             memory_result_t res = vmm_map_page(new_dir, pt_phys, pt_phys,
                                                PAGE_PRESENT | PAGE_WRITABLE);
             if (res != MEMORY_OK && res != MEMORY_ERROR_ALREADY_MAPPED) {
@@ -610,19 +639,38 @@ page_directory_t* vmm_create_page_directory(void) {
 // limit are already synced via the initial memcpy; we resync ALL PDEs to be
 // safe (cost is one pass of 1024 comparisons — negligible).
 void vmm_sync_kernel_pdes(page_directory_t* task_dir) {
-    if (!task_dir || !vmm_state.current_directory) {
+    if (!task_dir) {
         return;
     }
 
-    page_entry_t* kernel_pde = (page_entry_t*)vmm_state.current_directory;
+    page_directory_t* active_dir = NULL;
+    if ((cpu_get_cr0() & (1U << 31)) != 0) {
+        active_dir = (page_directory_t*)(vmm_get_active_cr3_phys() & ~MEMORY_PAGE_MASK);
+    }
+    if (!active_dir) {
+        active_dir = vmm_state.current_directory;
+    }
+    if (!active_dir) {
+        return;
+    }
+
+    page_entry_t* kernel_pde = (page_entry_t*)active_dir;
     page_entry_t* task_pde   = (page_entry_t*)task_dir;
 
-    // Sync ALL kernel PDEs to ensure the new task's page directory has
-    // complete visibility of the entire kernel address space. This includes
-    // the kernel heap (around PDE 43-46), temp-map area (PDE 64), and any
-    // other kernel memory regions that might have been allocated since
-    // task_create.
+    // Only sync KERNEL-SPACE PDEs (below MEMORY_USER_START and at/above
+    // MEMORY_USER_END).  User-space PDEs (indices covering the range
+    // [MEMORY_USER_START, MEMORY_USER_END)) belong to the task and must NOT
+    // be overwritten — doing so would clobber ELF segment and user stack
+    // mappings that were explicitly created for this task.
+    uint32 user_pde_start = MEMORY_USER_START / (4 * 1024 * 1024); // PDE index for first user 4MB
+    uint32 user_pde_end   = MEMORY_USER_END   / (4 * 1024 * 1024); // PDE index past last user 4MB
+
     for (int i = 1; i < 1024; i++) {
+        // Skip user-space PDE range — those belong to the task.
+        if ((uint32)i >= user_pde_start && (uint32)i < user_pde_end) {
+            continue;
+        }
+
         if (kernel_pde[i].present) {
             // Ensure the task's PD has this kernel PDE
             if (!task_pde[i].present) {
@@ -632,54 +680,6 @@ void vmm_sync_kernel_pdes(page_directory_t* task_dir) {
             if (task_pde[i].present && task_pde[i].frame != kernel_pde[i].frame) {
                 task_pde[i] = kernel_pde[i];
             }
-            
-            // Always ensure the page table is identity-mapped so get_page_entry works
-            uint32 pt_phys = kernel_pde[i].frame << MEMORY_PAGE_SHIFT;
-            vmm_map_page(task_dir, pt_phys, pt_phys,
-                         PAGE_PRESENT | PAGE_WRITABLE);
-        }
-    }
-    
-    // DEBUG: Verify we're syncing the right PDE for the kernel stack
-    uint32 kernel_stack_pde_idx = 0x2d;  // From debug log: [TASK] new_pd[0x2d] (PDE 45)
-    if (kernel_pde[kernel_stack_pde_idx].present) {
-        debuglog(DEBUG_INFO, "[VMM_SYNC] Kernel stack PDE %u: present=%d, frame=0x%x\n",
-                 kernel_stack_pde_idx,
-                 task_pde[kernel_stack_pde_idx].present,
-                 task_pde[kernel_stack_pde_idx].frame);
-        if (task_pde[kernel_stack_pde_idx].present && 
-            task_pde[kernel_stack_pde_idx].frame != kernel_pde[kernel_stack_pde_idx].frame) {
-            debuglog(DEBUG_WARN, "[VMM_SYNC] Kernel stack PDE mismatch! Kernel: 0x%x, Task: 0x%x\n",
-                     kernel_pde[kernel_stack_pde_idx].frame,
-                     task_pde[kernel_stack_pde_idx].frame);
-        }
-        
-        // Explicitly check and sync the PTE for the kernel stack
-        // Kernel stack is at ~0xb700000 which is PDE 45, PTE ~777
-        uint32 kernel_stack_va = 0xb7093b8;  // From debug log: [TASK] Switching: next_kstack=0xb7093b8
-        page_entry_t* kernel_stack_pte = get_page_entry(kernel_stack_va, false, vmm_state.current_directory);
-        page_entry_t* task_stack_pte = get_page_entry(kernel_stack_va, false, task_dir);
-        
-        if (kernel_stack_pte && kernel_stack_pte->present) {
-            if (!task_stack_pte || !task_stack_pte->present) {
-                debuglog(DEBUG_WARN, "[VMM_SYNC] Kernel stack PTE not present in task's page directory! Syncing...\n");
-                // Create the PTE if it doesn't exist
-                task_stack_pte = get_page_entry(kernel_stack_va, true, task_dir);
-                if (task_stack_pte) {
-                    *task_stack_pte = *kernel_stack_pte;
-                }
-            } else if (task_stack_pte->frame != kernel_stack_pte->frame) {
-                debuglog(DEBUG_WARN, "[VMM_SYNC] Kernel stack PTE mismatch! Kernel: 0x%x, Task: 0x%x\n",
-                         kernel_stack_pte->frame,
-                         task_stack_pte->frame);
-                *task_stack_pte = *kernel_stack_pte;
-            } else {
-                debuglog(DEBUG_INFO, "[VMM_SYNC] Kernel stack PTE is present and matches (0x%x)\n",
-                         task_stack_pte->frame);
-            }
-        } else {
-            debuglog(DEBUG_ERROR, "[VMM_SYNC] Kernel stack PTE not found in kernel page directory! (VA=0x%x)\n",
-                     kernel_stack_va);
         }
     }
 }

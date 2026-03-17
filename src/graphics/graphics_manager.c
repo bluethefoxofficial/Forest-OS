@@ -658,13 +658,18 @@ graphics_result_t graphics_create_surface(uint32_t width, uint32_t height,
     s->pitch = width * 4;
     
     size_t buffer_size = s->pitch * height;
+    debuglog(DEBUG_INFO, "GFX: allocating surface pixels: %ux%u pitch=%u size=%u\n",
+             width, height, s->pitch, (uint32_t)buffer_size);
     s->pixels = kmalloc(buffer_size);
+    debuglog(DEBUG_INFO, "GFX: kmalloc returned %p\n", s->pixels);
     if (!s->pixels) {
         kfree(s);
         return GRAPHICS_ERROR_OUT_OF_MEMORY;
     }
-    
+
+    debuglog(DEBUG_INFO, "GFX: zeroing surface pixels...\n");
     memset(s->pixels, 0, buffer_size);
+    debuglog(DEBUG_INFO, "GFX: surface pixels zeroed\n");
     *surface = s;
     
     return GRAPHICS_SUCCESS;

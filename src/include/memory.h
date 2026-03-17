@@ -52,7 +52,7 @@ struct interrupt_frame;
 
 // Bootstrap tuning to adapt to different RAM sizes
 #define MEMORY_BOOTSTRAP_MIN_IDENTITY_KB (16 * 1024)   // 16MB minimum identity map
-#define MEMORY_BOOTSTRAP_MAX_IDENTITY_KB (128 * 1024)  // 128MB maximum bootstrap identity map
+#define MEMORY_BOOTSTRAP_MAX_IDENTITY_KB (1024 * 1024)  // 1GB maximum bootstrap identity map (up to MEMORY_USER_START)
 #define MEMORY_PRETOUCH_LIMIT_BYTES      (8 * 1024 * 1024) // Pre-touch only within first 8MB
 
 // PMM guardrails
@@ -231,6 +231,9 @@ void vmm_switch_page_directory(page_directory_t* dir);
 // Get current page directory
 page_directory_t* vmm_get_current_page_directory(void);
 
+// Update the software-tracked current directory (does NOT switch CR3)
+void vmm_set_current_directory(page_directory_t* dir);
+
 // Map a virtual page to a physical frame
 memory_result_t vmm_map_page(page_directory_t* dir, uint32_t vaddr, uint32_t paddr, uint32_t flags);
 
@@ -256,6 +259,12 @@ memory_result_t heap_init(uint32_t start_addr, uint32_t initial_size);
 // Simple memory allocation functions (original Forest OS API)
 void* khalloc_simple(size_t size);      // Simple heap allocation
 void* khzalloc_simple(size_t size);     // Simple zeroed allocation
+
+// Allocate memory from heap
+void* kmalloc(size_t size);
+
+// Allocate zeroed memory from heap
+void* kzalloc(size_t size);
 
 // Allocate aligned memory from heap
 void* kmalloc_aligned(size_t size, uint32_t alignment);
