@@ -271,19 +271,23 @@ static memory_result_t expand_heap(uint32 needed_size) {
     if (needed_size == 0 || needed_size > heap_state.max_size) {
         return MEMORY_ERROR_INVALID_SIZE;
     }
-    
+
     uint32 pages_needed = (needed_size + MEMORY_PAGE_SIZE - 1) / MEMORY_PAGE_SIZE;
     uint32 expand_size = pages_needed * MEMORY_PAGE_SIZE;
-    
+
     if (heap_state.current_end + expand_size > heap_state.start_addr + heap_state.max_size) {
         return MEMORY_ERROR_OUT_OF_MEMORY; // Hit heap size limit
     }
-    
+
+    print("[HEAP] expand_heap: pages_needed="); print_dec(pages_needed);
+    print(" current_end=0x"); print_hex(heap_state.current_end); print("\n");
+
     // Ensure TLB entries for this range are clean before mapping
     tlb_safe_heap_expand(heap_state.current_end, pages_needed);
-    
+
     page_directory_t* current_dir = vmm_get_current_page_directory();
-    
+    print("[HEAP] expand_heap: got current_dir=0x"); print_hex((uint32)current_dir); print("\n");
+
     // Allocate and map new pages
     for (uint32 i = 0; i < pages_needed; i++) {
         uint32 phys_frame = pmm_alloc_frame();
@@ -293,28 +297,34 @@ static memory_result_t expand_heap(uint32 needed_size) {
 
         uint32 vaddr = heap_state.current_end + (i * MEMORY_PAGE_SIZE);
 
-        if (vmm_is_mapped(current_dir, vaddr)) {
-            memory_result_t unmap_res = vmm_unmap_page(current_dir, vaddr);
-            if (unmap_res != MEMORY_OK && unmap_res != MEMORY_ERROR_NOT_MAPPED) {
-                pmm_free_frame(phys_frame);
-                return unmap_res;
-            }
-            tlb_invalidate_page(vaddr);
+        if (i == 0) {
+            print("[HEAP] expand_heap: mapping first page vaddr=0x"); print_hex(vaddr); print("\n");
         }
 
+        // Pages in the heap range are already identity-mapped by vmm_init.
+        // Skip the is_mapped check and directly remap with the new physical frame.
+        // vmm_map_page returns ALREADY_MAPPED if present; unmap first.
         memory_result_t result = vmm_map_page(current_dir,
                                               vaddr,
                                               phys_frame,
                                               PAGE_PRESENT | PAGE_WRITABLE);
+        if (result == MEMORY_ERROR_ALREADY_MAPPED) {
+            // Unmap the old identity mapping and remap with fresh frame
+            vmm_unmap_page(current_dir, vaddr);
+            tlb_invalidate_page(vaddr);
+            result = vmm_map_page(current_dir, vaddr, phys_frame,
+                                  PAGE_PRESENT | PAGE_WRITABLE);
+        }
 
         if (result != MEMORY_OK) {
             pmm_free_frame(phys_frame);
             return result;
         }
-        
+
         // Ensure TLB knows about the new mapping
         tlb_invalidate_page(vaddr);
     }
+    print("[HEAP] expand_heap: all pages mapped\n");
     
     // Create a new free block from the expanded space
     heap_block_t* new_block = (heap_block_t*)heap_state.current_end;
