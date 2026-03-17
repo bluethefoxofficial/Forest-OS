@@ -257,7 +257,8 @@ build_binutils() {
                 --disable-nls \
                 --disable-werror \
                 --disable-multilib \
-                --enable-64-bit-bfd" \
+                --enable-64-bit-bfd \
+                --enable-gprofng=no" \
             2>&1 | tail -5
     else
         info "binutils already configured for ${target}, skipping configure."
@@ -292,33 +293,40 @@ build_gcc() {
 
     if [[ ! -f "Makefile" ]]; then
         info "Configuring GCC for ${target}..."
-        "${GCC_SRC}/configure" \
-            --target="${target}" \
-            --prefix="${INSTALL_DIR}" \
-            --with-sysroot="${SYSROOT_DIR}" \
-            --disable-nls \
-            --enable-languages=c,c++ \
-            --without-headers \
-            --disable-libssp \
-            --disable-libgomp \
-            --disable-libquadmath \
-            --disable-threads \
-            --disable-libatomic \
-            --disable-libstdcxx-pch \
-            --disable-libstdcxx \
-            --with-newlib \
-            --disable-multilib \
-            ${arch_flags} \
+        bash -c " \
+            export PATH='/usr/bin:/bin:/usr/local/bin:\$PATH'; \
+            export CONFIG_SHELL='/bin/bash'; \
+            export SED='/usr/bin/sed'; \
+            export SORT='/usr/bin/sort'; \
+            export GREP='/usr/bin/grep'; \
+            ${GCC_SRC}/configure \
+                --target='${target}' \
+                --prefix='${INSTALL_DIR}' \
+                --with-sysroot='${SYSROOT_DIR}' \
+                --disable-nls \
+                --enable-languages=c,c++ \
+                --without-headers \
+                --disable-libssp \
+                --disable-libgomp \
+                --disable-libquadmath \
+                --disable-threads \
+                --disable-libatomic \
+                --disable-libstdcxx-pch \
+                --disable-libstdcxx \
+                --with-newlib \
+                --disable-multilib \
+                --disable-shared-libgcc \
+                ${arch_flags}" \
             2>&1 | tail -5
     else
         info "GCC already configured for ${target}, skipping configure."
     fi
 
     info "Building GCC (${MAKE_JOBS} jobs) — this may take several minutes..."
-    make -j"${MAKE_JOBS}" all-gcc 2>&1 | tail -3
-    make -j"${MAKE_JOBS}" all-target-libgcc 2>&1 | tail -3
-    make install-gcc 2>&1 | tail -3
-    make install-target-libgcc 2>&1 | tail -3
+    bash -c "export PATH='/usr/bin:/bin:/usr/local/bin:\$PATH'; make -j'${MAKE_JOBS}' all-gcc" 2>&1 | tail -3
+    bash -c "export PATH='/usr/bin:/bin:/usr/local/bin:\$PATH'; make -j'${MAKE_JOBS}' all-target-libgcc" 2>&1 | tail -3
+    bash -c "export PATH='/usr/bin:/bin:/usr/local/bin:\$PATH'; make install-gcc" 2>&1 | tail -3
+    bash -c "export PATH='/usr/bin:/bin:/usr/local/bin:\$PATH'; make install-target-libgcc" 2>&1 | tail -3
 
     success "GCC for ${target} installed."
 }
