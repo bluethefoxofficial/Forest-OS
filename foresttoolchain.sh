@@ -24,12 +24,12 @@
 #   --help              Show this help
 # =============================================================================
 
-set -euo pipefail
-
 # ---------------------------------------------------------------------------
-# Ensure PATH includes standard system directories
+# Ensure PATH includes standard system directories (must be before 'set')
 # ---------------------------------------------------------------------------
 export PATH="/usr/bin:/bin:/usr/local/bin:/usr/sbin:/sbin:${PATH}"
+
+set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Colour helpers
@@ -61,7 +61,8 @@ BUILD_GCC_DIR="${TOOLCHAIN_DIR}/build-gcc"
 # ---------------------------------------------------------------------------
 # Versions & download URLs
 # ---------------------------------------------------------------------------
-BINUTILS_VERSION="2.39"
+# Use binutils 2.43 for GCC 15 compatibility (2.39 has issues with gprofng)
+BINUTILS_VERSION="2.43"
 GCC_VERSION="12.2.0"
 
 BINUTILS_TARBALL="binutils-${BINUTILS_VERSION}.tar.xz"
@@ -243,22 +244,28 @@ build_binutils() {
 
     if [[ ! -f "Makefile" ]]; then
         info "Configuring binutils for ${target}..."
-        "${BINUTILS_SRC}/configure" \
-            --target="${target}" \
-            --prefix="${INSTALL_DIR}" \
-            --with-sysroot="${SYSROOT_DIR}" \
-            --disable-nls \
-            --disable-werror \
-            --disable-multilib \
-            --enable-64-bit-bfd \
+        bash -c " \
+            export PATH='/usr/bin:/bin:/usr/local/bin:\$PATH'; \
+            export CONFIG_SHELL='/bin/bash'; \
+            export SED='/usr/bin/sed'; \
+            export SORT='/usr/bin/sort'; \
+            export GREP='/usr/bin/grep'; \
+            ${BINUTILS_SRC}/configure \
+                --target='${target}' \
+                --prefix='${INSTALL_DIR}' \
+                --with-sysroot='${SYSROOT_DIR}' \
+                --disable-nls \
+                --disable-werror \
+                --disable-multilib \
+                --enable-64-bit-bfd" \
             2>&1 | tail -5
     else
         info "binutils already configured for ${target}, skipping configure."
     fi
 
     info "Building binutils (${MAKE_JOBS} jobs)..."
-    make -j"${MAKE_JOBS}" 2>&1 | tail -3
-    make install 2>&1 | tail -3
+    bash -c "export PATH='/usr/bin:/bin:/usr/local/bin:\$PATH'; make -j'${MAKE_JOBS}'" 2>&1 | tail -3
+    bash -c "export PATH='/usr/bin:/bin:/usr/local/bin:\$PATH'; make install" 2>&1 | tail -3
 
     success "binutils for ${target} installed."
 }
